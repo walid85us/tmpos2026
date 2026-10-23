@@ -4,7 +4,7 @@
 
 **Audience.** The repository owner, who types commands in Replit's Shell and tests in an ordinary browser. Commands are written exactly as typed. Where this runbook states what a command prints or what the app shows, the statement comes from the tooling's or the app's source; where it could not be checked in source it says "record what you see".
 
-**How the examples were checked.** The command list, flags, refusal codes, labels, accounts and fixture names below were read from `tests/qa/interactive/*.mjs` and from the output of `npm run qa:interactive -- status` of run `qa-20261023t0805-5efa`, generation 1. Menu and button names were read from `src/`. Record ids are not listed here because they change on every start and reset; read them from `status`.
+**How the examples were checked.** The command list, flags, refusal codes, labels, accounts and fixture names below were read from `tests/qa/interactive/*.mjs` and from the output of `npm run qa:interactive -- status` of run `qa-20261023t0805-5efa`, generation 1. Menu and button names were read from `src/`. QA-INTERACTIVE-P1-R1 rechecked the commands and the quoted page texts against run `qa-20261023t2047-d5e0`, and ran U01–U05's steps there by automation (§10); its text size, width and fresh sign-ins were set the automated way (font-size and viewport emulation, a new browser profile), not through the browser settings the owner uses. Record ids are not listed here because they change on every start and reset; read them from `status`.
 
 ---
 
@@ -30,20 +30,26 @@
 
 Everything is typed in Replit's Shell, in the repository root. The `--` after the script name is required. Adding `--silent` (`npm run --silent qa:interactive -- status`) hides npm's own extra lines when a command fails.
 
+Each line below is one complete command; type one line at a time (nothing here is a pipeline). The label at the end of a `scenario` or `evidence` line can be swapped for another fixture or account label from `status`.
+
 ```
 npm run qa:interactive -- help
-npm run qa:interactive -- start [--origin https://<host>] [--project demo-<id>]
+npm run qa:interactive -- start
 npm run qa:interactive -- status
 npm run qa:interactive -- scenario normal
-npm run qa:interactive -- scenario held-void [invoice label]       (default inv-held)
-npm run qa:interactive -- scenario aged-sign-in [account label]    (default owner-a)
-npm run qa:interactive -- scenario stalled-reauth [account label]  (default owner-a)
+npm run qa:interactive -- scenario aged-sign-in owner-a
+npm run qa:interactive -- scenario stalled-reauth owner-a
+npm run qa:interactive -- scenario held-void inv-held
 npm run qa:interactive -- release
-npm run qa:interactive -- evidence [label|id ...]   |   evidence --recent
-npm run qa:interactive -- probe [--positive]
+npm run qa:interactive -- evidence
+npm run qa:interactive -- evidence inv-held
+npm run qa:interactive -- evidence --recent
+npm run qa:interactive -- probe
 npm run qa:interactive -- reset
 npm run qa:interactive -- stop
 ```
+
+Options and defaults: `start` also takes `--origin https://<host>` and `--project demo-<id>` (§2.2; neither is needed on Replit). Without a label, `scenario held-void` uses `inv-held`, and `scenario aged-sign-in` and `scenario stalled-reauth` use `owner-a`. `evidence` takes one or more customer, draft or invoice labels or record ids. `probe --positive` also voids `inv-probe` (§2.6).
 
 A refusal prints `Refused (<code>): <message>` (on standard error) and exits with code 2. Any other failure prints `Failed: <message>` (on standard error) and exits with code 1 — for example an unknown scenario, `probe` while a fault is pending, any command the session refuses because it is not ready (`Failed: the session is <state>`), or `the session did not answer in time`. Two outcomes exit with code 1 without a `Failed:` prefix, printed as ordinary output: `another start won (run <id>)` (§2.2) and `stop` finding the supervisor still running (§2.7).
 
@@ -158,7 +164,12 @@ then press Replit's **Run** button (or type `npm run dev`). Replit may also star
 
 ## 3. The session you have now
 
-**Preview URL (this workspace):** `https://70fecabe-2df6-4353-8c25-cf5ce1c5075d-00-16avf9cycmdtz.worf.replit.dev/` — the session left running for the hand-over is run `qa-20261023t1522-8ffb`, generation 1 (every `start` makes a new run id and every `reset` a new generation; `status` and the corner label show the current ones). Open exactly this address: the front answers only requests whose Host is exactly the Preview host (anything else gets `404 {"error":"host_not_served"}`). Sign in at `/login`.
+**Preview URL (this workspace):** `https://70fecabe-2df6-4353-8c25-cf5ce1c5075d-00-16avf9cycmdtz.worf.replit.dev/`. Open exactly this address: the front answers only requests whose Host is exactly the Preview host (anything else gets `404 {"error":"host_not_served"}`). Sign in at `/login`.
+
+**The session handed over in QA-INTERACTIVE-P1-R1** (2026-10-23, ready 20:57:07Z): run `qa-20261023t2055-fa9b`, generation 1, no fault armed or held, no fault record yet, and a fresh database (so the login limiter has spent nothing). Every `start` makes a new run id and every `reset` a new generation; `status` and the corner label show the current ones, and only they count — the values here are a record, not a promise that this run is still up (a reboot ends it; §7).
+
+- **Its ownership record** (`.cache/tmpos-qa/current.json`, boot `08971338…`): supervisor pid 120171, emulators 121025, Firestore emulator JVM 122616, database server 124452 on the cluster `.cache/tmpos-qa/tmp/tmpos-s1b-LnrNHO`; ports: front 5000 (public), tenant runtime 39169, Auth emulator 9399, Firestore emulator 8385 (loopback).
+- **What it runs.** The QA bundle is built by `start` from this checkout's files. Commit `04a9529` (the hand-over's HEAD) and `089c622` (the QA tool) have identical `server/`, `src/`, `tests/`, `scripts/`, `package.json`, `package-lock.json`, `vite.config.ts`, `tsconfig.json`, `index.html`, `firebase-applet-config.json` and `firestore.rules` trees. The checkout matched them: no tracked file in those paths differed, and there was no untracked file under `server/`, `src/`, `scripts/` or `tests/qa/` (the only untracked test paths, `tests/browser/capture-preview.mjs` and `tests/quality/fixtures/`, are not part of the QA bundle). The built bundle embeds its run id, so its bytes differ per run. For this run, the SHA-256 of the `sha256sum` listing of its 12 files (sorted by path) begins `c37e53a5aff75738`.
 
 ### 3.1 Accounts (fictional; shortened from `status`, which prints the same five rows)
 
@@ -187,10 +198,10 @@ Use the email and password fields on the sign-in page. The Google sign-in button
 | draft | `draft-edit` | one line, 42.00 USD, customer `cust-ada` | item 6 (edit, conflict) |
 | draft | `draft-discard` | one line, 15.00 USD, customer `cust-ben` | item 6 (discard) |
 | draft | `draft-issue` | two lines, 29.00 + 30.00 USD, customer `cust-ada` | item 7 (issue) |
-| invoice | `inv-void` | issued, 50.00 USD, `cust-ada` | item 7 (void) |
-| invoice | `inv-held` | issued, 50.00 USD | item 8 (held void) |
-| invoice | `inv-stall` | issued, 50.00 USD | item 9 (stalled sign-in) |
-| invoice | `inv-probe` | issued, 50.00 USD | item 10 (refusals, positive control) |
+| invoice | `inv-void` | issued, 50.00 USD, `cust-ada` | U04; item 7 (void) |
+| invoice | `inv-held` | issued, 50.00 USD | U05; item 8 (held void) |
+| invoice | `inv-stall` | issued, 50.00 USD | U02, U03; item 9 (stalled sign-in) |
+| invoice | `inv-probe` | issued, 50.00 USD | U01 (held attempt); item 10 (refusals, positive control) — not both in one generation |
 | invoice | `inv-voided` | issued, then voided during the seed (reason "Issued by mistake") | an already-terminal invoice |
 | invoice | `inv-b` | issued, 9.00 USD, `cust-zoe`, tenant-b / `store-b-main` | item 5 |
 
@@ -216,9 +227,118 @@ The table holds only while nobody has changed a level. Item 4 changes one and re
 
 ---
 
-## 4. The twelve owner checks
+## 4. The owner's checks U01–U16
 
-Each item says which account and fixture to use, the exact clicks, which operator commands to run and when, and what to compare. The result lines are deliberately empty: **only the owner decides**. Two sessions at once (item 4, 5, 6) need a second browser or a private window/profile, because the signed-in user is stored per browser profile.
+The owner's workload is the sixteen checks U01–U16 of the critical-QA shortlist (`TMPOS2026-critical-qa-shortlist.md`), beginning with U01–U05 below. That shortlist file is **not in this repository**: this runbook gives procedures for U01–U05 only, so **U06–U16 cannot be carried out from this runbook** until the shortlist is supplied. The backend checks B01–B12 belong to the operator (§9), not the owner. The twelve procedures of §4A are operator reference material from QA-INTERACTIVE-P1, **not** additional owner checks.
+
+Every result line is **PASS / FAIL — PENDING**: only the owner decides. The operator's automated run of the same steps (§10) is separate evidence and marks nothing.
+
+### 4.1 Readiness
+
+| Check | What it needs here | Readiness in this stack |
+|---|---|---|
+| U01 | a held void attempt on `inv-probe`; the recovery card at 320×600 with 24 px text | ready; the operator's automated run of these steps passed (§10); owner PENDING |
+| U02 | an aged sign-in, then a held provider sign-in request on `inv-stall` | ready; operator run passed; owner PENDING |
+| U03 | a second held sign-in request on `inv-stall`, Stop waiting, leave, release | ready; operator run passed; owner PENDING |
+| U04 | an explicit void of `inv-void` with a chosen reason | ready; operator run passed; owner PENDING |
+| U05 | a held void on `inv-held`, leave and return, one Check again | ready; operator run passed; owner PENDING |
+| U06–U14, U16 | defined in the shortlist, which is not in this checkout | not executable from this runbook; owner PENDING |
+| U15 | an isolated admin console | blocked here: this stack has no admin entry and the front routes no admin API (§5, §8). This does not block the tenant invoice checks |
+
+### 4.2 Before U01: one browser, one account, three sign-ins
+
+- **Who does what.** Steps marked **Shell** are typed in Replit's Shell. **Operator check** lines are Shell commands that read the database or the fault records. Lines marked **Network (optional)** are things you can see in your own browser's developer tools; nothing needs to be intercepted, overridden or pasted, and nothing you see there should be copied anywhere.
+- **Write down the invoice numbers.** Run `npm run qa:interactive -- status`, then `npm run qa:interactive -- evidence inv-probe inv-stall inv-void inv-held`. All four are `issued`, each with one `store.invoice.issue` audit, and each shows its `number`. The page shows numbers, not labels. Then run `npm run qa:interactive -- evidence` and keep the summary (it holds `invoices_voided` and the `idempotency` totals for U04 and U05).
+- **Getting a fresh sign-in.** The shop has no Sign out control. Wherever a step says "sign in", open a **new private (incognito) window**, go to the Preview's `/login`, and sign in with `owner-a@tmpos-qa.test` and the password from `status`. Close the earlier window first. A private window is a new browser profile; it is what the operator's run did.
+- **Login budget (the real limiter, unchanged).**
+  - Every visitor reaches the runtime as one client (§6). Every sign-in and every recent sign-in sends one tenant login exchange.
+  - Two limits apply: **10 attempts per 60 seconds for that one client** (counted before the credential is checked) and **5 verified logins per account per 5 minutes**. Each window opens at its first attempt.
+  - U01–U05 in this order need **three** `owner-a` logins (U01, U02, U04), which fits both limits. Do not run `probe` while you test: it signs `tech-a` and `owner-a` in by itself and spends the same budget.
+  - If a sign-in is refused for too many requests, the page may not say how long to wait. Wait one minute (the client limit), or five minutes if it is refused again (the account limit), then try again. Do not `reset` in the middle: it discards the run's records.
+- **Order and timing.**
+  - Do the checks in this order. U01 uses its own invoice. U02 prepares the aged sign-in that U03 and U04 rely on.
+  - U04's sign-in makes U05's void go through without a prompt, so **send U05's void within 10 minutes of U04's sign-in**.
+  - U01's void must likewise be sent within 10 minutes of U01's sign-in.
+- **Fixtures are used up.** U01 voids `inv-probe`, U04 voids `inv-void` and U05 voids `inv-held`. After U01, `probe --positive` and §4A items 7, 8 and 10 no longer find those invoices `issued`. To start over with fresh fixtures, run `npm run qa:interactive -- reset` and sign in again.
+
+### U01 — Recovery controls are reachable
+
+- Account `owner-a`. Fixture: `inv-probe` (U01's held-attempt fixture; `inv-held` is kept for U05).
+1. Sign in (login 1; see §4.2). Then **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open the row with `inv-probe`'s number.
+2. **Shell:** `npm run qa:interactive -- scenario held-void inv-probe` (`status` then shows `armed=held-void inv-probe`).
+3. **Void invoice…** → choose a reason → **Void invoice**, once. The page reports the attempt as not confirmed (the edge answers 502; §6). Close the confirmation and the invoice dialog, so that the card **Void of invoice <n>** stays on the page.
+4. Text size and width. Set the browser's font size to 24 px (Chrome: Settings → Appearance → Font size → **Very large**), and make the page 320 CSS px wide and 600 high (DevTools → device toolbar → Responsive, 320 × 600). Write down the method you used. Set the font size back afterwards.
+5. Scroll to the card. Its heading names the invoice number, and **Check again**, **Check invoice** and **Dismiss** are readable and not covered.
+6. Press Tab until **Check invoice** has focus, then press Enter. It reads that one invoice and says what it shows now (for example `Invoice <n> is voided now. This does not show which request voided it.`).
+7. Click **Dismiss** with the mouse. The card goes, and nothing is sent to void the invoice.
+- **Operator check:** `npm run qa:interactive -- status` shows a `fault record` for `inv-probe`, with `committed` true when the held request ran. `npm run qa:interactive -- evidence inv-probe` then shows `voided` with exactly one `store.invoice.void` audit. That audit is the held attempt's own void; nothing comes from **Check invoice** or **Dismiss**. **Network (optional):** Enter sent one `GET …/invoices/<id>`, and Dismiss sent nothing.
+
+Result: PASS / FAIL — PENDING
+Notes:
+
+### U02 — A stalled sign-in releases the page at its deadline
+
+- Account `owner-a`. Fixture: `inv-stall`.
+1. Close the browser window. **Shell:** `npm run qa:interactive -- scenario aged-sign-in owner-a` (`status` shows `aged-sign-in pending=1`). Sign in again in a new private window (login 2). This login's sign-in time is recorded as 11 minutes old, so the void asks for a recent sign-in at once (§6).
+2. **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open `inv-stall` → **Void invoice…** → choose a reason → **Void invoice**. The page asks **Confirm your sign-in to void this invoice**. That first send was refused before anything ran.
+3. **Shell:** `npm run qa:interactive -- scenario stalled-reauth owner-a`.
+4. Type the password and press **Confirm sign-in** once; start timing. The QA front now holds that sign-in request instead of forwarding it; `status` shows `held=owner-a since <time>`.
+5. At about 30 seconds the page says `Not voided: this page stopped waiting for your sign-in after 30 seconds and sent nothing for this invoice. You can try again.` It says it stopped waiting; it does not say the provider request was cancelled. The password field is empty, and you can type in it.
+6. Close the dialog and the invoice, then click **Customer Directory** in the sidebar (no reload). It opens normally.
+7. **Shell:** `npm run qa:interactive -- release` (it prints `deliveredToBrowser`). Nothing on the page reopens, and no further void is sent.
+
+Result: PASS / FAIL — PENDING
+Notes:
+
+### U03 — Stop waiting prevents the old attempt from resuming
+
+- Account `owner-a`, still on U02's aged login. Fixture: `inv-stall` (still `issued`).
+1. **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open `inv-stall` → **Void invoice…** → reason → **Void invoice**. The sign-in is asked for again (this send is also refused before running).
+2. **Shell:** `npm run qa:interactive -- scenario stalled-reauth owner-a`. Type the password and press **Confirm sign-in**. The sign-in request is now held at the front, before any tenant-session renewal can be sent.
+3. Press **Stop waiting** within a few seconds, well before the 30-second deadline. The page says it stopped waiting and sent nothing for this invoice.
+4. Close the dialog and the invoice, and click **Customer Directory** in the sidebar.
+5. **Shell:** `npm run qa:interactive -- release`.
+6. Confirm that no old review or void reopens.
+- **Operator check:** `npm run qa:interactive -- evidence inv-stall` is still `issued`, with one audit.
+- **Network (optional):** after **Confirm sign-in** there is no `POST /api/v1/session/login` and no `POST …/void`. Requests that do appear after the release are the identity SDK's own events and the page's ordinary reads, not the abandoned renewal or void: `accounts:lookup`, `securetoken … token`, the Firestore `Listen` channel, and plain `GET /api/v1/session` or `GET /api/v1/customers`.
+
+Result: PASS / FAIL — PENDING
+Notes:
+
+### U04 — Explicit void changes the selected invoice only
+
+- Account `owner-a`, still on the aged login. Fixture: `inv-void`.
+1. **Operator check:** `npm run qa:interactive -- evidence inv-void` (`issued`, with its `number`) and `npm run qa:interactive -- evidence` (note `invoices_voided`). Then **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open `inv-void`, and note its number, customer and Total.
+2. **Void invoice…**: the confirmation is titled `Void invoice <n>?` with the same customer and Total, and no reason is selected.
+3. Choose a reason and press **Void invoice**. Because the login is aged, the page asks you to confirm your sign-in. Enter the password and press **Confirm sign-in** (login 3). The confirmation stays open and nothing is voided yet. Choose the reason again if it was cleared, then press **Void invoice**.
+4. Wait for the server's confirmation. Then reload the page and open `inv-void` again: it shows **Voided**, the reason you chose, the void time, and the same number, customer and Total.
+- **Operator check:** `npm run qa:interactive -- evidence inv-void` shows `voided`, a `void` row with your reason, and exactly one `store.invoice.void` audit. `npm run qa:interactive -- evidence` shows `invoices_voided` one higher than in step 1.
+
+Result: PASS / FAIL — PENDING
+Notes:
+
+### U05 — A lost answer recovers without duplication
+
+- Account `owner-a`, signed in recently by U04's step 3. The void must be sent within 10 minutes of that sign-in (§4.2). Fixture: `inv-held`.
+1. **Operator check:** `npm run qa:interactive -- evidence inv-held` (`issued`) and `npm run qa:interactive -- evidence` (note `invoices_voided` and the `idempotency` total). **Shell:** `npm run qa:interactive -- scenario held-void inv-held`.
+2. **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open `inv-held` → **Void invoice…** → reason → **Void invoice**, once. The page says the void is not confirmed and that the server may or may not have voided it. That is the simulated lost answer, not a product failure: the Replit edge answers **502** after the QA front withholds the runtime's answer. **Network (optional):** the `POST …/void` answered 502.
+3. Leave (**Customer Directory**) and come back (**Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)`). The card still holds the unconfirmed attempt, and nothing new was sent.
+4. Press **Check again** once, when it is enabled. The card then says `Invoice <n> at Northwind Main (QA) was voided.`
+- **Operator check.** First read the `fault record` for `inv-held` with `npm run qa:interactive -- status`:
+  - `committed` true means the void ran before its answer was withheld.
+  - `committed` false means the runtime refused it before running; the commonest cause is a sign-in older than 10 minutes. The browser still sees only the 502, so **Check again** cannot fix it. Run `npm run qa:interactive -- scenario normal`, sign in again in a new private window, arm again with `npm run qa:interactive -- scenario held-void inv-held`, and repeat from step 2.
+
+  Then `npm run qa:interactive -- evidence inv-held` shows `voided` with exactly one `store.invoice.void` audit. `npm run qa:interactive -- evidence` shows `invoices_voided` one higher and the `idempotency` total one higher for the pair: the Check again is a replay, not a second record.
+- **Network (optional):** both `POST …/void` requests go to the same address with the same `Idempotency-Key` value and the same payload. Compare them on screen and do not copy them anywhere.
+
+Result: PASS / FAIL — PENDING
+Notes:
+
+---
+
+## 4A. Operator reference procedures (QA-INTERACTIVE-P1's twelve items — not owner checks)
+
+These twelve procedures are kept as operator reference material: they show how to exercise the rest of the stack. They are not owner assignments and carry no result lines. Two sessions at once (item 4, 5, 6) need a second browser or a private window/profile, because the signed-in user is stored per browser profile.
 
 Navigation names (left sidebar): **Customer Directory**, **Employees**, **Invoices**. Employees has a **Permissions** tab. The Invoices page has two server sections: **Server drafts** (button **Show server drafts**) and **Issued invoices** (button **Show issued invoices**); each has a **Choose a store…** list.
 
@@ -231,8 +351,6 @@ Navigation names (left sidebar): **Customer Directory**, **Employees**, **Invoic
 4. Confirm the corner label `QA ONLY · synthetic data · run <id>` and that `<id>` and the generation equal `status`.
 5. Run `start` again. Expect `A QA session is already running (run <same id>); nothing new was started and no other port is used.` To check nothing listens on 5001, use a listener listing if the Shell has one (for example `ss -ltn`); the tool itself never opens 5001.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 2 — Synthetic sign-in without live services
 
@@ -243,8 +361,6 @@ Notes:
 4. Confirm that you did not need any DevTools request override, extra extension, or pasted cookie.
 - Operator command: none needed; `status` shows the same run id.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 3 — Customers persist through the real API
 
@@ -256,8 +372,6 @@ Notes:
 5. Reload the page and open the profile again; confirm the saved phone.
 6. Evidence: before step 2 run `npm run qa:interactive -- evidence` (note `tenant-a` `customers` and the `tenant.customer.create` count; on a fresh seed they are 2 and 2). After step 5 run `npm run qa:interactive -- evidence --recent` (the new customer is first), then `npm run qa:interactive -- evidence <id from the address>`. Compare: the row's `name`, `phone`, `email`, `created_at` equal the screen; `row_version` after the edit is one higher than after the add (the smoke run saw 2 after one edit); `audits` lists the actions recorded for that customer (the edit appears as `tenant.customer.update`, count 1 after one edit); the creation is counted in `tenantCreateAudits`, which is one higher than before (3 on a fresh seed).
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 4 — Server-saved role panels decide access
 
@@ -268,8 +382,6 @@ Notes:
 4. Compare with evidence: `npm run qa:interactive -- evidence` again — the `sales_staff` / `customers` entry shows `view` and a higher `version`, and the audit counts have grown by the saved change; no customer was added.
 5. Restore: choose **Create** again for **Sales Associate**, a reason, **Save to server** (confirm the sign-in if asked). Run `evidence`: the level is back to `create` and the `version` is higher still (a version does not go back). The same can be repeated in **Server-saved Invoices level**.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 5 — Store and tenant isolation hold
 
@@ -282,8 +394,6 @@ Notes:
 - Store choice: as `owner-a`, **Invoices** → **Show issued invoices** → **Choose a store…** lists `Northwind Main (QA)` and `Northwind Harbor (QA)` (Harbor is empty); as `manager-a` the list should offer only `Northwind Main (QA)`; as `owner-b` only `Southfield Central (QA)`. Record what each list shows.
 - **Invoice half (read-only request from the browser's own console):** the app has no address that opens an invoice by id, so use one plain same-origin read. Signed in as `owner-b`, open the browser's developer Console and run `fetch('/api/v1/stores/<store-a-main id>/invoices/<inv-void id>').then(r => r.text().then(t => console.log(r.status, t)))`, with the two ids from `status`. Expect a refusal (the smoke run saw 403 with a body naming only `forbidden` and a request id) and no data of tenant-a. This is an ordinary request with your own session, not a request override. Then run `evidence inv-void inv-b` before and after to show both invoices are untouched.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 6 — Draft lifecycle and conflicts use PostgreSQL
 
@@ -294,8 +404,6 @@ Notes:
 4. In tab 2 (older) change something and save. Confirm the app's existing conflict view (**Your changes and the draft on the server now**) and its review flow; do not force it. Run `evidence draft-edit` again: `version` is unchanged by the conflicted save.
 5. Discard: open `draft-discard` → **Discard draft…** → confirm. `evidence draft-discard` shows `status` `discarded`; `evidence` shows `drafts_discarded` one higher and the `idempotency` counts (counts only; digests are never shown).
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 7 — Issue and void follow the adopted authority rules
 
@@ -306,8 +414,6 @@ Notes:
 4. Confirm the dialog title reads `Void invoice <number>?` for the right number, choose a reason (for example **Issued by mistake**), press **Void invoice** once.
 5. Reload. `evidence inv-void`: `state` `voided`, `void.reason_code`, `voided_at`, and the audits for that invoice; `evidence` summary: `invoices_voided` one higher (2 on a fresh seed) and `invoices_issued` one higher (6) after the issue. Compare that each action appears once in the audits, with no duplicate.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 8 — A held outcome recovers without a duplicate action
 
@@ -319,8 +425,6 @@ Notes:
 5. Compare with `evidence inv-held` and `evidence`: the page's statement agrees with the database; the invoice has exactly one void audit (the resend is an idempotent replay, not a second void); `invoices_voided` rose by exactly one.
 6. Afterwards `npm run qa:interactive -- scenario normal` (harmless if already used).
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 9 — Stalled recent sign-in remains escapable
 
@@ -333,8 +437,6 @@ Notes:
 4. Release the late answer: `npm run qa:interactive -- release`. It prints `releasedAt`, the emulator's `upstreamStatus`, and `deliveredToBrowser` (true only if the browser was still connected). What the app does with a late answer is its own 30-second rule; record whether the old review revives or sends anything.
 5. Navigate elsewhere in the app and back (normal navigation should still work). `evidence inv-stall`: `state` still `issued`, audit list unchanged from step 1. Finish with `npm run qa:interactive -- scenario normal`.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 10 — Backend refusals change no business state
 
@@ -344,8 +446,6 @@ Notes:
 3. `evidence inv-probe` and `evidence` again. Expect the invoice still `issued`, no new audit, and the business counts unchanged. Compare the `idempotency` counts too: if they changed, record by how much (the output shows counts only) and say which request is the likely cause; whether a refused request leaves such a record is not established by this runbook.
 4. Positive control: `npm run qa:interactive -- probe --positive` (it repeats the four refusals and then voids `inv-probe` as `owner-a`). The last entry is `positive control: owner-a`. `evidence inv-probe`: `state` `voided`, with its void row and audit.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 11 — Responsive controls remain usable
 
@@ -356,8 +456,6 @@ Notes:
 4. At each size scroll normally and operate the recovery or close controls by pointer **and** keyboard (Tab to the control, Enter or Space).
 5. Confirm the sidebar never covers the intended action and no hidden styling or forced click was needed. Record the size, text size and what overflowed, if anything.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ### Item 12 — Reset and stop affect only QA-owned resources
 
@@ -367,8 +465,6 @@ Notes:
 4. `npm run qa:interactive -- stop`, then `npm run qa:interactive -- status` (expect `No QA session is running.`). The Preview no longer shows the QA page; `ls .cache/tmpos-qa/runs` has no run directory for this run (`last-run.log` stays in `.cache/tmpos-qa`; `last-emulators.log` is written there only after a failed start, so one seen now comes from an earlier failed start).
 5. Confirm nothing else changed: `git status --short` shows the same files as before, your ordinary dev server comes back with Replit's **Run** button, and unrelated files are untouched. To leave the session ready for more QA, stop the dev server (Replit **Stop**) if Replit restarted it, then `npm run qa:interactive -- start` once.
 
-Result: PASS / FAIL — PENDING
-Notes:
 
 ---
 
@@ -391,7 +487,9 @@ Notes:
 - **`aged-sign-in`** — makes the next verified login of that account carry a sign-in time 11 minutes old, so the 10-minute recent-sign-in rule asks at once. One use; cleared by `scenario normal` and by `reset`. `status` shows `aged-sign-in pending=<n>` until used.
 - **Only one** of `held-void` and `stalled-reauth` at a time; `scenario normal` disarms and releases; `reset` clears all faults; `stop` disarms.
 
-**Rate limit.** The real login limiter applies. Every visitor reaches the runtime as one client address (the front's loopback peer), so about eight sign-ins within a minute are answered 429 (the smoke run hit this). Wait a few minutes, or `reset` (a fresh database also clears the limiter state). Anyone else who has the Preview URL shares that budget.
+**Rate limit.** The real limiter applies unchanged (`RATE_LIMITS` in `server/runtime/rateLimit.ts`, fixed windows that open at the first attempt). The QA runtime trusts no proxy (`TRUSTED_PROXY_CIDRS` is `127.0.0.2/32`, which nothing connects from), so it buckets every request by its own socket peer — the front on loopback — and every visitor is **one client**. The front also drops every `forwarded`, `x-real-ip`, `x-forwarded-*` and `x-replit-*` header it receives and sets its own `X-Forwarded-For`, which the runtime does not trust. For the tenant login exchange (`POST /api/v1/session/login`, which every sign-in and every recent sign-in sends) two buckets apply: **10 attempts per 60 seconds per client**, counted before the credential is checked, and **5 verified logins per account per 5 minutes**. Every request, logins included, also spends the client's general bucket of 300 per 60 seconds. A refusal is a 429 whose `Retry-After` is the rest of that window. In QA-INTERACTIVE-P1's smoke the eighth login exchange, about 44 seconds after the first, was refused; it was the sixth `owner-a` login inside five minutes, so the account bucket is the one its records show spent (its 429 body was not kept). Remedies: wait for the window (at most one or five minutes), or `reset` (a fresh database also clears the limiter state). Nothing in QA forges a client address, raises a limit or exempts a request. Anyone else who has the Preview URL shares the client bucket.
+
+**Fault records survive `reset`.** `reset` disarms every fault, but the list of the last five fault records that `status` prints is kept, and a record does not say which generation it came from. Compare a record's `at` (or `heldAt`) time with the time you acted; a fresh `start` begins with an empty list.
 
 **Evidence** runs in a READ ONLY transaction as the database owner, on fixed queries whose columns are named from migrations 001–035. It returns only the rows of the labels or ids you ask for, at most five per kind for `--recent`, plus per-tenant counts. It never returns session material, keys or idempotency digests; idempotency is reported **as counts only** (`total`, `completed`, `pending`).
 
@@ -417,5 +515,100 @@ Notes:
 - The legacy browser-only screens listed in §5 (their data is not server data).
 - Deployment, the managed database, backups, real providers (payment, email, shipping).
 - Multi-device and real email flows (password reset, verification mail, push or notification delivery).
+
+## 9. Operator backend evidence B01–B12
+
+These are the operator's checks, not the owner's. Each row names the assertions that carry it.
+- **CI evidence** is exact-SHA CI 39980272453 on `089c622`, both jobs green on attempt 1. Its executable trees equal the hand-over's `04a9529` (§3), so it applies unchanged; each named test passed there in the CI step given.
+- **Live evidence** is this stage's own runs through the QA session (§10).
+
+Layers are labelled separately:
+- **PG**: a disposable PostgreSQL in CI.
+- **HTTP**: a real loopback socket without a real database.
+- **contract**: unit, in-memory or static checks. A static or source-order check is not behavioural evidence.
+- **proxy**: the public Preview origin, live in this stage.
+
+CI has no public-proxy layer. Nothing here is production evidence, and every gap is carried as written.
+
+| ID | Verdict | Layers | Named assertions (file → test ids; CI step) | Gaps kept explicit |
+|---|---|---|---|---|
+| B01 revoked session/authority | PASS | PG | **Admin:** `tests/db/adminRevocation.integration.test.mjs` M5R-03a, M5R-04a and `adminBoundary.integration.test.mjs` M5E-B3, M5E-G (steps "Administrative revocation ordering…", "Administrative session boundary…"). **Tenant:** `tenantAdmission` M5A-04b; `tenantSessionOrdering` M5T-D2; on shipped routes `invoiceDraftDiscardHttp` IDDH-05, `invoiceDraftsHttp` IDH-09, `invoiceVoidHttp` IVH-10, `invoiceIssueHttp` IIH-06 (a replay from a revoked session is 401, not the stored 201). | M5A-04b and M5T-* reach the tenant session through harness-only witness routes (M5T-L1 proves those are not shipped). During a void, a revocation is exercised in flight only as a session revocation, a level narrowing and a sign-in age. IDDH-05's "nothing written" is the delta after the owner's change. |
+| B02 foreign tenant / unauthorized store | PASS | PG | **Customers:** `tenantEntry` M7TE-14; `customerDetail` M7CD-03; `customerDirectory` M7C-04 (pages never cross tenants); `customerEditHttp` M7CH-03. **Unauthorized-store invoices:** `invoiceDraftsHttp` IDH-02; `invoiceIssueHttp` IIH-02; `invoiceVoidHttp` IVH-03; `invoiceDraftRoutine` IDR-04. | G-ISOLATION stays OPEN in doc 08. DA-93 (a compromised runtime holding the issuer key) is open. Firestore holds no customer or invoice path (catch-all deny), so the emulator gives no isolation evidence for them. |
+| B03 positive control; Host, Origin and CSRF refusals; no prohibited writes | PASS | PG, HTTP, proxy | **Tenant:** `invoiceRoleLevels` M5IRLH-04 (13 refusals before any key — session/audience, Host, Idempotency-Key, Origin and CSRF — then a zero write delta, then the owner's positive PUT); `customerCreate` M7CC-02; `tenantEntry` M7TE-05 (Host), M7TE-06 (Origin, pre-session CSRF). **Admin:** `productionEntry` M6EP-10, M6EP-11, with the positive control M6EP-04. **QA front Host:** `qaInteractiveFront` "host: wrong name, a port, a trailing dot…" (HTTP). **Live (proxy, this stage):** `probe --positive` (401, then 403 three times, then 200; the refusals wrote nothing: idempotency +1 and voided +1, both from the positive control); through the public origin, a void with a foreign `Origin` 403; on the front's loopback port, a wrong Host 404 (HTTP layer, not the edge). | Admin Host refusal is never shown on a mutating admin command followed by a database count. M6EP-11 counts the tenant row and idempotency records but not audit or outbox rows. M7CC-02 and M5IRLH-04 check the write delta once per batch of refusals. M7TE-05 takes no row count after its login refusals. The live probe covers CSRF and the positive control; Host and Origin were checked live without a session only. |
+| B04 spoofed forwarding cannot move a client bucket | PASS | PG, HTTP, contract | `rateLimitRuntime` M6RS-09 (a spoofed `X-Forwarded-For` prefix or an untrusted peer's header cannot move the bucket), M6RS-01 (two runtimes share one client bucket), M6RS-06 ("Rate-limited runtime over real sockets…"); `server/runtime/clientAddress.test.ts` (a direct client is bucketed by its socket peer whatever it sends); `enforcement.test.ts` (forwarding headers from an untrusted peer cannot escape); `production-runtime-contract` (no per-process limiter or second proxy chain, contract). **QA front (contract):** it drops every `x-forwarded-*`, `forwarded`, `x-real-ip` and `x-replit-*` header and sets `X-Forwarded-For` to its own peer (`front.mjs` `forwardHeaders`). The supervisor trusts only `127.0.0.2/32`, so the runtime buckets by its socket peer: one client for every visitor. | `Forwarded`, `X-Real-IP`, `True-Client-IP` and `CF-Connecting-IP` are never sent against the real PostgreSQL limiter, nor from a trusted peer. The static guard names only three of those headers. The front-to-runtime-to-limiter chain is not exercised in CI. DA-9 (IPv4 loopback only) is open. The deterministic runner prints suite totals, not per-test lines. |
+| B05 limiter budget; bounded outage; no allow-all fallback | PASS | PG, HTTP, contract | `rateLimiter` RLR-04 (overload fails closed), M6R-09 (a held lock answers unavailable within `lock_timeout`; "Distributed rate limiter…"); `rateLimitRuntime` M6RS-00 (no store binding refuses composition), M6RS-03, M6RS-10 (store down: every protected request a bounded 503), M6RS-11 (no local fallback for a known bucket), M6RS-14; `enforcement.test.ts` (an unavailable or hanging limiter fails closed, HTTP); `production-runtime-contract` (no in-memory limiter in production, contract). | A slow, rather than down, store is not driven end to end at HTTP. The runtime bound is asserted as under 2 s rather than against the 500 ms deadline. DA-52 (cost on the primary database) is open. Evidence is on a local disposable cluster only. The QA session's own limiter path has no outage test. |
+| B06 audit failure cannot partially commit a void; lease recorded | PASS | PG | `invoiceVoidHttp` IVH-08 (a fault at the audit INSERT, among others, rolls the whole void back while the separately acquired idempotency lease stays open and uncompleted), IVH-09 (an unknown commit), IVH-11, IVH-11b; `invoiceVoidRoutine` IVR-08 (the routine writes only the void record; the audit is the command's). Step "Invoice void over HTTP…". | IVH-08 does not retry the same key after the audit fault. Lease expiry is forced rather than waited out. No `pg_locks` check follows the fault. DA-118 and DA-119 are open (direct routine calls by a holder of the runtime login and a minted key). The faults are owner triggers. |
+| B07 concurrent issuing: one invoice per source, allocation, transaction facts | PASS | PG | `invoiceIssueRoutine` IIR-12 (deterministic races: one invoice per draft; numbers serialize at the store counter), IIR-13 (the source link is permanent, even for the table owner in replica mode); `invoiceIssueHttp` IIH-08 (all-or-nothing at six fault points; a failed issue consumes no number), IIH-09 (two tenant entries racing one draft). | The unique constraints are never violated directly. Concurrent allocation on different drafts is shown at routine level only. There is no concurrent same-key issue. The issue writes no outbox event, so no event fact is tested. There is no load or soak test. |
+| B08 trusted audit actor/subject; no runtime rewrite; no invented event or worker | PASS | PG, contract | `invoiceVoidHttp` IVH-04 (the one void audit row is deep-equal to the trusted actor, store and subject; no outbox row), IVH-06 (client-supplied identity fields refused); `invoiceDraftDiscardHttp` IDDH-16; `productionEntry` M6AA-14 (the runtime login may only INSERT audit, through `tmpos_audit_writer`); `rlsIsolation` S2-DB-* (the audit writer is append-only); `invoiceVoidRoutine` IVR-08; `production-runtime-contract` (no bound outbox delivery worker, contract). | DA-118 is open. The privilege proof uses a test login carrying the shipped roles. The audit trigger is not `ENABLE ALWAYS`, so owner and superuser rewrites are not blocked (doc 13). "No worker" is static evidence only. |
+| B09 migration hashes; clean disposable apply; startup preflight | PASS | PG, contract | `server/persistence/postgresStartupPreflight.test.ts` (exactly the up files 001–035, each pinned in `REQUIRED_MIGRATIONS`) and `tests/quality/migration-files-contract.test.mjs` (each file matches its pinned byte fingerprint; contract). `rlsIsolation` S2-DB-1 (001–005 applied to a fresh disposable service by the trusted executor); `customerDirectory` M7C-01 (001–035 applied clean). `productionEntryPreflight` M6PF-02, M6PF-22 (a changed checksum refuses `migration_state_invalid`). `tenantEntry` M7TE-10 (a ledger that is not exactly 001–035 refuses startup). Live (inferred from the tool's design, not printed): every QA `start`/`reset` in this stage made a new owned cluster through the trusted executor, and the tenant entry, whose preflight refuses any ledger other than exactly 001–035 (M7TE-10), started on it. | No single CI step applies 001–035 to an empty database in one go: one fresh service is carried forward across steps. The preflight trusts ledger rows, so in-place drift is not re-read (DA-55). Contract suites have count lines only. No managed database was checked; G-MIGRATE stays OPEN. |
+| B10 approved runtime grants; direct-write refusals; routine gaps explicit | PASS (as worded) | PG | `productionEntryPreflight` M6PF-01 (the runtime login's privileges equal `APPROVED_ROLE_GRANTS` exactly), M6PF-14 (a stray privilege is refused at startup). `customerCreate` M7CC-09 (as the runtime login, every direct INSERT, UPDATE, DELETE and TRUNCATE on the customer table is 42501). `invoiceDraftRoutine` IDR-02 (no runtime privilege by any path on two RLS tables). `rlsIsolation` S2-DB-6, S2-DB-7 (the approved `store`/`tenant` verbs). | Approved direct table grants remain by design and are recorded: INSERT on `public.store`, column UPDATE on `public.store.store_name` and `public.tenant.legal_name` (DA-23, DA-29), and INSERT on `public.audit_event` for `tmpos_audit_writer`. All 52 `tmpos_app` EXECUTE grants are shared by the admin and tenant entries (DA-37). A holder of the runtime login and a minted key can call definer routines directly, outside audit, idempotency and outbox (DA-118, DA-119, DA-132). M6PF-01 proves equality with the approved list, not minimality. S2-DB-* ran at the 001–005 state. G-DBROLE stays OPEN. |
+| B11 explicit SQL grants; no automatic public-table exposure; Data API HTTP | PASS (SQL); HTTP part not available here | PG | `rlsIsolation` S2-DB-22c (a table created later is closed by default), S2-DB-0 (PUBLIC `TEMPORARY` closed). `productionEntryPreflight` M6PF-30, M6PF-31 (PUBLIC relation, column or definer-routine exposure is refused), M6PF-36 (refused through the entry). `invoiceVoidRoutine` IVR-05 (035's exact routine surface; nothing granted to PUBLIC, `anon`, `authenticated` or the audit writer). | **Reported, not fixed here:** the startup preflight checks the runtime login, its two roles and PUBLIC, but not `anon` or `authenticated`. Those are checked only in migration postconditions (011, 020–022). A grant to `anon` added beside the migrations would therefore pass startup. Default privileges hold only for 005's role. There is no Data API or PostgREST layer in this repository, and none ran in CI. Migrations 002 and 004 defend against "PostgREST + anon key", so a hosted Data API's exposure is a deployment property this stage cannot evidence (G-DBROLE OPEN). |
+| B12 QA isolation; no live provider traffic; production containment; owned cleanup | PASS (live operator evidence); CI part contract/HTTP only | contract, HTTP, proxy | **CI:** `qaInteractiveContainment` (src/ and server/ never import or name the QA tooling; the production construction carries no token verifier; the QA bundle config swaps exactly two modules and reads no `.env`; neither `.replit` nor CI mentions the tool), with build integrity PASS and forbidden-artifact PASS. `qaInteractiveFront` (the CSP `connect-src 'self'`; identity forwarding only to the emulators). **Live:** the only hosts the browser contacted were the Preview and the app's two web-font hosts (`fonts.googleapis.com`, `fonts.gstatic.com`, which the ordinary app also loads); no identity, data or business provider was contacted. A socket snapshot of the hand-over run's four recorded processes and their children, twelve processes in all (21:19:24Z), found no connection to a non-loopback address; port 5000 was the only public listener. Two resets each made a new generation, and one stop ended every recorded process and left no record, run directory or postgres process. | The QA session never runs in CI. Egress is shown by a browser host list and one socket snapshot, not by continuous capture. The lifecycle helpers (`stillOwned`, `removeOwnedDir`, `insideStateDir`, the supervisor's reset/stop paths) have no CI test; only the strict `postmaster.pid` read and `postgresOn` do. The check-then-signal window stays (§7). `.replit` has an uncommitted working-tree change; CI read only the committed file. |
+
+Adjudications by the operator (recorded, not hidden):
+- **B10.** An adversarial pass proposed FAIL against a stricter wording ("the runtime cannot write any table directly"). The row's requirement is the approved grants, the direct-write refusals and explicit routine gaps. Those hold, with the approved direct grants listed as gaps.
+- **B12.** BLOCKED for CI alone, PASS once this stage's live operator evidence is counted.
+
+## 10. QA-INTERACTIVE-P1-R1 verification record (2026-10-23)
+
+This is the operator's evidence. It marks no owner check.
+
+- **Entry.** HEAD and `origin/main` were both `04a9529`. The VM had rebooted since the P1 hand-over (boot about 20:15Z, `oom_kill` reset to 0), so run `qa-20261023t1522-8ffb` was gone and `status` reported a stale record. Replit had started `npm run dev` on port 5000. It was stopped with SIGINT at 20:47:35Z, and `start` then cleaned the stale record.
+- **Run used for the smoke.** `qa-20261023t2047-d5e0`, ready at 20:49:06Z, built from the source trees of §3. Every browser step went through the public HTTPS Preview origin in one headless Chromium (flags below). The automation drove and observed the page only: it never intercepted or replaced a request or response, never set a cookie, and never bypassed sign-in. Faults came only from the operator commands. Request equality is shown as SHA-256 digest prefixes; no key, body, token, cookie or password was logged.
+- **Attempt 1 (generation 1) — failed, kept.**
+  - Script step U01 passed. Script step U02 passed every check up to its navigation, then failed in the scratch script's own sidebar lookup (the entries' text starts with the icon's name). Steps U03 and U04 failed the same way before acting; the release step between U02 and U03 passed.
+  - Step U05 then ran out of order on a login that was still aged, and itself failed at the same lookup after the checks below. The runtime refused the held request before running it (fault record: `upstreamStatus` 403, `committed` false). The browser saw the edge's 502, the page said the void was not confirmed and might or might not have happened (true: nothing had run), and `inv-held` stayed `issued`.
+  - This failure was in the operator's tool, not in the product.
+- **Attempt 2 (generation 2, the lookup fixed): every script step passed.** These are the operator's script steps named after the owner's checks; they mark no owner result. This is a rerun with a corrected scratch script, not a product repair.
+  - U01:
+    - The held void on `inv-probe` was answered 502 at the browser. The page said "not confirmed".
+    - At 320×600 with a 24 px default font size (`Page.setFontSizes`; viewport set by device-metrics emulation), the page did not scroll sideways. **Check again**, **Check invoice** and **Dismiss** were each inside the viewport and hit-tested to themselves, with no sidebar overlap.
+    - Tab reached **Check invoice** in 42 presses. Enter sent exactly one `GET` of `inv-probe`, and the card said `Invoice 4 is voided now. This does not show which request voided it.`
+    - A mouse **Dismiss** sent no request that changes anything.
+    - Fault record `committed` true; evidence shows one void audit.
+  - U02:
+    - The aged login's first void send was answered 403 and the sign-in prompt opened.
+    - The provider answer was held, and the deadline text appeared after 30.1 s.
+    - The password field was empty, enabled and typable. **Customer Directory** opened from the sidebar without a reload.
+    - Apart from that first refused send, no void and no session renewal were sent.
+    - On `release` the late answer reached the browser (`deliveredToBrowser` true), and in the next 10 s nothing was sent and nothing reopened.
+  - U03:
+    - The provider sign-in was out and held, with no renewal sent. **Stop waiting** said it stopped and sent nothing.
+    - After leaving the page and `release` (delivered), no `POST /api/v1/session/login` and no void were sent after **Confirm sign-in** (only the step's first send, refused 403, preceded it), and no review reopened.
+    - The requests seen after the release were the SDK's `accounts:lookup`, `securetoken … token` and Firestore `Listen`, plus plain `GET /api/v1/session` and `GET /api/v1/customers` reads.
+    - `inv-stall` stayed `issued`.
+  - U04:
+    - The confirmation read `Void invoice 1?` with the same customer and Total, and no reason preselected.
+    - The first send was answered 403, the recent sign-in's login 200, and no void was sent between that login and the explicit press. The explicit void was answered 200.
+    - After a reload the invoice read **Voided** / **Issued by mistake** with the same number and `Total $50.00`.
+    - Evidence: `voided`, one void audit, `invoices_voided` 2 → 3.
+  - U05:
+    - The proxy's answer to the void was **502**, with no content type, only `content-length`, `date`, `replit-cluster` and `x-robots-tag` headers, and the request reported as aborted (`ERR_ABORTED`). The page reported uncertainty, claiming neither success nor rollback.
+    - The fault record showed `upstreamStatus` 200, `committed` true. While the browser was held, the evidence was already `voided`, with one void audit.
+    - On leaving and returning, the card was still unresolved and nothing was re-sent.
+    - One explicit **Check again** went to the same path with the same key digest and the same body digest (88 bytes) and was answered 200: `Invoice 2 at Northwind Main (QA) was voided.`
+    - Evidence: still one void audit; idempotency total 23 → 24 and `invoices_voided` 3 → 4 for the pair.
+  - The run used three `owner-a` login exchanges in total. The only hosts contacted were the Preview host and the two web-font hosts, with no content-security-policy line.
+- **What the held-void fixture proves, and what it does not.** It proves the branch where the runtime committed and answered 200, and the QA front withheld that answer from the browser. Attempt 1 also showed, by accident, the branch where the runtime refused the request before running it. Neither is a database COMMIT-acknowledgement-loss test: suppressing a browser response says nothing about a commit whose acknowledgement is lost between PostgreSQL and the runtime, and that branch stays untested here.
+- **Backend probe (generation 3).**
+  - `probe --positive` gave: no session 401 `unauthenticated`; `tech-a` 403; `owner-a` without CSRF 403; `owner-a` with a wrong CSRF value 403; positive control 200 (`voided`). The four refusals wrote nothing: idempotency 21 → 22 and `invoices_voided` 1 → 2, both from the positive control.
+  - Public edge, with no session: `/` 200; `/api/v1/customers` 401; a void with `Origin: https://evil.example` 403; a wrong Host on port 5000 404 `host_not_served`.
+- **Hand-over.**
+  - `stop` (20:55:14–16Z) ended the four recorded processes, removed the record and the run directory, and left no postgres process.
+  - A fresh `start` (ready 20:57:07Z) is the session of §3. It was started instead of a `reset` so that the owner's `status` shows no fault record from the operator's runs (§6).
+- **Memory and out-of-memory window (observed, not a repair claim).**
+  - The VM has 7,965 MB of memory and no swap (`free -m` at entry). At the stage's first scratch script write (about 20:47:10–20Z), this session's own code-intelligence integration started a TypeScript language server, a child of the agent CLI, holding 2.2 GB. It was not stopped.
+  - `MemAvailable`: 2,307 MB before `start`; 1,482 MB once ready; 1,016 MB when the smoke's own guard first refused to launch a browser.
+  - The guard was then lowered to 900 MB. Chromium ran with one renderer process and a 192 MB script heap, under a watchdog that would stop only that Chromium below 350 MB; it never triggered.
+  - Free memory reached a minimum of 518 MB during attempt 1 and 698 MB during attempt 2, and 1,146 MB after the hand-over start.
+  - `oom_kill` stayed 0 through the whole window.
+  - This establishes that window only. It does not prove the earlier 72 kills' cause repaired; they belong to the previous boot.
+- **Residuals.**
+  - All QA traffic shares one login-limiter client.
+  - A held void reaches the browser as the edge's 502.
+  - Fault records survive `reset` without a generation (§6).
+  - A cluster is unrecorded between `initdb` and its record (§7).
+  - The window between an ownership check and its signal (§7).
+  - The TypeScript language server's memory beside the stack.
 
 None of this runbook closes a gate. The owner's Manual QA remains PENDING, and every production gate in [08](./08-production-gate-and-risk-register.md) stays OPEN.
