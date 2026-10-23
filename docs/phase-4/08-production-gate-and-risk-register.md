@@ -1073,7 +1073,59 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 - **Still open.** The dependency audit's new High advisory for `zod` (GHSA-mrhx-c7xc-m3w5), which failed D's CI (repaired in `c2bbf5e` by QA-HANDOFF-CLOSE-P1); the shared login-limiter client, the edge's 502 for a held void, fault records surviving `reset`, the unrecorded-cluster and check-then-signal residuals, the language server's memory beside the stack, GHSA-46jr's upstream gap, CI duration (B's quality job 27 min 25 s of 30), and all 37 gates OPEN.
 - **Nothing deployed.** Only owned disposable clusters, emulators and synthetic data were used. The network actions were CI reads, the browser's traffic to the Preview and to the app's two web-font hosts, one external review read of a local evidence bundle, and the fast-forward pushes of D and this record.
 
-**The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C) and the QA-INTERACTIVE-P1-R1 documentation changes (D, E) change no gate's status.
+**QA-HANDOFF-CLOSE-P1 keeps every gate `OPEN`.** It repaired the `zod` advisory, committed R1's record and finished the owner's QA hand-over. It changed one dependency in the lockfile and the documentation; no product source, server file, migration, route, permission, `package.json`, CI workflow, scanner, checker or policy, and no QA-tool byte changed. The full record is runbook 14 §11 ([14](./14-interactive-qa-runbook.md)).
+- **Commits.**
+  - F1: `c2bbf5e` (`c2bbf5ed205bd7bf3fc4cd7c5a049e1b9df60d81`, tree `f211bf6d3a313b8f72b18212ed01307cca1fcfa6`), `package-lock.json` only. `zod` moved 4.4.3 → 4.6.7 from the public registry with its registry integrity. `package.json` and the audit manifest are unchanged. Exact-SHA CI 40033824483 **FAILED** on attempt 1. `appsec` succeeded. `quality` passed every executed step except the dependency audit's reconciler, its last main step (one post step was skipped). The reconciler no longer reported `zod` but reported a newer advisory: `- NEW High package not in manifest: body-parser [https://github.com/advisories/GHSA-27r3-jxmh-p828]`. It was not rerun.
+  - E: `f18626d` (`f18626d8af9143279f80e44ff8dcdff62bce1969`, tree `2d91d837ca92eb83d46e453c25b1c2073ec1b8bb`), the QA-INTERACTIVE-P1-R1 record above, with its corrections. Exact-SHA CI 40037228605 **FAILED** on both attempts. Attempt 1: `appsec` succeeded. In `quality` the shop browser suite's setup hook could not start Chromium ("Chromium did not answer on the pipe: Browser.getVersion: timed out"), so every test in it failed and every later step was skipped. Attempt 2 was a rerun of the failed job, not a repair: the browser suite and every other executed step passed (68 succeeded, one post step skipped), and `quality` failed at the dependency audit on the same `body-parser` advisory.
+  - This record, with runbook 14, the README and the shortlist copy, is documentation only and records no CI run of itself.
+- **Lock recovery.** `.git/index.lock` was 0 bytes, from 21:24:45Z; the index was last written at D's commit (21:22:43Z). No process held either file open and no git process ran. The lock was unchanged after five seconds, so only that file was removed, guarded on its inode and size. The index and working diff were unchanged.
+- **The zod advisory and its repair.**
+  - GHSA-mrhx-c7xc-m3w5 (CVE-2023-54404) was published on 2026-10-01. GitHub reviewed and updated it on 2026-10-23 (18:26:50Z and 18:26:52Z). It first failed this repository's audit in D's CI.
+  - The three parents all accept 4.6.7: `firebase-tools` 15.23.0 (`^4.0.0`, development), `@modelcontextprotocol/sdk` 1.32.1 (`^3.25 || ^4.0`) and `zod-to-json-schema` 3.25.2 (peer `^3.25.28 || ^4`).
+  - 4.6.7 has every subpath they import, no dependency and no install script. It is 4.6.6 plus a version bump. Its npm SLSA provenance names `colinhacks/zod` `release.yml` on `main` at `b500a2ee`, the `v4.6.7` tag commit.
+  - **Reach.** No first-party code imports `zod`. It was counted in the production audit because a production install still places it on disk through `@google/genai`'s optional peer `@modelcontextprotocol/sdk`, but nothing loads it there. In `firebase-tools` only `firebase mcp` loads it, and this repository never runs that command.
+  - **Residual.** The fix bounds an array, set or map only when its upper bound comes before any check other than a length or size check. Unbounded containers are unchanged, and the MCP request schemas `firebase mcp` would parse are unbounded. So the audit finding is cleared, but those inputs remain unbounded beyond their transports' size caps.
+  - **Local checks**, run serially:
+    - The unchanged audit commands and reconciler failed on the old lockfile and passed on the new one at 22:14Z, before GHSA-27r3-jxmh-p828 reached the audit feed.
+    - `lockfile:check`, a clean `npm ci`, the typecheck, the three builds, `build:check`, `security:gates` (structural), `forbidden:check` and the two QA-tool suites (43 of 43) all passed.
+- **The new advisory (not repaired here).**
+  - GHSA-27r3-jxmh-p828 (CVE-2026-111181, `body-parser` denial of service via trailing bytes after a compressed request body, High) was published at 20:53:11Z on 2026-10-23. It affects `body-parser` < 1.20.9 and ≥ 2.0.0 < 2.4.0.
+  - The tree holds 1.20.4 under `express` 4.22.1, a production dependency, and 2.3.0 under the MCP SDK's `express` 5.2.1. The local audit at 22:14Z did not report it yet; a later local rerun on the same lockfile did.
+  - This stage lifted the dependency freeze for `zod` only, so it was not applied. A lockfile-only candidate passes the unchanged checker in a scratch copy: `body-parser` 1.20.9 and 2.4.0, plus `qs` 6.16.1 (two copies) and `content-type` 2.1.0, with `package.json` unchanged. It was not installed, built or tested.
+  - Until a stage applies such a change, every new commit's exact-SHA CI fails at the dependency audit. It is added to "Still open".
+- **QA pause and the smoke on the repaired tree.**
+  - The R1 hand-over run `qa-20261023t2055-fa9b` was stopped at 22:20Z, before the reinstall. The owner had not been asked in this stage to start testing on it.
+  - Run `qa-20261023t2224-82a5` started on the reinstalled tree. The same operator automation as R1's attempt 2 passed S0 and U01–U05 there:
+    - the held voids committed;
+    - U05's single Check again carried the same target, key and body, and left one void audit;
+    - the U02 deadline came at 30.0 s;
+    - three `owner-a` logins were spent;
+    - only the Preview and the two web-font hosts were contacted.
+  - This is a check of the new dependency tree, not a product repair.
+- **Hand-over.**
+  - After `stop`, a fresh `start` made run `qa-20261023t2227-9aac`, generation 1, ready at 22:27:58Z, with no fault armed and no fault record.
+  - The database server is the one the record names. Its pid, start time, boot and data directory all match, and no orphan cluster exists. The "unrecorded database cluster" of R1 names the residual window between `initdb` and the record (runbook §7). It is not this database, and no such cluster exists now.
+- **Owner checks.**
+  - The shortlist is now `docs/phase-4/TMPOS2026-critical-qa-shortlist.md`. Its sixteen owner checks and twelve operator checks are unchanged, with every result PENDING.
+  - The owner starts with U01–U05. Runbook §4.1 and §4.3 map U06–U16: U06, U07, U09, U11, U12, U13, U14 and U16 are READY; U10 is READY for the owner's steps.
+  - BLOCKED, with the missing prerequisite named:
+    - U08: no operator control ends one tenant session;
+    - U10's live direct-API refusal: no operator command sends it;
+    - U15: no isolated admin console.
+  - No owner result is marked.
+- **Backend checks B01–B12 (runbook §9, corrected).**
+  - Every row now names its layers, SHA, named assertions with their CI steps, and excluded scope. Suite-count-only citations are marked.
+  - B10 PASSES the approved narrow-grant contract only. The direct-call risks DA-118, DA-119 and DA-132 stay OPEN.
+  - B11's SQL half PASSES. Its Data API HTTP half is BLOCKED for a hosted Data API and NOT APPLICABLE inside the repository.
+  - B12 is QUALIFIED. Two lifecycle windows remain (the unrecorded-cluster window and check-then-signal), and the shortlist's log and storage leak inspection was not performed.
+  - The startup preflight's omission of `anon` and `authenticated` is carried as a deferred risk, not as a leak finding. G-DBROLE stays OPEN.
+- **The VM.** At 22:11Z `oom_kill` read 11 in the same boot, all after R1's last zero, and at 22:47:59Z it read 13. The kernel log is not readable here, so the victims are not identified. The QA session's processes survived. Neither is attributed to any cause.
+- **Review.** Independent review: passed — 31 finding(s) applied.
+- **Not claimed.** Any owner check; green exact-SHA CI for any commit of this stage; that `zod` 4.6.7 bounds every input; a lost COMMIT acknowledgement test; production readiness.
+- **Still open.** The `body-parser` advisory GHSA-27r3-jxmh-p828, which fails exact-SHA CI; the CI runner's intermittent Chromium start (E's attempt 1); the zod fix's unbounded-container residual; the shared login-limiter client; the edge's 502 for a held void; fault records surviving `reset`; the unrecorded-cluster and check-then-signal residuals; U08's, U10's live-refusal and U15's missing prerequisites; the TypeScript language server's memory beside the stack; the out-of-memory kills of unknown cause; GHSA-46jr's upstream gap; CI duration (`quality` 27 min 20 s of 30 on F1); and all 37 gates OPEN.
+- **Nothing deployed.** Only owned disposable clusters, emulators and synthetic data were used. The network actions were registry and advisory reads, the package fetches of two clean installs and two lockfile-only updates, CI reads, the browser's traffic to the Preview and the two web-font hosts, three external review reads of local text, and the fast-forward pushes of F1, E and this record.
+
+**The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C), the QA-INTERACTIVE-P1-R1 documentation changes (D, E) and QA-HANDOFF-CLOSE-P1 (the lockfile change F1 and this record) change no gate's status.
 
 - **M0 carry-forward gates still open:** G-EMU, G-HIST, G-4USER.
 - **M2's lockfile recovery is now proven on a CI runner.** Every push to `main` runs the lockfile-portability gate before a public-registry `npm ci`, then the typecheck contract and the typecheck ratchet (`ci.yml` quality job); all were green on `8883473d` (run 34779503875), the runner whose missing internal mirror caused the original failure. No M2 gate changes state here: moving G-EMU, G-APPSEC or G-COVERAGE is the owner's decision against each gate's own pass rule.
