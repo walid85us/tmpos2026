@@ -1,0 +1,10 @@
+{
+  "projectId": "demo-tmpos-qa",
+  "appId": "demo-tmpos-qa-web",
+  "apiKey": "demo-tmpos-qa-key",
+  "authDomain": "demo-tmpos-qa.invalid",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "demo-tmpos-qa.invalid",
+  "messagingSenderId": "0",
+  "measurementId": ""
+}

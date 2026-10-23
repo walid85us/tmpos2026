@@ -33,7 +33,8 @@
     "security:semgrep": "docker run --rm -v \"$PWD:/src:ro\" semgrep/semgrep@sha256:e04d2cb132288d90035db8791d64f610cb255b21e727b94db046243b30c01ae9 semgrep scan --config /src/.semgrep --metrics=off --quiet /src/src /src/server",
     "security:secrets": "docker run --rm -v \"$PWD:/src:ro\" zricethezav/gitleaks@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46 detect --source=/src --no-git --redact --config=/src/.gitleaks.toml",
     "security:gates": "node scripts/check-security-gates.mjs",
-    "forbidden:check": "node scripts/check-forbidden-artifacts.mjs"
+    "forbidden:check": "node scripts/check-forbidden-artifacts.mjs",
+    "qa:interactive": "node tests/qa/interactive/cli.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

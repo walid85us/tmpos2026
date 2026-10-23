@@ -690,6 +690,12 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // executor's exported, pure assertManagedDevDsn over one corpus — it opens no connection and uses no apply, ledger or
     // catalog surface. A test file, never part of the runtime import graph, so the decisive property above is unchanged.
     'server/platform-identity/databaseEndpoint.test.ts',
+    // QA-INTERACTIVE-P1: the long-lived manual-QA supervisor applies migrations 001-035 to its own disposable cluster through
+    // the SAME trusted executor, validating its target with the same assertDisposableTestDsn, rather than a second apply path.
+    // It is a test-only tool under tests/, started only by `npm run qa:interactive`; its containment suite
+    // (tests/quality/qaInteractiveContainment.test.mjs) asserts that application source, the normal build and test configs,
+    // .replit and the CI workflow never reach it, so the decisive property above is unchanged.
+    'tests/qa/interactive/supervisor.mjs',
   ]);
   const unexpected = importers.filter((f) => !allowed.has(f));
   assert.deepEqual(unexpected, [], `unexpected importer(s) of the executor: ${unexpected.join(', ')}`);
