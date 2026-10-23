@@ -1028,7 +1028,52 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 - **Still open.** The owner's Manual QA, PENDING; GHSA-46jr's upstream configuration gap; every row and gate carried by the earlier stages; all 37 gates OPEN. CI duration stays a watched risk: B's quality job ran 27 min 25 s of its 30-minute limit.
 - **Nothing deployed.** No managed database, live secret or configuration, real sign-in, provider, managed migration or deployment was touched. Everything ran on synthetic identities and data, a disposable database the session owns, and emulators bound to loopback. The recorded network actions are a publisher changelog and registry reads, the package fetches, the Firestore emulator's download on first start, CI reads, and the fast-forward pushes of A, B and this record.
 
-**The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C) changes no gate's status.
+**QA-INTERACTIVE-P1-R1 keeps every gate `OPEN`.** It verifies the final interactive session and completes a reduced owner hand-over. It is documentation and operator evidence only: no product source, server file, migration, route, permission, package, CI workflow, scanner policy or QA-tool byte changed. The full record is the runbook's §10 ([14](./14-interactive-qa-runbook.md)), and the backend evidence table is its §9.
+- **Commits.**
+  - D: `95b656f` (`95b656fa4471ffa7ce3562ea479961473ddc2db2`, tree `46453dd83a3d2fa5dcb5d72a3a198288150c7256`). Two paths, runbook 14 and README row 14. Exact-SHA CI 40026356412 **FAILED** on attempt 1. The appsec job succeeded (21:23:05–21:26:22Z). The quality job (21:23:05–21:50:27Z) passed every step except the dependency audit's fail-closed reconciler: `NEW High package not in manifest: zod [GHSA-mrhx-c7xc-m3w5]`. That advisory ("Zod can exhaust memory while validating oversized constrained collections", `zod` < 4.6.6; CVE-2023-54404) was first published on 2026-10-01 (GitHub `published_at` 18:32:46Z). GitHub reviewed and updated it on 2026-10-23 (`github_reviewed_at` 18:26:50Z, `updated_at` 18:26:52Z, read from GitHub's advisory API in QA-HANDOFF-CLOSE-P1). It first failed this repository's audit in D's run, after B's and C's green runs. D changes no dependency. The locked `zod` 4.4.3 was transitive only, through `@google/genai` → `@modelcontextprotocol/sdk` and through `firebase-tools`. Repairing it needed a dependency move, which this stage kept frozen, so it was **not repaired here** (QA-HANDOFF-CLOSE-P1 repaired it with a lockfile-only move to 4.6.7; the audit manifest was not changed). `c2bbf5e` (QA-HANDOFF-CLOSE-P1) moved `zod` to 4.6.7, lockfile only. Its CI 40033824483 no longer reports `zod`, but it failed at the same step on a newer `body-parser` advisory (GHSA-27r3-jxmh-p828), which is recorded in the QA-HANDOFF-CLOSE-P1 record. No rerun was presented as a repair.
+  - This record (E) is documentation only and records no CI run of itself.
+  - The executable trees of `089c622`, `04a9529` and D are identical, so B's CI 39980272453 (success on attempt 1) is the CI evidence for the tool, and C's CI history (39984446381: attempt 1 FAILED on SIS-20 at 86/87, attempt 2 success after rerunning the failed job; first recorded here) is kept with both attempts.
+- **Responsibility split.**
+  - The owner's checks are U01–U16 of the critical-QA shortlist. The shortlist file is not in this repository, so the runbook gives procedures for U01–U05 only. U06–U16 cannot be carried out from it until the file is supplied, and U15 is blocked here without an isolated admin UI. (QA-HANDOFF-CLOSE-P1 copied the shortlist into `docs/phase-4/`, and runbook §4.3 maps U06–U16; U08 and U15 are BLOCKED there, with their missing prerequisites named.)
+  - P1's twelve items ("Any of the twelve Manual QA checks: all PENDING for the owner" above) are now operator reference procedures, not owner checks.
+  - B01–B12 are the operator's checks.
+  - No owner result is marked.
+- **Entry.**
+  - The VM had rebooted since P1's hand-over (`oom_kill` reset to 0), so run `qa-20261023t1522-8ffb` was gone and its pids were historical. Replit's dev server on :5000 was stopped with SIGINT, and `start` cleaned the stale record.
+  - Causes established from P1's own records:
+    - The 502 is the Replit edge's answer once the QA front closes the browser's socket on a held void; the runtime had committed (one void audit) and Check again resolved it.
+    - The 429 was the eighth login exchange about 44 s after the first and the sixth `owner-a` login inside five minutes, which exceeds the 5-per-5-minutes account bucket (the client bucket is 10 per 60 s; all visitors are one client).
+    - The P1 smoke's "PARTIAL" was its own parse of a `status` line.
+- **Operator run of U01–U05 through the public HTTPS Preview** (run `qa-20261023t2047-d5e0`; one headless Chromium that drove and observed the page only; faults only through the operator commands):
+  - Attempt 1 FAILED in the scratch script's sidebar lookup and is kept. Its out-of-order U05 on a still-aged login showed the refused-before-running branch: fault record 403 with `committed` false, the browser seeing only the 502, and the page reporting uncertainty truthfully.
+  - Attempt 2 (generation 2) passed every script step:
+    - at 320×600 with a 24 px default font, all three recovery controls were on screen and hit-tested to themselves; Check invoice was reached and activated by keyboard and read only that invoice; Dismiss, clicked with the mouse, sent no request that changes anything;
+    - the 30.1 s sign-in deadline released the page;
+    - after Stop waiting and a late release, no `POST /api/v1/session/login` and no void was sent (the identity SDK's own token refresh and plain reads did appear);
+    - an explicit void was not sent by the recent sign-in alone and read back Voided with its number and Total;
+    - the held void was answered 502 at the browser after the runtime committed, and one explicit Check again carried the same path, key digest and body digest, gave 200 and left one void audit (idempotency +1 for the pair).
+  - Three `owner-a` logins in all.
+- **Backend probe and edge (generation 3):**
+  - `probe --positive`: 401, then 403 three times, then 200. The refusals wrote nothing.
+  - Public origin with no session: a foreign Origin 403. On the front's loopback port: a wrong Host 404.
+- **Hand-over.**
+  - `stop` ended every recorded process and left no record.
+  - A fresh `start` (run `qa-20261023t2055-fa9b`, generation 1, ready 20:57:07Z) was used instead of a `reset`, because fault records survive `reset` without naming their generation and would show the owner the operator's results.
+  - Its twelve processes held no non-loopback connection (snapshot 21:19:24Z).
+- **Backend evidence B01–B12 (runbook §9).** B01–B11 PASS on named assertions in CI 39980272453, with every gap carried. B10 is PASS as worded, with the approved direct grants listed. B11 is PASS for SQL; the Data API HTTP part is not available in this repository. B12 is PASS on this stage's live evidence and contract-only/loopback in CI. (This is R1's reading. QA-HANDOFF-CLOSE-P1 corrected the table in runbook §9: B10 passes the approved narrow-grant contract only, with the direct-call risks DA-118, DA-119 and DA-132 OPEN; B11 passes SQL, with the Data API HTTP part BLOCKED for a hosted Data API and NOT APPLICABLE in the repository; B12 is QUALIFIED on lifecycle ownership; and several citations are marked as suite counts only.)
+- **Reported, not fixed (outside this stage's scope):** the startup preflight checks the runtime login, its two roles and PUBLIC, but not `anon` or `authenticated`. Those are checked only in migration postconditions, so a grant to `anon` added beside the migrations would pass startup. G-DBROLE stays OPEN.
+- **The VM.**
+  - At the stage's first scratch-script write, the agent session's own code-intelligence integration started a 2.2 GB TypeScript language server. It was not stopped.
+  - Free memory fell to 1.0–1.5 GB beside the stack.
+  - The browser ran with one renderer and a 192 MB script heap, under a watchdog that would stop only that browser below 350 MB; it never triggered.
+  - Free memory reached a minimum of 518 MB (attempt 1) and 698 MB (attempt 2). `oom_kill` read 0 at every check up to the hand-over start (20:57Z).
+  - This establishes only that window. By 22:11Z, still in the same boot, the counter read 11. The kernel log could not be read here, so those kills are not attributed (QA-HANDOFF-CLOSE-P1); the hand-over session's processes survived them.
+- **Review.** Independent review: passed — 28 finding(s) applied to D.
+- **Not claimed.** Any owner check, U06–U16, a database COMMIT-acknowledgement-loss test (browser response suppression is not one), production readiness.
+- **Still open.** The dependency audit's new High advisory for `zod` (GHSA-mrhx-c7xc-m3w5), which failed D's CI (repaired in `c2bbf5e` by QA-HANDOFF-CLOSE-P1); the shared login-limiter client, the edge's 502 for a held void, fault records surviving `reset`, the unrecorded-cluster and check-then-signal residuals, the language server's memory beside the stack, GHSA-46jr's upstream gap, CI duration (B's quality job 27 min 25 s of 30), and all 37 gates OPEN.
+- **Nothing deployed.** Only owned disposable clusters, emulators and synthetic data were used. The network actions were CI reads, the browser's traffic to the Preview and to the app's two web-font hosts, one external review read of a local evidence bundle, and the fast-forward pushes of D and this record.
+
+**The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C) and the QA-INTERACTIVE-P1-R1 documentation changes (D, E) change no gate's status.
 
 - **M0 carry-forward gates still open:** G-EMU, G-HIST, G-4USER.
 - **M2's lockfile recovery is now proven on a CI runner.** Every push to `main` runs the lockfile-portability gate before a public-registry `npm ci`, then the typecheck contract and the typecheck ratchet (`ci.yml` quality job); all were green on `8883473d` (run 34779503875), the runner whose missing internal mirror caused the original failure. No M2 gate changes state here: moving G-EMU, G-APPSEC or G-COVERAGE is the owner's decision against each gate's own pass rule.
