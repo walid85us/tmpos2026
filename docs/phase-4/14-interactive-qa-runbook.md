@@ -166,18 +166,18 @@ then press Replit's **Run** button (or type `npm run dev`). Replit may also star
 
 **Preview URL (this workspace):** `https://70fecabe-2df6-4353-8c25-cf5ce1c5075d-00-16avf9cycmdtz.worf.replit.dev/`. Open exactly this address: the front answers only requests whose Host is exactly the Preview host (anything else gets `404 {"error":"host_not_served"}`). Sign in at `/login`.
 
-**The session handed over in QA-HANDOFF-CLOSE-P1** (2026-10-23, ready 22:27:58Z): run `qa-20261023t2227-9aac`, generation 1. No fault is armed or held, and there is no fault record yet. The database is fresh. The seed's own logins at start fell in windows that closed within five minutes, so the owner starts with a full login budget. Every `start` makes a new run id and every `reset` a new generation. `status` and the corner label show the current ones, and only they count. The values here are a record, not a promise that this run is still up: a reboot ends it (§7). The R1 hand-over run `qa-20261023t2055-fa9b` was stopped at 22:20Z, before the dependency reinstall (§11).
+**The session handed over in QA-CI-REPAIR-P1** (2026-10-27, ready 03:37:36Z): run `qa-20261027t0334-c7be`, generation 1. No fault is armed or held, and there is no fault record yet. The database is fresh. The seed signed `owner-a` in once at start, at about 03:37Z. Until that window closes at about 03:42Z it leaves four of the account's five logins, and U01–U05 need three. After that the budget is full. Every `start` makes a new run id and every `reset` a new generation. `status` and the corner label show the current ones, and only they count. The values here are a record, not a promise that this run is still up: a reboot ends it (§7). The QA-HANDOFF-CLOSE-P1 hand-over run `qa-20261023t2227-9aac` had already ended with a reboot before this stage began (§12).
 
-- **Its ownership record** (`.cache/tmpos-qa/current.json`, boot `08971338…`):
-  - supervisor pid 365898, emulators 365911, Firestore emulator JVM 365941;
-  - database server 366198 on the cluster `.cache/tmpos-qa/tmp/tmpos-s1b-7m0HMH`;
-  - ports: front 5000 (public), tenant runtime 46535, Auth emulator 9399, Firestore emulator 8385 (loopback).
-  - The record names this database server, its start time and its boot, and nothing else runs on that data directory (§11). It is not the "unrecorded cluster" of §7. That phrase names a window in which a cluster can exist without a record, not this database.
+- **Its ownership record** (`.cache/tmpos-qa/current.json`, boot `4f41634b…`):
+  - supervisor pid 57637, emulators 57651, Firestore emulator JVM 58273;
+  - database server 59863 on the cluster `.cache/tmpos-qa/tmp/tmpos-s1b-NJZZ6o`;
+  - ports: front 5000 (public), tenant runtime 43393, Auth emulator 9399, Firestore emulator 8385 (loopback).
+  - The record names this database server, its start time and its boot. Its `postmaster.pid` names it, and every postgres process is that server or its child (§12). It is not the "unrecorded cluster" of §7. That phrase names a window in which a cluster can exist without a record, not this database.
 - **What it runs.** `start` builds the QA bundle from this checkout's files.
-  - Outside `docs/`, commit `c2bbf5e` (the zod repair) differs from `089c622` (the QA tool) only in `package-lock.json` (`zod` 4.4.3 → 4.6.7). The two have identical `server/`, `src/`, `tests/`, `scripts/`, `package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`, `firebase-applet-config.json` and `firestore.rules` trees.
-  - `node_modules` was installed from that lockfile with `npm ci`. Nothing the QA stack runs loads `zod`: only `firebase mcp` does, and QA never runs it (§11).
+  - Outside `docs/`, commit `3abe19d` (the `body-parser` repair) differs from `089c622` (the QA tool) only in `package-lock.json`: `zod` 4.4.3 → 4.6.7 (QA-HANDOFF-CLOSE-P1), and `body-parser` 1.20.4 → 1.20.9 and 2.3.0 → 2.4.0 with their `qs` and `content-type` entries (QA-CI-REPAIR-P1). The two have identical `server/`, `src/`, `tests/`, `scripts/`, `package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`, `firebase-applet-config.json` and `firestore.rules` trees.
+  - `node_modules` was installed from that lockfile with `npm ci`. Nothing the QA stack runs loads `zod`: only `firebase mcp` does, and QA never runs it (§11). In the QA stack `body-parser` 1.20.9 is mounted only by the Firebase emulators, on loopback. The tenant runtime loads it through `express` 4 and mounts none (§12).
   - No untracked file existed under `server/`, `src/`, `scripts/` or `tests/qa/`. The only untracked test paths, `tests/browser/capture-preview.mjs` and `tests/quality/fixtures/`, are not part of the QA bundle.
-  - The built bundle embeds its run id, so its bytes differ per run. For this run, the SHA-256 of the `sha256sum` listing of its 12 files (sorted by path) begins `00c4088e2021250f`.
+  - The built bundle embeds its run id, so its bytes differ per run. For this run, the SHA-256 of the `sha256sum` listing of its 12 files (sorted by path) begins `08b672aabcedcd16`.
 
 ### 3.1 Accounts (fictional; shortened from `status`, which prints the same five rows)
 
@@ -247,7 +247,7 @@ Every result line is **PASS / FAIL — PENDING**: only the owner decides. The op
 
 | Check | Status in this session | Fixtures and accounts | Notes |
 |---|---|---|---|
-| U01 | READY | `inv-probe`; `owner-a` | Operator automation passed on the final source tree (`c2bbf5e`, run `qa-20261023t2224-82a5`, §11) and earlier on the pre-repair tree (§10). Owner PENDING |
+| U01 | READY | `inv-probe`; `owner-a` | Operator automation passed on `c2bbf5e` (run `qa-20261023t2224-82a5`, §11) and earlier on the pre-repair tree (§10). It was not rerun on `3abe19d`, whose only change is `body-parser` in the lockfile (§12). Owner PENDING |
 | U02 | READY | `inv-stall`; `owner-a` (aged sign-in) | Operator automation passed. Owner PENDING |
 | U03 | READY | `inv-stall`; `owner-a` | Operator automation passed. Owner PENDING |
 | U04 | READY | `inv-void`; `owner-a` | Operator automation passed. Owner PENDING |
@@ -285,12 +285,12 @@ Every result line is **PASS / FAIL — PENDING**: only the owner decides. The op
 - Account `owner-a`. Fixture: `inv-probe` (U01's held-attempt fixture; `inv-held` is kept for U05).
 1. Sign in (login 1; see §4.2). Then **Invoices** → **Show issued invoices** → **Choose a store…** → `Northwind Main (QA)` → open the row with `inv-probe`'s number.
 2. **Shell:** `npm run qa:interactive -- scenario held-void inv-probe` (`status` then shows `armed=held-void inv-probe`).
-3. **Void invoice…** → choose a reason → **Void invoice**, once. The page reports the attempt as not confirmed (the edge answers 502; §6). Close the confirmation and the invoice dialog, so that the card **Void of invoice <n>** stays on the page.
+3. **Void invoice…** → choose a reason → **Void invoice**, once. The page reports the attempt as not confirmed (the edge answers 502; §6). Close the confirmation and the invoice dialog, so that the card **Void of invoice <n>** stays on the page. **Operator check now, before step 5:** `npm run qa:interactive -- status` shows a `fault record` for `inv-probe`. When it has `committed` true, `npm run qa:interactive -- evidence inv-probe` shows `voided` with exactly one `store.invoice.void` audit. When it has `committed` false, the held request was refused before running (most often a sign-in older than 10 minutes) and the invoice is still `issued`; the controls in steps 5–7 can still be checked. Write the state and the audit count down.
 4. Text size and width. Set the browser's font size to 24 px (Chrome: Settings → Appearance → Font size → **Very large**), and make the page 320 CSS px wide and 600 high (DevTools → device toolbar → Responsive, 320 × 600). Write down the method you used. Set the font size back afterwards.
 5. Scroll to the card. Its heading names the invoice number, and **Check again**, **Check invoice** and **Dismiss** are readable and not covered.
 6. Press Tab until **Check invoice** has focus, then press Enter. It reads that one invoice and says what it shows now (for example `Invoice <n> is voided now. This does not show which request voided it.`).
 7. Click **Dismiss** with the mouse. The card goes, and nothing is sent to void the invoice.
-- **Operator check:** `npm run qa:interactive -- status` shows a `fault record` for `inv-probe`, with `committed` true when the held request ran. `npm run qa:interactive -- evidence inv-probe` then shows `voided` with exactly one `store.invoice.void` audit. That audit is the held attempt's own void; nothing comes from **Check invoice** or **Dismiss**. **Network (optional):** Enter sent one `GET …/invoices/<id>`, and Dismiss sent nothing.
+- **Operator check:** after step 7, `npm run qa:interactive -- evidence inv-probe` shows the same state and audit count as the check before step 5: `voided` with exactly one `store.invoice.void` audit when the held request ran. That audit is the held attempt's own void; **Check invoice** and **Dismiss** add nothing. **Network (optional):** Enter sent one `GET …/invoices/<id>`, and Dismiss sent nothing.
 
 Result: PASS / FAIL — PENDING
 Notes:
@@ -566,7 +566,7 @@ These are the operator's checks, not the owner's (shortlist B01–B12). Correcte
 - **CI evidence.** The named assertions ran in exact-SHA CI 39980272453 on `089c622`. Both jobs, `appsec` and `quality`, succeeded on attempt 1.
   - Every test id named below (`M5R-03a`, `IVH-08`, `S2-DB-24` and so on) is declared in its file at `089c622`. Each has exactly one `ok` line, and no `not ok`, in the `quality` step the row names: 70 of 70 id citations checked.
   - The deterministic runner (`scripts/run-tests.mjs`) prints no per-test line for the suites it runs under `server/`, `src/`, `tests/quality/` and `tests/firestore/`. For those CI shows only `discovered suites 177 (minimum 177)`, `required sentinels 119` and `suites=177 pass=177 fail=0`. A test cited by name in such a suite is shown to exist at `089c622` and its suite to pass. Its own result is not shown separately. These citations are marked *(suite count)*. `tests/quality/production-runtime-contract.test.mjs` is not even a required sentinel, so only the suite count protects it.
-- **The current tree.** Outside `docs/`, `c2bbf5e` differs from `089c622` only in `package-lock.json` (`zod` 4.6.7). Its own exact-SHA CI, 40033824483, **FAILED** on attempt 1 at the dependency audit alone, on a newer High advisory for `body-parser`; `zod` was no longer reported. Every other executed step of both jobs succeeded on it (one post step was skipped), with no `not ok` line and `suites=177 pass=177` (§11).
+- **The current tree.** Outside `docs/`, `c2bbf5e` differs from `089c622` only in `package-lock.json` (`zod` 4.6.7). Its own exact-SHA CI, 40033824483, **FAILED** on attempt 1 at the dependency audit alone, on a newer High advisory for `body-parser`; `zod` was no longer reported. Every other executed step of both jobs succeeded on it (one post step was skipped), with no `not ok` line and `suites=177 pass=177` (§11). `3abe19d` (QA-CI-REPAIR-P1) changed `package-lock.json` alone again (`body-parser` 1.20.9 and 2.4.0); its CI is recorded in §12.
 - **Live evidence** is the operator's own runs through the QA session (§10, §11).
 
 Layers are labelled separately:
@@ -590,7 +590,7 @@ CI has no public-proxy layer. Nothing here is production evidence, and every exc
 | B09 — a fresh disposable database matches the runtime preflight | PASS | PG, contract · `089c622` | `server/persistence/postgresStartupPreflight.test.ts` "the migrations directory holds exactly the up files 001..035, and REQUIRED_MIGRATIONS is each one's sha256" *(suite count)*; `tests/quality/migration-files-contract.test.mjs` "each migration file matches its pinned byte-fingerprint" *(suite count)*; `rlsIsolation` S2-DB-1 (001–005 applied to a fresh disposable service by the trusted executor) ("Migration executor… (S1b)"); `customerDirectory` M7C-01 (001–035 applied clean); `productionEntryPreflight` M6PF-02, M6PF-22 (a changed checksum refuses `migration_state_invalid`) ("Production entry startup preflight… (M6-ENTRY-P1)"); `tenantEntry` M7TE-10 (a ledger that is not exactly 001–035 refuses startup). Protected baseline: migrations 001–035 plus the four frozen paths, 74 files, unchanged | No single CI step applies 001–035 to an empty database in one go: one fresh service is carried forward across steps. The preflight trusts ledger rows, so in-place drift is not re-read (DA-55). Live: every QA `start` and `reset` makes a new owned cluster through the trusted executor, and the tenant entry starts on it; that its preflight accepted exactly 001–035 is inferred from its starting, not from a printed ledger read. No managed database was checked; G-MIGRATE stays OPEN |
 | B10 — runtime grants match the approved narrow surface | PASS for the approved narrow-grant contract only. Direct-call capability risk: **OPEN, not resolved** | PG · `089c622` | `productionEntryPreflight` M6PF-01 (the runtime login's privileges equal `APPROVED_ROLE_GRANTS` exactly after a fresh 001–035 apply), M6PF-14 (a stray privilege is refused at startup); `customerCreate` M7CC-09 (as the runtime login, every direct INSERT, UPDATE, DELETE and TRUNCATE on the customer table is 42501) ("Tenant customer create over HTTP… (M7A-CUSTOMERS-P3)"); `invoiceDraftRoutine` IDR-02 (no runtime privilege by any path on two RLS tables) ("Invoice draft routines… (M7B-INVOICES-P1)"); `rlsIsolation` S2-DB-6, S2-DB-7 (the approved `store`/`tenant` verbs, at the 001–005 state) | Approved direct table grants remain by design and are recorded: INSERT on `public.store`, column UPDATE on `public.store.store_name` and `public.tenant.legal_name` (DA-29), and INSERT on `public.audit_event` for `tmpos_audit_writer`. All `tmpos_app` EXECUTE grants are shared by the admin and tenant entries (DA-37). **Open:** a holder of the runtime login and a minted key can execute definer routines directly, outside audit, idempotency and outbox (DA-118 and DA-119, pre-deployment blockers; DA-132). Passing HTTP requests do not close that. M6PF-01 proves equality with the approved list, not minimality. G-DBROLE stays OPEN |
 | B11 — required access does not rely on automatic public-table grants | SQL: PASS. Data API HTTP: **BLOCKED** for a hosted Data API (not performed); NOT APPLICABLE inside this repository (no Data API layer exists here) | PG (SQL only) · `089c622`; no HTTP layer | `rlsIsolation` S2-DB-22c (a table created later is closed by default; the default privileges hold for 005's role), S2-DB-0 (PUBLIC `TEMPORARY` closed) ("Migration executor… (S1b)"); `productionEntryPreflight` M6PF-30, M6PF-31 (PUBLIC relation, column or definer-routine exposure is refused), M6PF-36 (refused through the entry) ("Production entry startup preflight… (M6-ENTRY-P1)"); `invoiceVoidRoutine` IVR-05 (035's routines: nothing for PUBLIC, `anon`, `authenticated` or the audit writer) | **Data API HTTP was not performed.** The repository has no Supabase or PostgREST configuration and no Data API data call. Migrations 001–035 grant nothing to `anon` or `authenticated`: they only revoke from them, and every up migration from 006 to 035 names them in such revokes or in apply-time postconditions. 002 is written against "PostgREST + anon key" on a Supabase project, so a hosted Data API's schema exposure, object grants, other owners' default privileges and RLS are deployment properties this stage cannot evidence. **Deferred risk (not a leak finding):** the startup preflight (`server/persistence/postgresStartupPreflight.ts`) checks the runtime login, its role memberships and PUBLIC, but not `anon` or `authenticated`. A grant to them added after the migrations, or default-privilege drift, would pass startup. Whether it is reachable still depends on schema exposure, object grants and RLS. In CI `anon` and `authenticated` exist only as test-created NOLOGIN roles. G-DBROLE stays OPEN; not changed here |
-| B12 — the isolated QA setup cannot leak into production or live services | PASS for the observed runs only. Overall **QUALIFIED**: lifecycle ownership is not fully guaranteed (§7) | contract (CI, suite count), proxy and host `/proc` (live) · `089c622`; live runs `qa-20261023t2047-d5e0`, `qa-20261023t2055-fa9b`, `qa-20261023t2224-82a5` | **CI:** `qaInteractiveContainment` (src/ and server/ never import or name the QA tooling; the production construction carries no token verifier; the QA bundle config swaps exactly two modules and reads no `.env`; neither `.replit` nor CI mentions the tool) and `qaInteractiveFront` (CSP `connect-src 'self'`; identity forwarding only to the emulators; strict `postmaster.pid` read) *(suite count; both required sentinels)*; "BUILD INTEGRITY: PASS"; "[forbidden-artifacts] tracked=2364 — PASS". **Live:** in both smoke runs (R1 attempt 2 and §11) the browser contacted only the Preview host, `fonts.googleapis.com` and `fonts.gstatic.com`, with no CSP violation line; a socket snapshot of run `qa-20261023t2055-fa9b` (21:19:24Z: 4 recorded roots, 12 processes, 18 sockets) found no non-loopback connection and port 5000 as the only public listener; `stop` and `start` removed and made owned records only (§10, §11); the current database is the recorded one (§3) | **Not fully guaranteed:** (1) a cluster is unrecorded between `initdb` and its record (§7); a kill in that window leaves a cluster neither `start` nor `stop` cleans, and the tool has no code for it (none exists now); (2) the check-then-signal window (§7) is not closed; (3) the shortlist's step 4 was not performed: the journey's logs and browser storage were not inspected for token, contact or request-body leakage. The lifecycle helpers (`stillOwned`, `removeOwnedDir`, `insideStateDir`, the supervisor's reset and stop paths) have no CI test; only the strict `postmaster.pid` read and `postgresOn` do. Egress is a browser host list and one IPv4-only socket snapshot of the idle hand-over run, not continuous capture. "No postgres left after stop" is the operator's process-list observation. The QA session never runs in CI. The uncommitted `.replit` change (Node 22, extra port mappings) was never read by CI. Retention, real edge and provider checks, backup and restore stay launch work |
+| B12 — the isolated QA setup cannot leak into production or live services | PASS for the observed runs only. Overall **QUALIFIED**: lifecycle ownership is not fully guaranteed (§7) | contract (CI, suite count), proxy and host `/proc` (live) · `089c622`; live runs `qa-20261023t2047-d5e0`, `qa-20261023t2055-fa9b`, `qa-20261023t2224-82a5`, `qa-20261027t0327-f61e` | **CI:** `qaInteractiveContainment` (src/ and server/ never import or name the QA tooling; the production construction carries no token verifier; the QA bundle config swaps exactly two modules and reads no `.env`; neither `.replit` nor CI mentions the tool) and `qaInteractiveFront` (CSP `connect-src 'self'`; identity forwarding only to the emulators; strict `postmaster.pid` read) *(suite count; both required sentinels)*; "BUILD INTEGRITY: PASS"; "[forbidden-artifacts] tracked=2364 — PASS". **Live:** in both smoke runs (R1 attempt 2 and §11) the browser contacted only the Preview host, `fonts.googleapis.com` and `fonts.gstatic.com`, with no CSP violation line, and the §12 journey contacted only the same three hosts; a socket snapshot of run `qa-20261023t2055-fa9b` (21:19:24Z: 4 recorded roots, 12 processes, 18 sockets) found no non-loopback connection and port 5000 as the only public listener; `stop` and `start` removed and made owned records only (§10, §11); the current database is the recorded one (§3). **Live, QA-CI-REPAIR-P1 (§12):** one read-only journey (run `qa-20261027t0327-f61e`) left no unexpected token, password, CSRF, contact or request-body hit in its run's logs, its browser storage or its console, and apart from the httpOnly session cookie only the identity SDK's synthetic sign-in record held tokens | **Not fully guaranteed:** (1) a cluster is unrecorded between `initdb` and its record (§7); a kill in that window leaves a cluster neither `start` nor `stop` cleans, and the tool has no code for it (none exists now); (2) the check-then-signal window (§7) is not closed; (3) the shortlist's step 4 was performed in QA-CI-REPAIR-P1 for one read-only journey only (§12). A held void's browser-storage footprint was checked in the source, not at runtime. The lifecycle helpers (`stillOwned`, `removeOwnedDir`, `insideStateDir`, the supervisor's reset and stop paths) have no CI test; only the strict `postmaster.pid` read and `postgresOn` do. Egress is a browser host list and one IPv4-only socket snapshot of the idle hand-over run, not continuous capture. "No postgres left after stop" is the operator's process-list observation. The QA session never runs in CI. The uncommitted `.replit` change (Node 22, extra port mappings) was never read by CI. Retention, real edge and provider checks, backup and restore stay launch work |
 
 Adjudications by the operator (recorded, not hidden):
 - **B10.** An adversarial pass in R1 proposed FAIL against a stricter wording ("the runtime cannot write any table directly"). The row's contract is the approved grants plus the direct-write refusals, and that holds. The direct-call capability risks are listed as open, not resolved.
@@ -698,5 +698,162 @@ This is the operator's evidence. It marks no owner check.
 - **Ownership.** The database server is the one `current.json` names. Its pid, start time and boot match, its command line is `postgres -D <that cluster>/data`, and its `postmaster.pid` names it. `.cache/tmpos-qa/tmp` held only that cluster. No orphan cluster existed at any point checked in this stage. The §7 residuals (the unrecorded window between `initdb` and the record, and the check-then-signal window) are unchanged.
 - **Memory.** 7,965 MB and no swap. At 22:11Z `oom_kill` read 11 in the same boot (3 in `system.slice`, 8 in `user.slice`), all after R1's last reading of 0. The kernel log is not readable here, so the victims are unknown. The QA processes of that run survived them. The counter stayed 11 through the smoke (last reading 22:26:54Z). It was not read at the hand-over. At 22:47:59Z it read 13 (user.slice 10), with the cause again not identified. The hand-over run's four recorded processes were still running, and `status` still said ready.
 - **U06–U16** are mapped in §4.3, and **B01–B12** are corrected in §9.
+
+## 12. QA-CI-REPAIR-P1 record (2026-10-26/27)
+
+This is the operator's evidence. It marks no owner check.
+
+- **Entry (2026-10-26).**
+  - At 12:36:26Z HEAD and `origin/main` were both `d974cb5` (tree `51e9a259…`), the QA-HANDOFF-CLOSE-P1 record. Only `.replit` and the seven excluded untracked groups were dirty.
+  - The VM had rebooted at about 11:28:54Z. `oom_kill` read 0 in that boot. `MemAvailable` was 3,725 MB, with 4 CPUs.
+  - `status` reported no running session and a stale record. The record still named `qa-20261023t2227-9aac`, the §3 hand-over, from the previous boot. Its cluster directory was still on disk. No postgres, Java or QA process was running.
+  - The workspace host had started `npm run dev` on port 5000 at 12:04:29Z. It is not QA-owned.
+  - A 0-byte `.git/index.lock` from 12:30:58Z had no holder. It was not removed. It was gone after the second reboot; this stage did not remove it.
+  - The protected baseline matched: 74 of 74 files.
+  - On a scratch copy of HEAD's lockfile (12:40Z), the unchanged audit checker failed with one reason: `NEW High package not in manifest: body-parser [GHSA-27r3-jxmh-p828]`.
+- **Four VM reboots.** None is attributed to a cause here.
+  - About 11:28:54Z on 2026-10-26, before the stage started.
+  - About 13:24Z (boot `9c436d03…`). Work resumed at 13:38:57Z. The workspace host restarted `npm run dev` at 13:38:44Z.
+  - Between about 14:30Z and 18:00Z (boot `ed6664d6…`). Work resumed at 18:01:05Z. Three review passes were cut off without a verdict and were rerun. Afterwards the working tree was unchanged, no `.git/index.lock` existed, no dev server ran, `MemAvailable` was 4,288 MB and `oom_kill` read 0.
+  - Between 19:06Z on 2026-10-26 and 03:04Z on 2026-10-27 (boot `4f41634b…`, up at about 03:04:28Z). It ended the verification run `qa-20261026t1807-4dd0` and the correction of the B12 drafts, which had applied nothing. The working tree was unchanged afterwards.
+- **The advisory.** GHSA-27r3-jxmh-p828 (CVE-2026-111181, `body-parser` denial of service via trailing bytes after a compressed request body, High) affects `body-parser` < 1.20.9 and ≥ 2.0.0 < 2.4.0. The tree held 1.20.4 under `express` 4.22.1 and 2.3.0 under the `@modelcontextprotocol/sdk` copy of `express` 5.2.1.
+- **The repair (`3abe19d`, `package-lock.json` only).**
+  - Four lock entries change and one is added. Each parent keeps its own major line.
+    - `body-parser` 1.20.4 → 1.20.9. It is shared by `express` 4.22.1, `firebase-tools` 15.23.0 and `exegesis` 4.3.0. 1.20.9 needs `qs` ~6.16.0, so it gets a new nested `qs` 6.16.1. The top-level `qs` 6.14.2 stays for `express` 4.
+    - Under `@modelcontextprotocol/sdk`: `body-parser` 2.3.0 → 2.4.0, its nested `content-type` 2.0.0 → 2.1.0, and the SDK's `qs` 6.15.3 → 6.16.1.
+  - `package.json`, the audit manifest, its checker, the scanner rules and CI are unchanged. No exception was added. `zod` 4.6.7, `vite` 6.4.5, the SDK 1.32.1, both `express` entries and the top-level `qs` are unchanged.
+  - **The new versions change more than the advisory.**
+    - On both lines, the decompression stream is closed down after a compressed body is read (the fix). An unsupported charset is refused with 415 before any stream is made.
+    - 1.20.5–1.20.9 also fix the extended urlencoded parser's `arrayLimit` for arrays over 100 elements (1.20.5). An invalid `limit` now throws a `TypeError` at construction (1.20.6). Every in-tree limit is valid: 64kb, 130mb, 1 GiB through `exegesis`, and the 100kb default.
+    - `qs` 6.16, now under both `body-parser` lines and `express` 5, turns `strictMerge` on by default and changes bracket-key and `arrayLimit` handling. In `body-parser` that reaches only the extended urlencoded parser.
+    - 2.4.0 also decodes zstd where the runtime's zlib has it (Node 22 here; CI's Node 20 still answers 415). It no longer mutates its options or the request, and it adds a strict-JSON fast path and `content-type` 2.1.0.
+  - **Reach.**
+    - `express` 4 loads `body-parser` 1.20.9 in every process that imports it, both shipped entries included (`server/runtime/app.ts`). Neither mounts a body parser.
+    - The runtime refuses any `Content-Encoding` on a JSON route with 415 before reading (`admitBody`). The production runtime contract bans `express.json`, `body-parser` and `req.body` in `server/runtime`.
+    - 1.x is mounted only in the non-shipped platform-identity API (64kb; it was affected before this fix whenever it ran), two diagnostics scripts and the Firebase emulators. 2.x is never loaded.
+  - **Registry.** The tarball URLs and integrity equal the lock. 1.20.9 and 2.4.0 were published on 2026-10-22 (11:38:27Z and 11:39:38Z) and are the newest on their lines. The registry's provenance statements name `expressjs/body-parser` at `refs/tags/1.20.9` and `refs/tags/v2.4.0`, with subject digests equal to the lock. The statements were decoded; their signatures were not verified separately.
+- **Install and local checks** (Node 20.20.0 and npm 10.8.2, public registry, run serially).
+  - First, in a scratch copy (12:41–12:42Z): the lockfile-portability check passed (1,102 entries, all from the public registry over https, none missing integrity), and a clean `npm ci` exited 0 with the lockfile unchanged.
+  - The workspace dev server was stopped with SIGINT at 14:11:17Z (§2.1). `npm ci` ran from 14:11:26Z to 14:12:01Z and exited 0 ("added 1002 packages"). The lockfile was byte-identical afterwards, and `npm ls --all` exited 0.
+  - **Audit of the installed tree (14:13Z).** `body-parser` is no longer listed.
+    - Production: 15 advisories, High 0.
+    - Full: 36, High 10 (`basic-ftp`, `brace-expansion`, `compression`, `firebase-tools`, `get-uri`, `js-yaml`, `pac-proxy-agent`, `proxy-agent`, `tar`, `undici`). All ten are development-only and were present before this change.
+    - The unchanged checker passes. It reconciles the production tree's Highs only.
+    - The top-level `qs` 6.14.2 still carries moderate advisories. They have no manifest entry.
+  - **Gates.** `lockfile:check`, `typecheck:contract`, the typecheck, `build:server`, `build:server:tenant`, `build`, `build:check` (PASS; main bundle 3,860,989 B, the same as in QA-HANDOFF-CLOSE-P1) and `forbidden:check` (tracked 2365) passed. `security:gates` passed its structural checks only; scanner reconciliation runs in CI.
+  - **Suites.** All passed: identity surface 15, `bodyPolicy` 21, `app` 43, `enforcement` 28, `requestSecurity` 6, `check-dependency-audit` 13, `production-runtime-contract` 21 and the two QA-tool suites 43. `oom_kill` read 0 throughout.
+  - **Behaviour against an exact HEAD tree.**
+    - On both lines, on Node 20 and 22, the tested bodies got the same answers before and after: valid, exactly at the limit, one byte over, malformed, a refused charset, gzip, an unknown encoding, and urlencoded forms.
+    - Two differences were seen. `br` is 415 on 1.x and 200 on 2.x, before and after (pre-existing). On Node 22 only, 2.4.0 decodes zstd where 2.3.0 answered 415.
+    - `qs` 6.16's reverse-order mixed keys were not exercised.
+    - A small trailing-compressed-data body to a loopback server left it usable, on the old and the new versions alike.
+  - **Build output.** The gitignored `dist/` (4.9 MB) was left in place. The local command guard refused its deletion four times. It is not tracked or pushed, and it does not affect the QA bundle. The owner may delete it by hand.
+- **Review of the commit.** Independent review ran in four parts. Three of them were cut off by the third reboot and rerun. None found a blocker. Every finding was applied to the commit message before the commit:
+  - wording fixes;
+  - one major: 2.4.0 gets the same stream fix and early charset refusal, but the message had named 1.x only;
+  - seven minor, among them CI, provenance and limit claims the evidence did not yet show.
+- **Commit and push.**
+  - After the fourth reboot (03:18–03:21Z on 2026-10-27) the working tree was unchanged. `npm ls` for `body-parser`, `qs` and `content-type` exited 0, and `lockfile:check` passed.
+  - `3abe19d` (`3abe19d6ecdf8c18ff7d43a6f2189bf6b6bdde57`, tree `6b2d94a6e19be25f892518428c07e281af7c1158`) stages exactly `package-lock.json` (+32/−16). It was pushed fast-forward `d974cb5..3abe19d` at 03:21:59Z on 2026-10-27.
+  - Its exact-SHA CI, 40443762350, **succeeded on attempt 1** (2026-10-27). `appsec` ran 03:22:04–03:25:01Z and passed all 12 steps. `quality` ran 03:22:04–03:49:28Z (27 min 24 s of its 30) and passed all 70 steps; none failed or was skipped. The rate-limiter suite with M6R-PERF, the shop browser suite and the dependency audit's reconciler all passed. It was inspected once and not rerun. One passing attempt does not show either the M6R-PERF or the Chromium flake resolved.
+- **Earlier CI failures, kept as read.** This stage reran none of them.
+  - `c2bbf5e`, CI 40033824483, attempt 1: `appsec` succeeded. `quality` failed only at "Dependency audit (SCA)", and one post step was skipped.
+  - `f18626d`, CI 40037228605: attempt 1 failed at the Chromium launch (below), and every later step was skipped. Attempt 2 failed only at "Dependency audit (SCA)".
+  - `d974cb5`, CI 40041914114: **FAILED on both attempts, at M6R-PERF.**
+    - `appsec` succeeded on attempt 1 (23:50:54–23:54:09Z on 2026-10-23).
+    - `quality` attempt 1 ran from 23:50:54Z on 2026-10-23 to 00:00:36Z on 2026-10-24. Attempt 2, a rerun of `quality` only, ran from 00:02:03Z to 00:11:32Z on 2026-10-24.
+    - In each attempt 28 steps succeeded. "Distributed rate limiter against disposable PostgreSQL (M6-RATE-P2)" failed at "M6R-PERF … nothing unavailable" (expected 0, actual 36 in attempt 1 and 48 in attempt 2).
+    - The 40 later steps, from "Rate-limited runtime over real sockets against disposable PostgreSQL (M6-RATE-P2)" to "Dependency audit (SCA)", were skipped, and so was one post step.
+    - The dependency audit therefore never ran on `d974cb5`. The rerun did not pass.
+- **M6R-PERF on `d974cb5` (diagnosed; nothing changed).**
+  - **The check.** 2,000 consumes by 32 workers over two limiter instances, with one hot bucket and 280 cold ones. Each answer has the adapter's 500 ms deadline, and each transaction a 200 ms `lock_timeout`. It asserts exact accounting and that nothing is unavailable.
+  - **Classification: (c), resource contention in the CI environment, with the cause (d) undetermined.** It is not classed as a product, store, driver, test-fixture or oracle defect, because none was demonstrated. No code was changed for it.
+  - **Record.**
+    - 50 of the 54 attempts with diagnostics since R1 (`71bbb03`, 2026-10-10) passed.
+    - The four failures are two pairs of consecutive attempts about 10 minutes apart. `fba801b` (CI 38872647754, 2026-10-16) attempts 1 and 2 had 1 and 29 of 2,000 unavailable; attempt 2 also failed RLR-09, and attempt 3 passed. `d974cb5` attempts 1 and 2 had 36 and 48.
+    - Doc 08 records the same flake on `52f17d7`, before R1.
+  - **Integrity held in both `d974cb5` attempts.**
+    - Nothing was over-allowed or under-counted, and all 281 buckets reconcile.
+    - Allowed plus committed-after-the-deadline equals the expected 1,340 (1,337 + 3, and 1,334 + 6). The diagnostics' exact-accounting flag was false in both attempts because of those 3 and 6 grants alone.
+    - Deadline timers ran at most 2 ms late. The test process's event loop was never delayed by more than 21 ms.
+  - **What the logs show.**
+    - The four failures have the four largest routine-answer-to-end tails (COMMIT's acknowledgement plus `DISCARD ALL`) of the 51 attempts that measure it: 206–426 ms. Every pass is at or below 181 ms, so the gap is thin.
+    - There was no single stall. Attempt 1's server log shows at least four separate holds of 200 ms or more on the hot row.
+    - Attempt 2 shows a whole-server slowdown: its routine-answer-to-end p95 was 81 ms, against at most 12 ms in every pass.
+    - In attempt 1 a cold consume waited 385 ms for a connection. The pass maximum is 190 ms.
+    - No server checkpoint overlaps a failing window. Autovacuum and the container's port hop are not ruled out.
+  - **The premise.** "Nothing unavailable" is not an adopted service level. Doc 08 says "no service level is set", and G-PERF and DA-60 stay OPEN. In the passing attempts the worst margin is about 1.3× against the 500 ms deadline and about 1.1× against the 200 ms lock bound.
+  - **Unchanged.** Nothing was lowered, widened, retried or disabled. The 2,000 count, the expected statuses, the deadlines, the limiter and the test's contention are as they were.
+  - A local run cannot test the suspected cause: the local harness cluster runs with `fsync`, `full_page_writes` and `synchronous_commit` off.
+  - **Follow-ups for CI (proposed, not implemented):**
+    - split the COMMIT acknowledgement from `DISCARD ALL` in the account;
+    - sample `pg_stat_activity` wait events during the run;
+    - take `pg_stat_wal` and `pg_stat_io` before and after, with `track_wal_io_timing` on;
+    - turn on `log_lock_waits`;
+    - sample the runner's pressure stall information (PSI).
+- **Chromium launch on the CI runner (diagnosed; nothing changed).**
+  - In `f18626d`'s attempt 1, the `before()` hook of `shopRoleLevels.browser.test.mjs` called `launch()`, and the readiness call `Browser.getVersion` timed out after 15 s. No page opened and no UI assertion ran. It is a launch failure, not a product failure.
+  - The same error occurred 3 times in about 100 runs: 37506410965 attempt 1 (2026-10-06), 38831343327 attempt 2 (2026-10-16) and 40037228605 attempt 1 (2026-10-23). Every rerun that reached that step passed it.
+  - It is classified environmental. In the two older cases Chromium's first output came about 10–14 s after it was started. No defect in the harness's readiness logic is demonstrated.
+  - **Diagnostics gap (a follow-up, not a fix).** The launcher keeps only a stderr tail (its last 2,000 characters) and records no exit code or signal, so the start-up phase cannot be seen.
+  - The browser checks and their security settings are unchanged, and so is the 15 s bound. No log shows that a longer bound would have helped.
+- **QA session.**
+  - `qa-20261023t2227-9aac` (§3) had already ended with a reboot before this stage.
+  - After the reinstall, the verification run `qa-20261026t1807-4dd0` (generation 1) reached ready. Its `start` first removed the stale record's run and cluster directories.
+  - Its `probe` output holds four refusals: no session 401, `tech-a` 403, `owner-a` without CSRF 403, and `owner-a` with a wrong CSRF value 403. No positive control was recorded.
+  - The fourth reboot ended that run. Its run directory and cluster stayed on disk as a stale record, and its logs were scanned before anything removed them (B12 below).
+  - **The startup, sign-in and read check on the reinstalled tree** (2026-10-27):
+    - Run `qa-20261027t0327-f61e`, generation 1, was ready at 03:30:56Z. Its `start` first removed the stale run's cluster and run directories.
+    - From 03:32:06Z to 03:32:38Z one headless Chromium went through the public Preview origin. It signed in once as `owner-a` (1.7 s), opened **Customer Directory** from the sidebar without a reload, and read the `cust-ada` profile with its phone and email shown. All three steps passed.
+    - It only read. The API calls were four `GET /api/v1/session`, one login, the customer list and that one profile. Only the Preview host and the two web-font hosts were contacted.
+    - `stop` at 03:33:53Z closed it, and no postgres process remained.
+  - **Hand-over.** A fresh `start` (03:34–03:37:36Z on 2026-10-27) made run `qa-20261027t0334-c7be`, generation 1 (§3), with no fault armed and no fault record.
+    - Its supervisor, emulators, Firestore JVM and database server match the boot and their recorded start times. `postmaster.pid` names that server, every postgres process is it or its child, and no other cluster or run directory exists.
+    - `inv-void`, `inv-held`, `inv-stall` and `inv-probe` (numbers 1, 2, 3 and 4) are `issued`, each with one issue audit.
+    - The seed signed `owner-a` in once (about 03:37Z), and no operator sign-in followed. That leaves four of the account's five logins until about 03:42Z and all five after it; U01–U05 need three.
+    - The run values in §3 are a record. `status` and the corner label show the current run.
+- **B12 (operator).**
+  - Drafts for the shortlist's step 4 were written and reviewed: a log scanner, a browser-storage probe and a journey with one sign-in. All three only read.
+  - The scanner's self-test first failed on an authorization-header case: the scheme word was read as the value. Its pattern was fixed, and the self-test then passed.
+  - The fourth reboot ended the drafts' correction before it applied anything. All three still matched their pre-fix digests. The correction resumed under no-run limits: no journey, no QA command and no browser.
+  - The operator checked the corrected scripts before running them. Each passed a syntax check, and the scanner passed its extended self-test. They print counts, kinds and masked names only, The exact values they search for reach the log scanner on standard input and the storage probe inside its in-page evaluation over the browser's debugging pipe. They never appear on a command line or in output.
+  - **Logs: no unexpected hit.**
+    - The stale verification run `qa-20261026t1807-4dd0`: its nine run-directory files and its cluster's `postgres.log`, plus the two state-directory logs of earlier runs.
+    - The journey's run: its nine run-directory files and its `postgres.log`, scanned while it was up, plus the same two state-directory logs (not counted toward its verdict). Five exact values from that session were searched for as well as the patterns: its CSRF token, its session cookie, the account's password, and the customer's phone and email.
+    - The file left after `stop` (`last-run.log`) was clean too.
+    - No pattern or exact value matched in any scanned file, so no exemption was used. By design the scanner ignores token, credential and account-email patterns in the emulator logs, and the demo API-key pattern everywhere.
+  - **Browser storage after the journey: PASS.**
+    - There was no app `localStorage` or `sessionStorage` entry, no Cache Storage and no service worker. The URL and history state were clean.
+    - The identity SDK's own IndexedDB sign-in record holds its synthetic tokens and the account email, as designed. Apart from the httpOnly session cookie, no other storage held a token.
+    - The session cookie is `httpOnly`, `secure` and path `/`, and its value was found on no other surface searched.
+    - **The browser held that cookie with `SameSite=None`.** The runtime sets `SameSite=Strict` (`server/runtime/sessions.ts`), and the QA front passes `Set-Cookie` through unchanged. So the attribute changes after the front, most likely at the workspace host's Preview edge (not verified). The runtime's Origin and CSRF checks still apply. This is QA-Preview behaviour, not production evidence.
+  - **Console:** four lines, no hit.
+  - **Recovery and contact persistence.** The read-only journey left no contact in storage. It creates no held void, so the recovery record was checked in the source. The shop keeps a held void in memory (`src/tenant/invoiceVoidHold.ts`), and nothing under `src/tenant/` uses browser storage. A held void's storage footprint at runtime was not exercised.
+  - B12 stays QUALIFIED while the §7 lifecycle residuals stay open.
+- **Owner and operator checks.**
+  - Every owner check U01–U16 stays PENDING. U01–U05 come first.
+  - U08 and U15 stay BLOCKED. U10 stays READY for the owner's steps, with its live direct-API refusal BLOCKED.
+  - B11's SQL half PASSES. Its Data API HTTP half stays BLOCKED for a hosted Data API and NOT APPLICABLE inside this repository.
+- **Memory.** `MemAvailable` was 3,725 MB at entry and 1,303 MB at 14:10:27Z, while the operator session's TypeScript language server held 2.2 GB (it was left running). It was 1,538 MB once the dev server stopped and 4,288 MB after the third reboot. `oom_kill` read 0 at every recorded check until the verification start of 2026-10-27, during which it went from 0 to 4 (03:27–03:30Z), all four in the user session's shell slice. The kernel log is not readable here, so the victims are not identified. The QA processes and the CI watcher survived, and the start log shows no failed step. The counter stayed at 4 through the journey (`MemAvailable` 4,193 → 4,099 MB).
+- **Review.** Independent review: passed — 42 finding(s) applied.
+- **Not claimed.**
+  - Any owner check.
+  - A pass of M6R-PERF, or of the dependency audit, on `d974cb5`.
+  - A cause for the M6R-PERF stalls. The evidence does not exclude a product-side amplification.
+  - Any service level for the limiter.
+  - A reproduction of the advisory's failure: the small trailing-compressed-data input did not reproduce it.
+  - That the Chromium start is fixed.
+  - That the provenance signatures were verified.
+  - That a held void leaves nothing in browser storage at runtime: that was checked in the source only.
+  - Production readiness.
+- **Still open.**
+  - M6R-PERF's CI flake, with its cause undetermined and the five CI diagnostics not implemented. G-PERF and DA-60 stay OPEN.
+  - The CI runner's intermittent Chromium start and the launcher's diagnostics gap.
+  - The top-level `qs` 6.14.2's moderate advisories, which need an `express` 4 change, and the full tree's ten development-only Highs. All are pre-existing.
+  - The gitignored `dist/` left in place.
+  - The four reboots, with no cause identified.
+  - The tenant session cookie's `SameSite=None` in the QA Preview, where the runtime sets `Strict`. It changes after the QA front, at a place not verified.
+  - The residuals carried from §10 and §11: the `zod` fix's unbounded-container residual, the shared login-limiter client, the edge's 502 for a held void, fault records surviving `reset`, the unrecorded-cluster and check-then-signal windows, U08's, U10's live-refusal and U15's missing prerequisites, the language server's memory beside the stack, the out-of-memory kills of unknown cause, GHSA-46jr's upstream gap, and CI duration (`quality` 27 min 24 s of 30 on `3abe19d`).
+  - All 37 gates in [08](./08-production-gate-and-risk-register.md) stay OPEN.
 
 None of this runbook closes a gate. The owner's Manual QA remains PENDING, and every production gate in [08](./08-production-gate-and-risk-register.md) stays OPEN.
