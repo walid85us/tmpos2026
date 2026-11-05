@@ -266,7 +266,8 @@ async function bringUp(gen) {
     },
     log: { log: (line) => appendFileSync(join(runDir, 'entry.log'), `${line}\n`) },
   });
-  if (result.outcome !== 'listening') throw new Error(`the tenant runtime did not start: ${result.outcome} ${(result.reasons ?? []).join(',')}`);
+  // The refusal category and its bounded codes, as the runtime's own startup_refused line has them (refusalLines).
+  if (result.outcome !== 'listening') throw new Error(`the tenant runtime did not start: ${result.outcome} ${[result.failure ?? 'none', ...(result.reasons ?? [])].join(',')}`);
   world.entry = cap;
   log(`generation ${gen}: tenant runtime listening on 127.0.0.1:${ENTRY_PORT}; seeding`);
   world.registry = await seedWorld({
