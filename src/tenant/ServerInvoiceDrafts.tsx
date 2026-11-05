@@ -717,7 +717,10 @@ export const button = `px-4 py-2 bg-primary text-white text-xs font-black upperc
 export const quiet = `px-4 py-2 bg-white text-primary border border-slate-300 text-xs font-black uppercase tracking-widest rounded-xl disabled:opacity-50 disabled:cursor-not-allowed ${focusRing}`;
 export const hintClass = 'text-[11px] font-medium text-slate-500';
 export const inputClass = `w-full text-sm px-3 py-2 rounded-lg border border-slate-300 bg-white ${focusRing}`;
-export const labelClass = 'block text-[10px] font-black text-slate-500 uppercase tracking-widest';
+// A lines table's column heading: the label type without `block`, which takes a <th> out of the table's columns and
+// stacks the headings in the first one (QA-UI-01). Each heading is padded as its column's values.
+export const columnHeadClass = 'text-[10px] font-black text-slate-500 uppercase tracking-widest';
+export const labelClass = `block ${columnHeadClass}`;
 // [tabindex="0"]: the reopen dialog's lines region (M7B-INVOICES-DISCARD-P1-R1), the only such element in these dialogs.
 const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]';
 
@@ -3039,11 +3042,11 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
               <caption className="sr-only">Draft lines</caption>
               <thead>
                 <tr className="border-b border-slate-100">
-                  <th scope="col" className={labelClass}>#</th>
-                  <th scope="col" className={labelClass}>Description</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
-                  <th scope="col" className={`${labelClass} text-right`}>Line total</th>
+                  <th scope="col" className={`${columnHeadClass} pr-2 text-left`}>#</th>
+                  <th scope="col" className={`${columnHeadClass} pr-2 text-left`}>Description</th>
+                  <th scope="col" className={`${columnHeadClass} pr-2 text-right`}>Quantity</th>
+                  <th scope="col" className={`${columnHeadClass} pr-2 text-right`}>Unit price</th>
+                  <th scope="col" className={`${columnHeadClass} text-right`}>Line total</th>
                 </tr>
               </thead>
               <tbody>

@@ -550,6 +550,12 @@
 //          waiting gives the confirmation back at once (no void POST, no login); the held answer released late changes
 //          nothing (no login, no read, the same confirmation and focus); a timely sign-in still re-reads and needs a new
 //          press. The 30 s deadline itself is component-layer evidence only (SII-142, a controlled clock).
+//   QA-UI-01-P1 — THE LINE HEADINGS OVER THEIR COLUMNS:
+//   SLH-01 the reopen dialog's and the issued dialog's lines tables, in SIS-22's six cells (1440x900, 768x1024, 320x640,
+//          320x480, 768x1024 and 320x600 at a 24 px default text size): ONE header row of five column headings (scope col,
+//          laid out as table cells), above the first line; each heading's box is its column's (within 0.5 px) and its text
+//          starts (#, Description) or ends (the amounts) where the values' do (within 1 px); the owner's two lines and
+//          $92.00, a long description beside them, the values and their order as saved.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
 //   issue POST — the browser's own, from SIS-10 on), and SIS-16's void through its void POST: this file inserts no issuing or
 //   void row.
@@ -1773,6 +1779,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
+  'SLH-01',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -10491,3 +10498,108 @@ scenario('SIS-24', 'R1 AC-05 AC-06 AC-08 A STALLED SIGN-IN, STOPPED, ITS LATE AN
   assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 1, 'ONE void POST in all: the press that met the step-up');
   assert.deepEqual([await storedVoids(main.id), (await voidAudits(tenant)).length], [[], 0], 'nothing voided');
 }, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// QA-UI-01-P1 — the lines tables' column headings (SLH-01). Measured, not read from class names: each heading's box against
+// its column's cells, and the edges of their text, on the real page.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const LINE_HEADINGS = Object.freeze(['#', 'Description', 'Quantity', 'Unit price', 'Line total']);
+/** A lines table as laid out: per header and body row, each cell's tag, scope, display, text, box and the edges of its text. */
+const columnsOf = (page, table) => page.evaluate(`(() => {
+  const t = ${q(table)};
+  if (t === null) return null;
+  const box = (n) => { const r = n.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; };
+  const ink = (n) => {
+    const g = document.createRange(); g.selectNodeContents(n);
+    const rs = [...g.getClientRects()].filter((r) => r.width > 0);
+    return rs.length === 0 ? null : { left: Math.min(...rs.map((r) => r.left)), right: Math.max(...rs.map((r) => r.right)) };
+  };
+  const cell = (c) => ({ tag: c.tagName.toLowerCase(), scope: c.getAttribute('scope'), display: getComputedStyle(c).display, text: c.textContent.trim(), box: box(c), ink: ink(c) });
+  const rows = (rs) => [...rs].map((r) => [...r.cells].map(cell));
+  return { head: rows(t.tHead?.rows ?? []), body: rows([...t.tBodies].flatMap((b) => [...b.rows])) };
+})()`);
+/** What is wrong with a lines table's headings and lines against `shown` (per line: position, description, quantity, unit, total). */
+function columnProblems(where, cols, shown) {
+  if (cols === null) return [`${where}: no lines table`];
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(`${where}: ${what}`); };
+  const near = (a, b, tolerance) => typeof a === 'number' && typeof b === 'number' && Math.abs(a - b) <= tolerance;
+  const [heads = [], ...more] = cols.head;
+  check(more.length === 0, `${cols.head.length} header rows`);
+  check(JSON.stringify(heads.map((h) => [h.tag, h.scope, h.text])) === JSON.stringify(LINE_HEADINGS.map((t) => ['th', 'col', t])), `the headings ${JSON.stringify(heads.map((h) => h.text))}`);
+  check(heads.every((h) => h.display === 'table-cell'), `a heading is not a table cell ${JSON.stringify(heads.map((h) => h.display))}`);
+  check(heads.every((h) => near(h.box.top, heads[0].box.top, HOLD_TOLERANCE)), `the headings are not one row ${JSON.stringify(heads.map((h) => h.box.top))}`);
+  check(JSON.stringify(cols.body.map((r) => r.map((c) => c.text))) === JSON.stringify(shown), `the lines shown ${JSON.stringify(cols.body.map((r) => r.map((c) => c.text)))}`);
+  check(cols.body.length > 0 && heads.every((h) => h.box.bottom <= cols.body[0][0].box.top + HOLD_TOLERANCE), 'a heading is not above the first line');
+  for (const [r, row] of cols.body.entries()) {
+    heads.forEach((h, i) => {
+      const c = row[i];
+      check(near(h.box.left, c?.box.left, HOLD_TOLERANCE) && near(h.box.right, c?.box.right, HOLD_TOLERANCE), `"${h.text}" is not line ${r + 1}'s column ${JSON.stringify([h.box, c?.box])}`);
+      const edge = i < 2 ? 'left' : 'right'; // # and Description read from the left; the amounts end at the right
+      check(near(h.ink?.[edge], c?.ink?.[edge], 1), `"${h.text}" does not ${edge === 'left' ? 'start' : 'end'} where line ${r + 1}'s value does ${JSON.stringify([h.ink, c?.ink])}`);
+    });
+  }
+  return problems;
+}
+
+scenario('SLH-01', 'QA-UI-01 THE LINE HEADINGS OVER THEIR COLUMNS — two drafts saved through the entry (the owner\'s two lines, "QA screen repair (synthetic)" $42.00 and "QA U11 edited" $50.00, Draft subtotal $92.00; and the first beside a 256-character description at 3 x $50.00) and an invoice issued from the second, on ONE page and sign-in in SIS-22\'s six cells (1440x900, 768x1024, 320x640, 320x480, then 768x1024 and 320x600 at a 24 px default text size, Page.setFontSizes): the reopen dialog\'s and the issued dialog\'s lines tables each have ONE header row of the five headings #, Description, Quantity, Unit price, Line total (th, scope col, laid out as table cells) on one row above the first line; each heading\'s box is its column\'s on every line (within 0.5 px, also where the region scrolls sideways) and its text starts (#, Description) or ends (the amounts) where the values\' text does (within 1 px); the lines, their order and the subtotals are as saved', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('h1', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SLH Avery ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SLH Seller ${SUFFIX}`, storeName: `M7SLH Main ${SUFFIX}`, postalAddress: `1 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  const owners = [{ description: 'QA screen repair (synthetic)', quantity: 1, unitPriceCents: 4200 }, { description: 'QA U11 edited', quantity: 1, unitPriceCents: 5000 }];
+  const long = [owners[0], { description: wordsOf(`Long${SUFFIX}w`, 256), quantity: 3, unitPriceCents: 5000 }];
+  const shownOf = (lines) => lines.map((l, i) => [String(i + 1), l.description, String(l.quantity), usd(l.unitPriceCents), usd(l.quantity * l.unitPriceCents)]);
+  const drafts = [
+    { id: await draftVia(direct, tenant, main.id, customer.id, owners), shown: shownOf(owners), subtotal: 'Draft subtotal $92.00' },
+    { id: await draftVia(direct, tenant, main.id, customer.id, long), shown: shownOf(long), subtotal: 'Draft subtotal $192.00' },
+  ];
+  const invoiceId = await issueVia(direct, tenant, main.id, customer.id, long);
+
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('drafts-show')} && !!${q('issued-show')}`, 30_000, 'the Invoices page offers both sections');
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await pickStore(page, main.id);
+  await page.waitFor(drafts.map((d) => `!!document.querySelector('${by('drafts-row')}[data-id="${d.id}"]')`).join(' && '), 30_000, 'both drafts listed');
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the one invoice listed');
+
+  const problems = [];
+  for (const { cell, width, height, font } of VOID_CELLS) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    assert.deepEqual(await page.evaluate('({ innerWidth, innerHeight, rootFont: getComputedStyle(document.documentElement).fontSize })'),
+      { innerWidth: width, innerHeight: height, rootFont: `${font ?? 16}px` }, `${cell}: the viewport and default text size`);
+    for (const [n, d] of drafts.entries()) {
+      await reopenDraft(page, d.id, customer.name);
+      const cols = await columnsOf(page, 'draft-view-lines');
+      const subtotal = await page.evaluate(`${q('draft-view-subtotal')}?.textContent.trim() ?? null`);
+      record('SLH-01', { cell, width, height, font: font ?? 16, view: `draft ${n + 1}`, cols, subtotal });
+      problems.push(...columnProblems(`${cell} draft ${n + 1}`, cols, d.shown));
+      if (subtotal !== d.subtotal) problems.push(`${cell} draft ${n + 1}: the subtotal ${JSON.stringify(subtotal)}`);
+      await closeView(page);
+    }
+    await page.settle(); // the reopen dialog gone before the pointer aims at the row's Open
+    const onTop = await page.evaluate(`(() => { const o = document.querySelector(${JSON.stringify(openOf(invoiceId))});
+      o.scrollIntoView({ block: 'center', inline: 'center' }); const r = o.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { open: o.contains(hit), hit: hit?.closest('[data-testid]')?.dataset.testid ?? hit?.tagName ?? null }; })()`);
+    record('SLH-01', { cell, phase: 'issued open', onTop });
+    assert.ok(onTop.open, `${cell}: the issued row's Open is not on top where the pointer presses it ${JSON.stringify(onTop)}`);
+    await openIssuedInvoice(page, invoiceId, 1);
+    const cols = await columnsOf(page, 'issued-view-lines');
+    const subtotal = await page.evaluate(`${q('issued-view-subtotal')}?.textContent.trim() ?? null`);
+    record('SLH-01', { cell, width, height, font: font ?? 16, view: 'issued', cols, subtotal });
+    problems.push(...columnProblems(`${cell} issued`, cols, shownOf(long)));
+    if (subtotal !== 'Subtotal $192.00') problems.push(`${cell} issued: the subtotal ${JSON.stringify(subtotal)}`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the issued dialog`);
+  }
+  assert.deepEqual(problems, [], 'every lines table\'s headings over their columns, in every cell');
+}, 300_000);

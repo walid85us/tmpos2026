@@ -86,7 +86,7 @@ import {
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
-import { button, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
+import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
 import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 
 const DEFAULT_WAIT_SECONDS = 60;
@@ -2672,11 +2672,11 @@ export function InvoiceSnapshot({ prefix, seller, customerName, lines, amounts }
           <caption className="sr-only">Invoice lines</caption>
           <thead>
             <tr className="border-b border-slate-100">
-              <th scope="col" className={labelClass}>#</th>
-              <th scope="col" className={labelClass}>Description</th>
-              <th scope="col" className={`${labelClass} text-right`}>Quantity</th>
-              <th scope="col" className={`${labelClass} text-right`}>Unit price</th>
-              <th scope="col" className={`${labelClass} text-right`}>Line total</th>
+              <th scope="col" className={`${columnHeadClass} pr-2 text-left`}>#</th>
+              <th scope="col" className={`${columnHeadClass} pr-2 text-left`}>Description</th>
+              <th scope="col" className={`${columnHeadClass} pr-2 text-right`}>Quantity</th>
+              <th scope="col" className={`${columnHeadClass} pr-2 text-right`}>Unit price</th>
+              <th scope="col" className={`${columnHeadClass} text-right`}>Line total</th>
             </tr>
           </thead>
           <tbody>
