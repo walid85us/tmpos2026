@@ -86,7 +86,7 @@ import {
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
-import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, storeLabel } from './ServerInvoiceDrafts';
+import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, RecordId, recordIdText, storeLabel } from './ServerInvoiceDrafts';
 import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 
 const DEFAULT_WAIT_SECONDS = 60;
@@ -1725,6 +1725,7 @@ function IssuedSection({
                               {' · '}{row.status === 'voided' && 'Issued '}<time data-testid="issued-row-issued" dateTime={row.issuedAt} className="whitespace-nowrap">{utcText(row.issuedAt)}</time>
                               {' · '}<span data-testid="issued-row-status">{STATUS_TEXT[row.status]}</span>
                             </p>
+                            <p data-testid="issued-row-id" className={`${hintClass} break-all`}>{recordIdText(row.id, list.rows)}</p>
                           </div>
                           <button
                             type="button" id={issuedOpenIdOf(row.id)} data-testid="issued-open" aria-label={`Open invoice ${row.number}`} aria-describedby={`issued-row-${row.id}`}
@@ -2368,6 +2369,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
                   <dd data-testid="issued-view-void-reason" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_VOID_REASONS[invoice.void.reasonCode]}</dd>
                 </>
               )}
+              <RecordId key={invoice.id} label="Invoice record ID" id={invoice.id} copyName="Copy ID (invoice record)" testId="issued-view-id" />
             </dl>
             <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
             <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>

@@ -721,6 +721,42 @@ export const inputClass = `w-full text-sm px-3 py-2 rounded-lg border border-sla
 // stacks the headings in the first one (QA-UI-01). Each heading is padded as its column's values.
 export const columnHeadClass = 'text-[10px] font-black text-slate-500 uppercase tracking-widest';
 export const labelClass = `block ${columnHeadClass}`;
+
+// QA-UI-02: a record's existing ID — its ending in a list, the whole ID with Copy ID in a dialog. Presentation only:
+// rows, keys and requests always use the whole ID.
+export const RECORD_ID_TEXT = Object.freeze({
+  copy: 'Copy ID',
+  copied: 'Copied',
+  failed: 'Could not copy. Select the ID and copy it.',
+});
+/** A loaded row's ID as listed: its ending, or the whole ID where another loaded row shares that ending. */
+export const recordIdText = (id: string, rows: readonly { readonly id: string }[]): string =>
+  rows.some((r) => r.id !== id && r.id.slice(-8) === id.slice(-8)) ? `ID ${id}` : idEndingText(id);
+/**
+ * A dialog's record ID row (a dt and its dd): the whole ID, selectable, and Copy ID, which says Copied only once the
+ * clipboard took the ID and otherwise says to copy it by hand. Keyed by the ID, its note goes with the record and the dialog.
+ */
+export function RecordId({ label, id, copyName, testId }: { readonly label: string; readonly id: string; readonly copyName: string; readonly testId: string }) {
+  const [note, setNote] = useState<'' | 'copied' | 'failed'>('');
+  const copy = () => {
+    setNote('');
+    // A missing clipboard, a throwing getter or call and a refusal all end the same way: the ID stays shown to copy by hand.
+    Promise.resolve().then(() => navigator.clipboard.writeText(id)).then(() => setNote('copied'), () => setNote('failed'));
+  };
+  return (
+    <>
+      {/* The whole row of the dialog's grid: at 320 px with enlarged text the ID and Copy ID would not fit one column. */}
+      <dt className={`${labelClass} col-span-full`}>{label}</dt>
+      <dd className="col-span-full min-w-0 space-y-1">
+        <span data-testid={testId} className="block font-mono text-xs font-bold text-slate-700 break-all select-all">{id}</span>
+        <span className="flex flex-wrap items-center gap-2">
+          <button type="button" data-testid={`${testId}-copy`} aria-label={copyName} onClick={copy} className={quiet}>{RECORD_ID_TEXT.copy}</button>
+          <span data-testid={`${testId}-note`} role="status" className={hintClass}>{note === '' ? '' : RECORD_ID_TEXT[note]}</span>
+        </span>
+      </dd>
+    </>
+  );
+}
 // [tabindex="0"]: the reopen dialog's lines region (M7B-INVOICES-DISCARD-P1-R1), the only such element in these dialogs.
 const STOPS = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]';
 
@@ -2846,6 +2882,7 @@ function DraftsSection({
                           {' · '}<span data-testid="drafts-row-lines">{lineCountText(row.lineCount)}</span>
                           {' · '}<span data-testid="drafts-row-subtotal">Draft subtotal {formatCents(row.subtotalCents)}</span>
                         </p>
+                        <p data-testid="drafts-row-id" className={`${hintClass} break-all`}>{recordIdText(row.id, list.rows)}</p>
                       </div>
                       <button
                         type="button"
@@ -3035,6 +3072,7 @@ function ReopenDialog({ state, customerText, store, onClose, returnFocus, edit, 
             <dt className={labelClass}>Created</dt><dd data-testid="draft-view-created" className="font-bold text-slate-700">{createdText(draft.createdAt)}</dd>
             <dt className={labelClass}>Status</dt><dd data-testid="draft-view-status" className="font-bold text-slate-700">Draft · USD</dd>
             <dt className={labelClass}>Version</dt><dd data-testid="draft-view-version" className="font-bold text-slate-700">{draft.version}</dd>
+            <RecordId key={draft.id} label="Draft ID" id={draft.id} copyName="Copy ID (draft)" testId="draft-view-id" />
           </dl>
           {/* The lines table scrolls sideways inside its own named region, reached by Tab (the data-table reflow exception, which covers this table only; M7B-INVOICES-DISCARD-P1-R1): an amount never breaks. Measured (SDB-23): the largest amount the shop accepts ($90,071,992,547,409.91) twice in a row overflows the region at 600 and 320 CSS px and at 600 px with 24 px text, and fits at 1440 px; in those cells the dialog itself does not scroll sideways. Where the table fits, it is laid out as before. */}
           <div role="region" aria-label="Draft lines" tabIndex={0} data-testid="draft-view-lines-scroll" className={`overflow-x-auto ${focusRing}`}>

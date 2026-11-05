@@ -18,10 +18,11 @@ import userEvent from '@testing-library/user-event';
 import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedVoidCapability, type IssuedReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
 import { INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
+import { RECORD_ID_TEXT } from './ServerInvoiceDrafts';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
 import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import type { ShopIdentity } from './ServerCustomerLevels';
-import { pickerWaitText } from './ServerCustomerPicker';
+import { idEndingText, pickerWaitText } from './ServerCustomerPicker';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
 const uuid = (n: number): string => `${n.toString(16).padStart(8, '0')}-0000-4000-8000-${n.toString(16).padStart(12, '0')}`;
@@ -1827,7 +1828,7 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     // in the reserved row under the header — still no other control (no send, print, edit or delete) and no payment word.
     // The eligibility read answers beside the detail read: wait for it (review B1 F6).
     await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
-    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
+    expect(within(dialog).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open, RECORD_ID_TEXT.copy]);
     expect(dialog.textContent).toContain(VOID_TEXT.open);
     expect(unvoided(dialog.textContent)).not.toMatch(FORBIDDEN);
     expect(server.sent.filter((r) => r.url.startsWith('/api/v1/customers'))).toEqual([]);
@@ -1876,7 +1877,7 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     expect(cells()).toEqual([['1', 'Line 3', '1', '$0.01', '$0.01']]);
   });
 
-  it('SII-54. Escape and Close close the dialog and give focus back to the row\'s Open; Tab stays inside it (Close, "Void invoice…" where it is offered — VOID-P2 —, the lines region, Close); when that row is gone — the session ended while it was open — focus goes to the section heading, never the page body', async () => {
+  it('SII-54. Escape and Close close the dialog and give focus back to the row\'s Open; Tab stays inside it (Close, "Void invoice…" where it is offered — VOID-P2 —, Copy ID — QA-UI-02 —, the lines region, Close); when that row is gone — the session ended while it was open — focus goes to the section heading, never the page body', async () => {
     const server = seeded();
     issueAt(server, STORE_1, 2);
     const r = rig(server);
@@ -1890,6 +1891,8 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
     await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
     await user().tab();
     expect(document.activeElement).toBe(tid('issued-view-void'));
+    await user().tab();
+    expect(document.activeElement).toBe(tid('issued-view-id-copy'));
     await user().tab();
     expect(document.activeElement).toBe(tid('issued-view-lines-scroll'));
     await user().tab();
@@ -2142,7 +2145,7 @@ describe('Issued invoices — one issued invoice (M7B-INVOICES-ISSUE-P2, AC-09, 
       // wording and the only new control; every other word and control stays out.
       await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
       expect(unvoided(dialog.textContent)).not.toMatch(FORBIDDEN);
-      expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
+      expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open, RECORD_ID_TEXT.copy]);
       await click('issued-view-close');
       await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
     }
@@ -2475,11 +2478,11 @@ describe('Issued invoices — review fixes: continuations, late answers, refusal
     expect(voidedAt).toHaveAttribute('datetime', VOIDED.voidedAt);
     expect(voidedAt).toHaveTextContent(/^2026-10-17 08:30:05 UTC$/);
     expect(tid('issued-view-void-reason')).toHaveTextContent(/^Wrong lines or amounts$/);
-    expect([...dialog.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at', 'Voided at', 'Reason']);
+    expect([...dialog.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at', 'Voided at', 'Reason', 'Invoice record ID']);
     expect(tid('issued-view-customer')).toHaveTextContent('Ada Customer');
     expect(tid('issued-view-total')).toHaveTextContent('Total $21.76');
     expect(tid('issued-view-note')).toHaveTextContent(VIEW_TEXT.note);
-    expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close']);
+    expect(within(dialog).queryAllByRole('button').map((b) => b.textContent)).toEqual(['Close', RECORD_ID_TEXT.copy]);
     expect(dialog.textContent).not.toMatch(FORBIDDEN);
     expect(tid('issued-section').textContent).not.toMatch(FORBIDDEN);
     expect(within(tid('issued-section')).getAllByRole('button').map((b) => b.textContent).filter((t) => t !== 'Open')).toEqual(['Issuing settings']);
@@ -2489,7 +2492,7 @@ describe('Issued invoices — review fixes: continuations, late answers, refusal
     expect(tid('issued-view-status')).toHaveTextContent(/^Issued$/);
     expect(screen.queryByTestId('issued-view-voided-at')).toBeNull();
     expect(screen.queryByTestId('issued-view-void-reason')).toBeNull();
-    expect([...screen.getByRole('dialog', { name: 'Invoice 1' }).querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at']);
+    expect([...screen.getByRole('dialog', { name: 'Invoice 1' }).querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Status', 'Issued at', 'Invoice record ID']);
     expect(server.details()).toEqual([`${STORES_PATH}/${STORE_1}/invoices/${made[1].id}`, `${STORES_PATH}/${STORE_1}/invoices/${made[0].id}`]);
     expect(server.writes()).toEqual([]);
   });
@@ -2988,7 +2991,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await waitFor(() => expect(server.eligReads()).toHaveLength(2));
     await settle();
     expect(tid('issued-view-void-cell').children).toHaveLength(0); // L-1: the real cell is empty (the copy stays)
-    expect(buttons('issued-view')).toEqual(['Close']);
+    expect(buttons('issued-view')).toEqual(['Close', RECORD_ID_TEXT.copy]);
     await closeAll();
     // Not allowed (a refusal after its one fresh check), an outage, an allowed with an extra member: nothing but the row.
     for (const answer of ['refused', 'outage', 'malformed'] as const) {
@@ -3000,7 +3003,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
       await waitFor(() => expect(server.eligReads()).toHaveLength(reads + 1));
       await settle();
       expect(tid('issued-view-void-cell').children, answer).toHaveLength(0); // L-1: the real cell is empty (the copy stays)
-      expect(buttons('issued-view'), answer).toEqual(['Close']);
+      expect(buttons('issued-view'), answer).toEqual(['Close', RECORD_ID_TEXT.copy]);
       if (answer === 'refused') {
         const at = server.sent.map((x) => x.url).lastIndexOf(eligUrl(STORE_1, made[2].id));
         expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]); // ONE fresh check, no loop
@@ -3032,7 +3035,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await viewReady(1);
     await settle();
     const plain = tid('issued-view').outerHTML;
-    expect(buttons('issued-view')).toEqual(['Close']);
+    expect(buttons('issued-view')).toEqual(['Close', RECORD_ID_TEXT.copy]);
     expect(screen.queryByTestId('issued-view-void-area')).toBeNull();
     expect(plain).not.toContain('issued-view-void');
     cleanup();
@@ -4652,7 +4655,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     server.held.shift()!.release();
     await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
     copyIsHidden(); // offered: the copy stays under the real trigger
-    expect(within(tid('issued-view')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open]);
+    expect(within(tid('issued-view')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', VOID_TEXT.open, RECORD_ID_TEXT.copy]);
     await click('issued-view-void');
     await waitFor(() => expect(box()).not.toBeNull());
     expect([...tid('issued-void-issued-at').querySelectorAll('span.whitespace-nowrap')].map((t) => t.textContent)).toEqual(['2026-10-16', '21:00:03']);
@@ -4665,9 +4668,11 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(tid('issued-view-void-cell').children).toHaveLength(0);
     await waitFor(() => expect(document.activeElement).toBe(tid('issued-view-close'))); // the dialog's first focus (an effect)
     await user().tab();
+    expect(document.activeElement).toBe(tid('issued-view-id-copy')); // QA-UI-02: Copy ID, the dialog's own control
+    await user().tab();
     expect(document.activeElement).toBe(tid('issued-view-lines-scroll'));
     await user().tab();
-    expect(document.activeElement).toBe(tid('issued-view-close')); // Close, the lines region, Close: the copy is no stop
+    expect(document.activeElement).toBe(tid('issued-view-close')); // Close, Copy ID, the lines region, Close: the hidden copy is no stop
   });
 
   // ---- CI fix after checkpoint B (SIS-22 S320H600: a held-card button wider than its card) ----
@@ -4994,5 +4999,72 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await until(() => expect(screen.queryByTestId('issued-view')).toBeNull());
     expect(heldA(r)?.csrf).toBeNull();
     expect(server.voidPosts()).toHaveLength(1);
+  });
+});
+
+// QA-UI-02-P1: each issued invoice's own record ID (never its source draft's, customer's or store's) — its ending under the
+// invoice number in the list, the whole ID with Copy ID in the dialog. navigator.clipboard is set after the last
+// user-event call before each press (userEvent.setup() installs its own stub).
+const clip = (writeText?: (text: string) => Promise<void>) =>
+  Object.defineProperty(navigator, 'clipboard', { value: writeText === undefined ? undefined : { writeText }, configurable: true, writable: true });
+
+describe('Issued invoices — visible record IDs (QA-UI-02)', () => {
+  afterEach(() => { clip(); });
+
+  it('SRI-04. each row keeps "Invoice {number}" first and says the invoice\'s own ID ending; the dialog keeps the number and names the whole Invoice record ID — not the source draft\'s, the customer\'s or the store\'s — with a Copy ID button named for it', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 2);
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    expect(screen.getAllByTestId('issued-row-number').map((p) => p.textContent)).toEqual(['Invoice 2', 'Invoice 1']);
+    expect(screen.getAllByTestId('issued-row-id').map((p) => p.textContent)).toEqual([idEndingText(made[1].id), idEndingText(made[0].id)]);
+    expect(within(tid('issued-list')).getAllByRole('button').map((b) => b.textContent)).toEqual(['Open', 'Open']);
+    await user().click(openButton(2));
+    await viewReady(2);
+    expect(tid('issued-view-id').textContent).toBe(made[1].id);
+    expect([made[1].sourceDraftId, made[1].customerId, STORE_1]).not.toContain(tid('issued-view-id').textContent);
+    expect(within(tid('issued-view')).getByText('Invoice record ID').tagName).toBe('DT');
+    expect(tid('issued-view-id')).toHaveClass('select-all', 'break-all');
+    expect(screen.getByRole('button', { name: 'Copy ID (invoice record)' })).toHaveAttribute('type', 'button');
+    expect(tid('issued-store')).toHaveValue(STORE_1); // the store stays named beside the number
+  });
+
+  it('SRI-05. loaded invoices that share an ID ending each show their whole ID; another keeps its ending; nothing more is read for it', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 3, (n) => (n === 3 ? {} : { id: `0000000${n}-0000-4000-8000-0000feedbeef` }));
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    expect(screen.getAllByTestId('issued-row-id').map((p) => p.textContent)).toEqual([idEndingText(made[2].id), `ID ${made[1].id}`, `ID ${made[0].id}`]);
+    await settle();
+    expect(server.lists()).toEqual([listPath(STORE_1)]);
+    expect(server.details()).toEqual([]);
+  });
+
+  it('SRI-06. Copy ID copies the invoice\'s WHOLE record ID and says Copied only once the copy succeeded; a refusal says to copy it by hand, the ID still shown; a press sends nothing and opens no void', async () => {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 1);
+    render(<ServerIssuedInvoices {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await user().click(openButton(1));
+    await viewReady(1);
+    await settle();
+    const sent = server.sent.length;
+    let finish = () => {};
+    const writeText = vi.fn((_text: string) => new Promise<void>((ok) => { finish = ok; }));
+    clip(writeText);
+    fireEvent.click(tid('issued-view-id-copy'));
+    await waitFor(() => expect(writeText.mock.calls).toEqual([[made[0].id]])); // the call is made a microtask later
+    expect(tid('issued-view-id-note').textContent).toBe('');
+    await act(async () => { finish(); });
+    expect(tid('issued-view-id-note')).toHaveTextContent(RECORD_ID_TEXT.copied);
+    writeText.mockImplementationOnce(() => Promise.reject(new Error('denied')));
+    fireEvent.click(tid('issued-view-id-copy'));
+    await waitFor(() => expect(tid('issued-view-id-note')).toHaveTextContent(RECORD_ID_TEXT.failed));
+    expect(tid('issued-view-id').textContent).toBe(made[0].id);
+    expect(server.sent.length).toBe(sent);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 });

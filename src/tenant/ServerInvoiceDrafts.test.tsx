@@ -37,7 +37,7 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within }
 import userEvent from '@testing-library/user-event';
 import {
   DISCARD_ELIGIBILITY_TEXT, DISCARD_REFUSED_TEXT, DISCARD_TEXT, DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT,
-  ISSUE_ELIGIBILITY_TEXT, ISSUE_REFUSED_TEXT, ISSUE_TEXT, NOT_SENT_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
+  ISSUE_ELIGIBILITY_TEXT, ISSUE_REFUSED_TEXT, ISSUE_TEXT, NOT_SENT_TEXT, RECORD_ID_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
   bindDraftHoldsToSessionEnd, createDraftHoldStore, createIssueHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type IssueHoldStore, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
 import { createInvoiceIssuingClient, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf } from './invoiceIssuingClient';
@@ -46,7 +46,7 @@ import {
 } from './invoiceDraftsClient';
 import { CUSTOMERS_PATH, createCustomersClient } from './customersClient';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, onSessionEnd, sessionEndsSoFar, type TenantSessionClient } from './tenantSessionClient';
-import { ServerCustomerField, hasSessionPair, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
+import { ServerCustomerField, hasSessionPair, idEndingText, isContextOf, pickerWaitText, sessionContextOf } from './ServerCustomerPicker';
 import { parseCustomerDirectoryQuery } from '../../server/runtime/customerDirectory';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -873,7 +873,7 @@ describe('Server drafts — store choice, list and reopen (M7B-INVOICES-P1)', ()
     // M7B-INVOICES-ISSUE-P2: and Issue invoice… on the issue's own answer (the owner may issue); it only opens a review — the
     // view itself still names no number, issued state, payment, tax or discount.
     await waitFor(() => expect(within(view).getByTestId('draft-issue-open')).toBeInTheDocument());
-    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', 'Edit draft', 'Discard draft…', 'Issue invoice…']);
+    expect(within(view).getAllByRole('button').map((b) => b.textContent)).toEqual(['Close', RECORD_ID_TEXT.copy, 'Edit draft', 'Discard draft…', 'Issue invoice…']);
     expect(view.textContent).not.toMatch(/amount due|balance|invoice number|issued|payment|tax|discount/i);
     expect(server.sent.filter((s) => s.url === draftPathOf(STORE_1, draft.id))).toHaveLength(1);
     await user().keyboard('{Escape}');
@@ -4167,7 +4167,7 @@ describe('Server drafts — discarding a saved draft (M7B-INVOICES-DISCARD-P1)',
     const dialog = screen.getByTestId('draft-view');
     expect(screen.queryByTestId('draft-discard-open')).toBeNull();
     expect(screen.queryByTestId('draft-discard-elig-again')).toBeNull();
-    expect(within(dialog).queryAllByRole('status').map((x) => x.textContent)).toEqual(['']); // the edit's live region only (empty once allowed)
+    expect(within(dialog).queryAllByRole('status').filter((x) => x.dataset.testid !== 'draft-view-id-note').map((x) => x.textContent)).toEqual(['']); // the edit's live region only (empty once allowed)
     expect(within(dialog).queryAllByRole('alert')).toEqual([]);
     expect(dialog.textContent).not.toMatch(/discard/i);
     const asked = server.discardEligReads();
@@ -5203,7 +5203,7 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     expect(row.textContent).toBe('');
     expect(within(dialog).getByTestId('draft-discard-row').nextElementSibling).toBe(row);
     expect(dialog.textContent).not.toMatch(/issue/i);
-    expect(within(dialog).queryAllByRole('status').map((x) => x.textContent)).toEqual(['']); // still the edit's live region only
+    expect(within(dialog).queryAllByRole('status').filter((x) => x.dataset.testid !== 'draft-view-id-note').map((x) => x.textContent)).toEqual(['']); // still the edit's live region only
     const asked = server.issueEligReads();
     expect(asked.map((x) => `${x.method} ${x.url}`)).toEqual([`GET ${issueEligibilityPathOf(STORE_1, draft.id)}`]);
     expect(asked[0].headers.get('x-tmpos-session-csrf')).toMatch(/^s{40}/);
@@ -6455,5 +6455,88 @@ describe('Server drafts — issuing a saved draft (M7B-INVOICES-ISSUE-P2)', () =
     await settle();
     expect(server.issuePosts()).toHaveLength(1);
     expect(server.issuedReads().map((x) => x.url)).toEqual([issuedInvoicePathOf(STORE_1, server.invoices[0].id)]);
+  });
+});
+
+// QA-UI-02-P1: each draft's existing record ID — its ending in the list, the whole ID with Copy ID in the reopen dialog.
+// navigator.clipboard is set after the last user-event call before each press (userEvent.setup() installs its own stub).
+const clip = (writeText?: (text: string) => Promise<void>) =>
+  Object.defineProperty(navigator, 'clipboard', { value: writeText === undefined ? undefined : { writeText }, configurable: true, writable: true });
+
+describe('Server drafts — visible record IDs (QA-UI-02)', () => {
+  afterEach(() => { clip(); });
+
+  it('SRI-01. each row says its own draft\'s ID ending; the dialog names the whole Draft ID of the draft opened, selectable, with a Copy ID button named for it', async () => {
+    const { server, ada, bea } = seeded();
+    const older = server.seedDraft(STORE_1, ada, at(10));
+    const newer = server.seedDraft(STORE_1, bea, at(20));
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await waitFor(() => expect(screen.getAllByTestId('drafts-row-id').map((n) => n.textContent)).toEqual([idEndingText(newer.id), idEndingText(older.id)]));
+    expect(within(screen.getAllByTestId('drafts-row')[1]).getAllByRole('button').map((b) => b.textContent)).toEqual(['Open']);
+    await user().click(screen.getAllByTestId('drafts-open')[1]);
+    const view = await screen.findByTestId('draft-view');
+    await waitFor(() => expect(within(view).getByTestId('draft-view-id').textContent).toBe(older.id));
+    expect(within(view).getByText('Draft ID').tagName).toBe('DT');
+    expect(within(view).getByTestId('draft-view-id')).toHaveClass('select-all', 'break-all');
+    const copy = within(view).getByRole('button', { name: 'Copy ID (draft)' });
+    expect(copy).toHaveAttribute('type', 'button');
+    expect(copy).toHaveTextContent(RECORD_ID_TEXT.copy);
+  });
+
+  it('SRI-02. loaded drafts that share an ID ending each show their whole ID; another keeps its ending; nothing more is read for it', async () => {
+    const { server, ada } = seeded();
+    const [a, b, c] = [server.seedDraft(STORE_1, ada, at(10)), server.seedDraft(STORE_1, ada, at(20)), server.seedDraft(STORE_1, ada, at(30))];
+    a.id = '0000000a-0000-4000-8000-0000feedbeef';
+    b.id = '0000000b-0000-4000-8000-0000feedbeef';
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await waitFor(() => expect(screen.getAllByTestId('drafts-row-id').map((n) => n.textContent)).toEqual([idEndingText(c.id), `ID ${b.id}`, `ID ${a.id}`]));
+    await settle();
+    expect(server.sent.filter((s) => s.url.split('?')[0] === draftsPathOf(STORE_1) && s.method === 'GET').map((s) => s.url.split('?')[0])).toEqual([draftsPathOf(STORE_1)]);
+    expect(server.sent.filter((s) => [a, b, c].some((d) => s.url.startsWith(draftPathOf(STORE_1, d.id))))).toEqual([]); // no draft read for it
+  });
+
+  it('SRI-03. Copy ID copies the WHOLE ID and says Copied only once the copy succeeded; a refused or missing clipboard says to copy it by hand, the ID still shown; a press sends nothing and opens nothing; the note goes with the dialog', async () => {
+    const { server, ada } = seeded();
+    const draft = server.seedDraft(STORE_1, ada, at(10));
+    render(<ServerInvoiceDrafts {...rig(server).props()} />);
+    await showAndChoose(STORE_1);
+    await user().click(screen.getByTestId('drafts-open'));
+    const view = await screen.findByTestId('draft-view');
+    await waitFor(() => expect(within(view).getByTestId('draft-issue-open')).toBeInTheDocument());
+    await settle();
+    const sent = server.sent.length;
+    const note = () => within(view).getByTestId('draft-view-id-note');
+    let finish = () => {};
+    const writeText = vi.fn((_text: string) => new Promise<void>((ok) => { finish = ok; }));
+    clip(writeText);
+    fireEvent.click(within(view).getByTestId('draft-view-id-copy'));
+    await waitFor(() => expect(writeText.mock.calls).toEqual([[draft.id]])); // the call is made a microtask later
+    expect(note()).toHaveAttribute('role', 'status');
+    expect(note().textContent).toBe(''); // not before the copy succeeded
+    await act(async () => { finish(); });
+    expect(note()).toHaveTextContent(RECORD_ID_TEXT.copied);
+    writeText.mockImplementationOnce(() => Promise.reject(new Error('denied')));
+    fireEvent.click(within(view).getByTestId('draft-view-id-copy'));
+    await waitFor(() => expect(note()).toHaveTextContent(RECORD_ID_TEXT.failed));
+    expect(within(view).getByTestId('draft-view-id').textContent).toBe(draft.id);
+    clip();
+    fireEvent.click(within(view).getByTestId('draft-view-id-copy'));
+    await settle();
+    expect(note()).toHaveTextContent(RECORD_ID_TEXT.failed);
+    expect(server.sent.length).toBe(sent); // no request, no Save, discard or issue
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    // A copy still out when the dialog closes: its late success says nothing in the dialog opened after.
+    clip(writeText);
+    fireEvent.click(within(view).getByTestId('draft-view-id-copy'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(3));
+    await user().keyboard('{Escape}');
+    await settle();
+    await user().click(screen.getByTestId('drafts-open'));
+    const again = await screen.findByTestId('draft-view');
+    await act(async () => { finish(); });
+    await settle();
+    expect(within(again).getByTestId('draft-view-id-note').textContent).toBe('');
   });
 });

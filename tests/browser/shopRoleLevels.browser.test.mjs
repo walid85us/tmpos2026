@@ -556,6 +556,12 @@
 //          laid out as table cells), above the first line; each heading's box is its column's (within 0.5 px) and its text
 //          starts (#, Description) or ends (the amounts) where the values' do (within 1 px); the owner's two lines and
 //          $92.00, a long description beside them, the values and their order as saved.
+//   QA-UI-02-P1 — VISIBLE RECORD IDS:
+//   SLH-02 at 1440x900, 320x640 and 320x600 with 24 px text: each draft row and issued row says its own record's ID ending
+//          (the issued row under "Invoice {number}"); the reopen and issued dialogs show the whole ID the database holds
+//          (the invoice's own, never its source draft's), wrapped inside the dialog and never past its edge (recorded, not
+//          failed: the reopen dialog's header Close at 320x600 with 24 px text, past it before this change); Copy ID is the
+//          first Tab stop after the dialog's header controls, on top, and its press sends no request and opens nothing.
 //   Every SIS invoice is issued through the tenant entry's HTTP routes (settings PUT, customer POST, draft POST, issue preview,
 //   issue POST — the browser's own, from SIS-10 on), and SIS-16's void through its void POST: this file inserts no issuing or
 //   void row.
@@ -1779,7 +1785,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
-  'SLH-01',
+  'SLH-01', 'SLH-02',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -7159,11 +7165,11 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       check(shown.focus === 'draft-view-close', `${cell}: focus stayed on Close: ${shown.focus}`);
       fits(cell, after);
       check(after.why.x >= after.panel.x && after.why.x + after.why.width <= after.panel.x + after.panel.width + HOLD_TOLERANCE, `${cell}: the hint lies inside the dialog`);
-      // Tab from Close: the lines' region, Edit draft, Try again, then (M7B-INVOICES-ISSUE-P2: a real new control, the owner's
-      // issue eligibility answered) Issue invoice… in its own row below, then back round to Close (the dialog keeps focus).
+      // Tab from Close: Copy ID (QA-UI-02), the lines' region, Edit draft, Try again, then (M7B-INVOICES-ISSUE-P2: a real new
+      // control, the owner's issue eligibility answered) Issue invoice… in its own row below, then back round to Close (the dialog keeps focus).
       const tabs = [];
-      for (let i = 0; i < 5; i += 1) { await page.press('Tab'); tabs.push(await focusOf(page)); }
-      check(JSON.stringify(tabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-elig-again', 'draft-issue-open', 'draft-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
+      for (let i = 0; i < 6; i += 1) { await page.press('Tab'); tabs.push(await focusOf(page)); }
+      check(JSON.stringify(tabs) === JSON.stringify(['draft-view-id-copy', 'draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-elig-again', 'draft-issue-open', 'draft-view-close']), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
       await stillSideways(page, cell);
       // The real press at the pre-answer point: it must close the dialog (a moved Close leaves it open).
       await pressAt(page, x, y);
@@ -7207,10 +7213,10 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       if (overflows) check(big.scroller !== null && big.scroller.role === 'region' && big.scroller.name === 'Draft lines' && big.scroller.tabIndex === 0 && ['auto', 'scroll'].includes(big.scroller.overflowX) && big.scroller.scrollWidth > big.scroller.clientWidth + HOLD_TOLERANCE, `${cell} (largest amounts): the lines do not scroll inside a named region reached by Tab ${JSON.stringify(big.scroller)}`);
       const bigTabs = [];
       let scrolled = null;
-      for (let i = 0; i < 5; i += 1) {
+      for (let i = 0; i < 6; i += 1) {
         await page.press('Tab');
         bigTabs.push(await focusOf(page));
-        if (i === 0 && overflows) {
+        if (bigTabs.at(-1) === 'draft-view-lines-scroll' && overflows) { // the region's own stop (after Copy ID since QA-UI-02)
           for (const type of ['rawKeyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 });
           // Chrome may animate a keyboard scroll: wait (bounded) for it to start before reading how far it went.
           await page.waitFor(`(${q('draft-view-lines-scroll')}?.scrollLeft ?? 0) > 0`, 5_000, 'the lines scrolled').catch(() => {});
@@ -7219,7 +7225,7 @@ scenario('SDB-23', 'DSC-19 DSC-21 THE REOPEN DIALOG HOLDS STILL WHEN THE DISCARD
       }
       record('SDB-23', { cell, answer: 'largest', before: big, after: big, overflowed, amounts, subtotal: big.subtotal, scrolled, tabs: bigTabs });
       fits(`${cell} (largest amounts)`, big);
-      check(JSON.stringify(bigTabs) === JSON.stringify(['draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-open', 'draft-issue-open', 'draft-view-close']), `${cell} (largest amounts): Tab from Close went ${JSON.stringify(bigTabs)}`);
+      check(JSON.stringify(bigTabs) === JSON.stringify(['draft-view-id-copy', 'draft-view-lines-scroll', 'draft-view-edit', 'draft-discard-open', 'draft-issue-open', 'draft-view-close']), `${cell} (largest amounts): Tab from Close went ${JSON.stringify(bigTabs)}`);
       if (overflows) check(scrolled > 0, `${cell} (largest amounts): ArrowRight on the focused lines region did not scroll them (${scrolled})`);
       await stillSideways(page, `${cell} (largest amounts)`);
       await page.press('Escape');
@@ -8181,7 +8187,7 @@ const issuedViewOf = (page) => page.evaluate(`(() => {
     lines: [...document.querySelectorAll('[data-testid="issued-view-line"]')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
     subtotal: t('issued-view-subtotal'), tax: t('issued-view-tax'), total: t('issued-view-total'), note: t('issued-view-note'),
     shell: { role: v?.getAttribute('role') ?? null, modal: v?.getAttribute('aria-modal') ?? null, name: v === null ? null : document.getElementById(v.getAttribute('aria-labelledby'))?.textContent.trim() ?? null },
-    text: v?.innerText ?? '', buttons: v === null ? [] : [...v.querySelectorAll('button')].map((b) => b.textContent.trim()),
+    text: v?.innerText ?? '', buttons: v === null ? [] : [...v.querySelectorAll('button:not([data-testid$="-id-copy"])')].map((b) => b.textContent.trim()), // Copy ID (QA-UI-02): SLH-02
   };
 })()`);
 /** The list area's whole text and its controls. */
@@ -8545,7 +8551,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   // "Void invoice…" in the row under the header — Tab from Close reaches it before the lines — and a VOIDED one (SIS-16)
   // offers nothing there, its Tab order unchanged since P1.
   const voidable = shown.status === 'Issued';
-  const tabOrder = voidable ? ['issued-view-void', 'issued-view-lines-scroll', 'issued-view-close'] : ['issued-view-lines-scroll', 'issued-view-close'];
+  const tabOrder = voidable ? ['issued-view-void', 'issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'] : ['issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'];
   for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
     await page.setViewport(width, height);
     if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
@@ -9124,7 +9130,7 @@ scenario('SIS-15', 'AC-10 ISS-23 BOUNDED LAYOUT AND KEYBOARD OF THE ISSUE CONFIR
 const VOID_SAID = Object.freeze({
   card: (n, store) => `Issued as invoice ${n} at ${store}; it has since been voided.`,
   reason: 'Duplicate of another invoice', // contract §2's longest label: the layout's worst case
-  labels: ['Status', 'Issued at', 'Voided at', 'Reason'],
+  labels: ['Status', 'Issued at', 'Voided at', 'Reason', 'Invoice record ID'], // the record ID row (QA-UI-02) last
 });
 /** One store's void records as the database owner reads them (voided_at in issuedAt's encoding). */
 async function storedVoids(store) {
@@ -9732,7 +9738,7 @@ scenario('SIS-20', 'VOID-07 VOID-09 AC-06 AC-07 AN ACKNOWLEDGED VOID WHOSE DETAI
   };
   record('SIS-20', { phase: 'details lost', ...unread, sent: sentBy(page, () => true, from).map(apiLine) });
   assert.deepEqual(unread, {
-    posts: ['200'], details: ['0 request'], status: VOIDING_SAID.voided(1), shown: 'Voided', void: { at: null, time: null, reason: null, labels: ['Status', 'Issued at'] }, buttons: ['Close', 'Load again'], confirm: false,
+    posts: ['200'], details: ['0 request'], status: VOIDING_SAID.voided(1), shown: 'Voided', void: { at: null, time: null, reason: null, labels: ['Status', 'Issued at', 'Invoice record ID'] }, buttons: ['Close', 'Load again'], confirm: false,
   }, 'acknowledged (Voided), its details unavailable: the void time and reason are not taken from the held attempt; Load again offered');
   const loadFrom = st.api.length;
   await page.click(by('issued-view-void-load'));
@@ -10602,4 +10608,103 @@ scenario('SLH-01', 'QA-UI-01 THE LINE HEADINGS OVER THEIR COLUMNS — two drafts
     await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the issued dialog`);
   }
   assert.deepEqual(problems, [], 'every lines table\'s headings over their columns, in every cell');
+}, 300_000);
+
+/** The shop's own copy-refused text (ServerInvoiceDrafts.tsx RECORD_ID_TEXT.failed). */
+const RECORD_ID_SAID = Object.freeze({ failed: 'Could not copy. Select the ID and copy it.' });
+/** A dialog's record ID as laid out (QA-UI-02): its text, whether it lies inside the panel, the panel's sideways overflow, and Copy ID on top. */
+const recordIdOf = (page, panel, id) => page.evaluate(`(() => {
+  const p = ${q(panel)}, v = ${q(id)}, c = ${q(`${id}-copy`)};
+  if (p === null) return null;
+  const pr = p.getBoundingClientRect(), r = v?.getBoundingClientRect() ?? null;
+  c?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const cr = c?.getBoundingClientRect() ?? null, hit = cr === null ? null : document.elementFromPoint(cr.left + cr.width / 2, cr.top + cr.height / 2);
+  const over = [...p.querySelectorAll('*')].filter((n) => n.getBoundingClientRect().right > pr.right + 0.5 && !n.closest('[role="region"]'))
+    .map((n) => n.dataset.testid ?? n.tagName).slice(0, 8);
+  return { text: v?.textContent ?? null, inside: r !== null && r.left >= pr.left - 0.5 && r.right <= pr.right + 0.5, sideways: p.scrollWidth > p.clientWidth + 0.5, copyOnTop: hit !== null && c.contains(hit), name: c?.getAttribute('aria-label') ?? null, type: c?.type ?? null, over };
+})()`);
+
+scenario('SLH-02', 'QA-UI-02 VISIBLE RECORD IDS — a draft saved and an invoice issued through the entry, on ONE page and sign-in at 1440x900, 320x640 and 320x600 with a 24 px default text size: the draft row and the issued row each say "ID ending" and the last 8 characters of their own record ID (the issued row under "Invoice 1"); the reopen dialog\'s Draft ID and the issued dialog\'s Invoice record ID are the whole IDs the database holds (the invoice\'s own, never its source draft\'s), inside the dialog and never past its edge (recorded, not failed: the reopen dialog\'s header Close at 320x600 with 24 px text, past it before this change); Copy ID (a button named Copy ID (draft) / Copy ID (invoice record), its visible text first) is reached by Tab right after the dialog\'s header controls and on top; Enter on it sends no request, opens nothing and says Copied or to copy it by hand', async () => {
+  const { tenant, stores: [main], boss } = await draftShop('h2', ['main']);
+  const direct = await directLogin(boss);
+  const customer = await customerVia(direct, `M7SLH Bea ${SUFFIX}`);
+  await settingsVia(direct, tenant, main.id, { legalName: `M7SLH Seller ${SUFFIX}`, storeName: `M7SLH Main ${SUFFIX}`, postalAddress: `2 Main Street ${SUFFIX}`, taxRegistrationId: null, tax: { mode: 'none' } });
+  const lines = [{ description: 'QA case replacement (synthetic)', quantity: 1, unitPriceCents: 2900 }];
+  const draftId = await draftVia(direct, tenant, main.id, customer.id, lines);
+  const invoiceId = await issueVia(direct, tenant, main.id, customer.id, lines);
+  const [stored] = await storedIssued(main.id);
+  assert.equal(stored.id, invoiceId, 'precondition: the one invoice, as stored');
+  const detail = await call('GET', `${issuedPath(main.id)}/${invoiceId}`, { session: direct });
+  assert.equal(detail.status, 200, `the issued detail read: ${detail.text}`);
+  const sourceDraftId = JSON.parse(detail.text).invoice.sourceDraft.id;
+  assert.notEqual(sourceDraftId, invoiceId, 'precondition: the source draft has its own ID');
+
+  const page = await openPage();
+  await signIn(page, boss);
+  await go(page, '/invoices');
+  await page.waitFor(`!!${q('drafts-show')} && !!${q('issued-show')}`, 30_000, 'the Invoices page offers both sections');
+  await page.click(by('drafts-show'));
+  await waitData(page, 'drafts-stores-state', 'phase', 'ready');
+  await pickStore(page, main.id);
+  await page.waitFor(`!!document.querySelector('${by('drafts-row')}[data-id="${draftId}"]')`, 30_000, 'the draft listed');
+  await page.click(by('issued-show'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the one invoice listed');
+  const rowIdOf = (row, id) => page.evaluate(`document.querySelector('${by(row)}[data-id="${id}"] [data-testid="${row}-id"]')?.textContent ?? null`);
+  const ending = (id) => `ID ending ${id.slice(-8)}`;
+
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  const copyNote = (id) => page.evaluate(`${q(`${id}-note`)}?.textContent ?? null`);
+  // The ID row itself never reaches past the dialog. Recorded, not failed: at 320x600 with 24 px text the reopen dialog's
+  // header Close already did before QA-UI-02 (measured on 7baf307's bundle), the only element past its edge.
+  const fitsWith = (x, prefix) => x !== null && !x.over.some((t) => t.startsWith(prefix)) && (!x.sideways || JSON.stringify(x.over) === '["draft-view-close"]');
+  for (const { cell, width, height, font } of VOID_CELLS.filter((c) => ['D1440', 'N320', 'S320H600'].includes(c.cell))) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    check(await rowIdOf('drafts-row', draftId) === ending(draftId), `${cell}: the draft row's ID ending`);
+    check(await rowIdOf('issued-row', invoiceId) === ending(invoiceId), `${cell}: the issued row's ID ending`);
+    check(await page.evaluate(`document.querySelector('${by('issued-row')}[data-id="${invoiceId}"] [data-testid="issued-row-number"]')?.textContent ?? null`) === 'Invoice 1', `${cell}: the issued row's number`);
+
+    await reopenDraft(page, draftId, customer.name);
+    await page.settle();
+    const d = await recordIdOf(page, 'draft-view', 'draft-view-id');
+    record('SLH-02', { cell, view: 'draft', d });
+    check(d !== null && d.text === draftId && d.inside && fitsWith(d, 'draft-view-id') && d.copyOnTop && d.name === 'Copy ID (draft)' && d.type === 'button', `${cell}: the Draft ID ${JSON.stringify(d)}`);
+    await page.call(by('draft-view-close'), function () { this.focus(); });
+    await page.press('Tab');
+    check(await focusOf(page) === 'draft-view-id-copy', `${cell}: Tab from Close went to ${await focusOf(page)}, not Copy ID`);
+    let from = st.api.length;
+    await page.press('Enter');
+    check(await page.waitFor(async () => ['Copied', RECORD_ID_SAID.failed].includes(await copyNote('draft-view-id')), 5_000, `${cell}: the draft copy said`).then(() => true, () => false), `${cell}: the draft copy not said`);
+    await page.settle();
+    record('SLH-02', { cell, view: 'draft', note: await copyNote('draft-view-id') });
+    check(fitsWith(await recordIdOf(page, 'draft-view', 'draft-view-id'), 'draft-view-id'), `${cell}: the Draft ID row reaches past the dialog once the copy is said`);
+    check(sentBy(page, () => true, from).length === 0 && await has(page, 'draft-view') && !(await has(page, 'draft-edit')), `${cell}: the draft copy sent or opened something`);
+    await closeView(page);
+
+    await page.settle();
+    from = st.api.length;
+    await openIssuedInvoice(page, invoiceId, 1);
+    await eligibilityAnswered(page, main.id, invoiceId, from);
+    const v = await recordIdOf(page, 'issued-view', 'issued-view-id');
+    record('SLH-02', { cell, view: 'issued', v });
+    check(v !== null && v.text === invoiceId && v.text !== sourceDraftId && v.inside && fitsWith(v, 'issued-view-id') && v.copyOnTop && v.name === 'Copy ID (invoice record)' && v.type === 'button', `${cell}: the Invoice record ID ${JSON.stringify(v)}`);
+    await page.call(by('issued-view-close'), function () { this.focus(); });
+    await page.press('Tab');
+    await page.press('Tab'); // the owner's Void invoice… first (the header's row), then Copy ID
+    check(await focusOf(page) === 'issued-view-id-copy', `${cell}: the second Tab from Close went to ${await focusOf(page)}, not Copy ID`);
+    from = st.api.length;
+    await page.press('Enter');
+    check(await page.waitFor(async () => ['Copied', RECORD_ID_SAID.failed].includes(await copyNote('issued-view-id')), 5_000, `${cell}: the invoice copy said`).then(() => true, () => false), `${cell}: the invoice copy not said`);
+    await page.settle();
+    record('SLH-02', { cell, view: 'issued', note: await copyNote('issued-view-id') });
+    check(fitsWith(await recordIdOf(page, 'issued-view', 'issued-view-id'), 'issued-view-id'), `${cell}: the Invoice record ID row reaches past the dialog once the copy is said`);
+    check(sentBy(page, () => true, from).length === 0 && !(await has(page, 'issued-void-confirm')), `${cell}: the invoice copy sent or opened something`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the issued dialog`);
+  }
+  assert.deepEqual(problems, [], 'the record IDs in every cell');
 }, 300_000);
