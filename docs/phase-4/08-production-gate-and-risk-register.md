@@ -1202,8 +1202,12 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 - **CI.** This record is documentation only and records no CI run of itself.
 
 **M7B-PAYMENTS-D1-P0 (recorded 2026-11-06) keeps every gate `OPEN`.** It adds the payment recording decision pack [15](./15-m7b-invoice-payment-recording-decision-pack.md), **PROPOSED — NOT ADOPTED**. Documentation only: no product source, server file, migration, permission, grant, dependency or CI changed, and no row of this register is amended.
-- **What it proposes.** Owner decisions D-PAY-1 to D-PAY-10 for cash and external-terminal recordings against an issued invoice. It also proposes amendments A1 (D-ISS-1's amount-due wording) and A2/A3 (D-VOID-1: a void refused while a payment is recorded), each needing its own owner choice.
-- **Rows it bears on, unchanged.** DA-186 and DA-187 stay undecided until the owner returns the pack's §11. DA-36, DA-118, DA-119 and DA-132 stay OPEN, and the pack's D-PAY-8 proposes that payments must not widen DA-118. G-PCI stays OPEN.
+- **What it proposes.** Owner decisions D-PAY-1 to D-PAY-10 for cash and external-terminal recordings against an issued invoice, each needing its own owner choice. It also proposes amendments to adopted text:
+  - A1: D-ISS-1 and ADR-50 decision 1, on the amount-due wording;
+  - A2: D-VOID-1, so that a void is refused while a payment is recorded;
+  - A3: the void's sealed answers;
+  - A4: [05] §5's payment-audit rule, needed only if D-PAY-8's audited remedy is not chosen.
+- **Rows it bears on, unchanged.** DA-186 stays undecided until the owner returns the pack's §11. DA-187 is unchanged: the pack proposes only an interim default and names the missing inputs F-5 and F-2. DA-36, DA-114, DA-118, DA-119 and DA-132 stay OPEN. The pack records that PAYMENTS-P1 would widen DA-118 (in an audited form under D-PAY-8 A; not at all under a D-PAY-8 B that covers 036), DA-119 and DA-132, with the register amendments it must then make. G-PCI stays OPEN.
 - **Not claimed.** Payment recording exists; any policy is adopted; PCI compliance; production readiness.
 
 **The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C), the QA-INTERACTIVE-P1-R1 documentation changes (D, E), QA-HANDOFF-CLOSE-P1 (the lockfile change F1 and its record) and QA-CI-REPAIR-P1 (the lockfile change `3abe19d` and this record) change no gate's status, and every gate stays OPEN.
