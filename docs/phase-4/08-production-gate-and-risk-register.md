@@ -1177,6 +1177,30 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 - **Still open.** M6R-PERF's CI flake and its five unimplemented diagnostics; the session cookie's `SameSite=None` in the QA Preview; the CI runner's intermittent Chromium start and the launcher's diagnostics gap; the top-level `qs` 6.14.2's pre-existing moderate advisories (they need an `express` 4 change) and the full tree's ten pre-existing development-only Highs; the gitignored `dist/`; the four reboots of unknown cause; the zod fix's unbounded-container residual; the shared login-limiter client; the edge's 502 for a held void; fault records surviving `reset`; the unrecorded-cluster and check-then-signal residuals; U08's, U10's live-refusal and U15's missing prerequisites; the TypeScript language server's memory beside the stack; the out-of-memory kills of unknown cause; GHSA-46jr's upstream gap; CI duration (`quality` 27 min 24 s of 30 on `3abe19d`); and all 37 gates OPEN.
 - **Nothing deployed.** Only owned disposable clusters, emulators, loopback test servers and synthetic data were used. The network actions were registry, advisory and provenance reads, the headless browser's traffic to the Preview and the two web-font hosts, the package fetches of three clean installs (two scratch copies and the workspace), CI reads, external review reads of local text, and the fast-forward pushes of `3abe19d` and this record.
 
+**QA-OWNER-CLOSEOUT-P1 (recorded 2026-11-06) keeps every gate `OPEN`.** It records the owner's completed checks in [`critical-owner-qa-results-2026-11-06.md`](./critical-owner-qa-results-2026-11-06.md), the canonical record. Documentation only: no product source, server file, migration, permission, dependency, QA-tool byte, checker or CI changed.
+- **Owner checks U01–U16 (owner reports, not re-performed).**
+  - 12 PASS, each within its stated limits.
+  - Two PASS with one portion BLOCKED: U01's exact 320×600 / 24 px layout (the owner's PC prohibits Developer Tools) and U10's direct-API subcheck.
+  - U08 and U15 are BLOCKED.
+- **Owner acceptance.** QA-UI-01 is 2/2 PASS in run `qa-20261105t1317-8eaa`. QA-UI-02 is 3/3 PASS in run `qa-20261105t1747-b23a`.
+- **The QA-UI commits** have no earlier stage record here:
+  - `7baf307`: exact-SHA CI 41947198432 attempt 1 **FAILED** at M7CC-11 on a sign-in 503, with its later steps skipped; the failed-job rerun, attempt 2, succeeded.
+  - `ddd612d`: exact-SHA CI 42051795782 succeeded on attempt 1.
+  - `64f1433`: a one-line QA supervisor diagnostic; exact-SHA CI 42079393105 succeeded on attempt 1.
+- **Provenance.** No kept run manifest records a commit SHA, so no historical owner run is bound to an exact executable. The record gives the HEAD inferred from commit time and marks every binding not recorded.
+- **Backend evidence.** B01–B12 are carried from runbook 14 §9 and were not re-run:
+  - B10 passes the approved narrow-grant contract only; DA-118, DA-119 and DA-132 stay OPEN, and the startup preflight does not inspect `anon` or `authenticated`.
+  - B11's SQL half passes; its hosted Data API half is BLOCKED.
+  - B12 is QUALIFIED.
+- **Still open, in addition to the QA-CI-REPAIR-P1 list above.**
+  - The fresh-sign-in 403 of 2026-11-04T21:45:50.893Z.
+  - The failed start `qa-20261105t1726-74b6`, whose refusal reason was lost.
+  - The reopen dialog's Close-button clipping at 320×600 with 24 px text.
+  - The run deaths, reboots and out-of-memory kills of unknown cause.
+- **Not claimed.** Any gate movement; execution of the extended 145-case pack; acceptance of the application or of the phase; production readiness.
+- **Owner review.** The owner's three document-review checks of the record are PENDING.
+- **CI.** This record is documentation only and records no CI run of itself.
+
 **The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C), the QA-INTERACTIVE-P1-R1 documentation changes (D, E), QA-HANDOFF-CLOSE-P1 (the lockfile change F1 and its record) and QA-CI-REPAIR-P1 (the lockfile change `3abe19d` and this record) change no gate's status, and every gate stays OPEN.
 
 - **M0 carry-forward gates still open:** G-EMU, G-HIST, G-4USER.
