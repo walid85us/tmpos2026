@@ -660,6 +660,15 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // restores a shared service's 035 through migrationsThrough.mjs; it imports the same executor as before.
     'tests/db/invoiceVoidRoutine.integration.test.mjs',
     'tests/db/invoiceVoidHttp.integration.test.mjs',
+    // M7B-PAYMENTS-P1: the payment-recording proofs (migration 036's payment and reversal records, the record, reverse, void-v2
+    // routines and the payments read, guards and rollback order, and the HTTP record, reverse and payments read) stand up every
+    // migration in the directory — the routine proof also rolls 036 back through its down file, finds 035's down failing on the
+    // dependency while 036 is applied, and re-applies 036 — through the SAME trusted executor, validating their target with the
+    // same assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment property above is
+    // untouched. The void routine suite (above) now applies the chain only through 035 and restores a shared service's 036
+    // through migrationsThrough.mjs; it imports the same executor as before.
+    'tests/db/invoicePaymentRoutine.integration.test.mjs',
+    'tests/db/invoicePaymentHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second
@@ -690,7 +699,7 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // executor's exported, pure assertManagedDevDsn over one corpus — it opens no connection and uses no apply, ledger or
     // catalog surface. A test file, never part of the runtime import graph, so the decisive property above is unchanged.
     'server/platform-identity/databaseEndpoint.test.ts',
-    // QA-INTERACTIVE-P1: the long-lived manual-QA supervisor applies migrations 001-035 to its own disposable cluster through
+    // QA-INTERACTIVE-P1: the long-lived manual-QA supervisor applies migrations 001-036 to its own disposable cluster through
     // the SAME trusted executor, validating its target with the same assertDisposableTestDsn, rather than a second apply path.
     // It is a test-only tool under tests/, started only by `npm run qa:interactive`; its containment suite
     // (tests/quality/qaInteractiveContainment.test.mjs) asserts that application source, the normal build and test configs,

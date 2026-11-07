@@ -519,8 +519,9 @@ jobs:
       # step that rolls 035 or an older migration back (right after the issuing steps, and after every other step that does:
       # the issuing routine suite rolls 035 back itself at setup), and each teardown removes what the suite wrote, with the
       # guards lifted only inside one owner transaction and put back in the mode they were found in. The routine suite rolls
-      # 035 back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-035 applied. Synthetic data and
-      # keys made at run time only. Same binding, no new service, no secret, no permission change.
+      # 035 back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-035 applied (M7B-PAYMENTS-P1: with
+      # 036 applied above it; the routine suite rolls a shared service's 036 back at setup and puts it back at the end). Synthetic
+      # data and keys made at run time only. Same binding, no new service, no secret, no permission change.
       - name: Invoice void routine against disposable PostgreSQL (M7B-INVOICES-VOID-P1)
         env:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
@@ -531,6 +532,29 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceVoidHttp.integration.test.mjs
+      # M7B-PAYMENTS-P1 — migration 036's payment recording as the runtime login (the postcondition and its refusals, the exact
+      # surface and grants, the record's and the reversal's authority at Invoices Approve with Customers View, the ordered locks,
+      # the sealed answers for a repeated, over-remaining, reversed or voided request, the void v2 refusing while a payment is
+      # active, the payments read, the audit record each routine writes, 036's down refused while a payment, a reversal or a
+      # payment audit record exists and otherwise rolled back, restored and re-applied, and 035's down failing on the dependency
+      # while 036 is applied), then recording, reversing and reading payments end to end over real loopback HTTP on the tenant
+      # entry, against the SAME disposable service.
+      # Ordering rule: these suites leave PAYMENT rows, reversals and payment audit records, which 036's down refuses, so they run
+      # AFTER every step that rolls 036 or an older migration back (right after the void steps, and after every other step that
+      # does: the void routine suite rolls 036 back itself at setup), and each teardown removes what the suite wrote, with the
+      # guards lifted only inside one owner transaction and put back in the mode they were found in. The routine suite rolls 036
+      # back and re-applies it itself, so it runs BEFORE the HTTP suite. Each ends with 001-036 applied. Synthetic data and keys
+      # made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Invoice payment routines against disposable PostgreSQL (M7B-PAYMENTS-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentRoutine.integration.test.mjs
+      - name: Invoice payments over HTTP against the tenant entry and disposable PostgreSQL (M7B-PAYMENTS-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentHttp.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real

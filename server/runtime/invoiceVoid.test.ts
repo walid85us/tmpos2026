@@ -62,6 +62,8 @@ const sealWith = (envelope: unknown) => Buffer.from(JSON.stringify(envelope)).to
 // --- 1. the codes, the contract and the routes as the runtime registers them ---------------------------------------------
 
 test('IVU-01 VOID-01 (D-VOID-2, D-VOID-4): six closed codes in their one order with their labels; the contract is a store-scope update of the issued invoice with NO event; the POST is the store {id}/void template under a key, bounded at 1 KiB, on a RECENT sign-in; the eligibility a session-bound GET under the same requirement object WITHOUT one; the table resolves both beside the issued reads', () => {
+  // M7B-PAYMENTS-P1 (doc 15 §12.3, A2/A3): the void opts into the payment refusal 'void' — its sealed 409 payments_recorded.
+  assert.equal(INVOICE_VOID_CONTRACT.paymentRefusals, 'void');
   assert.deepEqual([...INVOICE_VOID_REASON_CODES], ['issued_in_error', 'wrong_customer', 'wrong_lines_or_amounts', 'wrong_seller_details', 'duplicate', 'other']);
   assert.deepEqual(INVOICE_VOID_REASON_CODES.map((c) => INVOICE_VOID_REASON_LABELS[c]),
     ['Issued by mistake', 'Wrong customer', 'Wrong lines or amounts', 'Wrong seller details', 'Duplicate of another invoice', 'Other reason']);

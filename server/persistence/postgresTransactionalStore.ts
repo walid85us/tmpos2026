@@ -80,6 +80,14 @@
 // It answers only the bare words: the object form stays the issue's alone, and from it is the fault. The update vocabulary
 // (conflict, invalid_state and unchanged sealed; not_found and precondition_failed rolled back) applies as to every update.
 // It enqueues no event.
+// M7B-PAYMENTS-P1 (migration 036, doc 15 §12.5): the payment RECORD (a store-scope CREATE of an invoice_payment, its kind in
+// NOT_FOUND_CREATE_KINDS) and the payment REVERSAL (a store-scope UPDATE, its kind in PRECONDITION_UPDATE_KINDS) are the two
+// ROUTINE-AUDITED kinds: a closed literal list (ROUTINE_AUDITED_KINDS) their mutators must declare `routineAudited` for —
+// and no other mutator may — and for them alone the store writes NO audit record of its own after 'applied' (their routine
+// wrote it, in this transaction, under MutationAuthority.correlationId, the command's audit request id, which every mutator
+// is now handed). The record declares `paymentRefusals: 'record'` (its sealed invalid_state, already_recorded and
+// amount_exceeds_remaining), the void `paymentRefusals: 'void'` (payments_recorded); each recorded as the completion alone.
+// Neither payment kind enqueues an event. Every other kind's behaviour is unchanged.
 //
 // Outcomes. Every precondition is a routine's answer, so no error is ever read as a business answer: no SQLSTATE and no
 // constraint maps to 'conflict', and a reused event ID is a fault. A refusal is rolled back and answered only once the
@@ -164,6 +172,19 @@ export interface AggregateMutator {
    * bare words. No other mutator may answer the object form.
    */
   readonly auditSubjects?: 'issued_invoice' | 'store' | 'voided_invoice';
+  /**
+   * The payment commands' typed sealed refusals (M7B-PAYMENTS-P1, doc 15 §12.5): 'record' — a CREATE only — may answer
+   * 'already_recorded', 'amount_exceeds_remaining' and the sealed 'invalid_state' (the voided invoice) having written nothing;
+   * 'void' — an UPDATE only — may answer 'payments_recorded'. The store records the command's matching sealed 409 as the
+   * completion and commits only it. Its commands carry exactly the matching slots (commandTransaction.ts RejectedSlots).
+   */
+  readonly paymentRefusals?: 'record' | 'void';
+  /**
+   * The mutator's routine writes the command's ONE audit record itself, in the same transaction (M7B-PAYMENTS-P1, doc 15
+   * §12.5 I2): declared exactly when the kind is in ROUTINE_AUDITED_KINDS — a closed literal list — and the store then writes
+   * no audit record of its own for it. Nothing in a request, plan, change set or answer can set or clear it.
+   */
+  readonly routineAudited?: true;
 }
 
 /**
@@ -177,6 +198,12 @@ export interface MutationAuthority {
   readonly context: TrustedScope | null;
   readonly sessionKey: string | null;
   readonly authNotAfter: number | null;
+  /**
+   * The command's audit correlation id (its audit record's request_id), a version-4 uuid the runtime minted (M7B-PAYMENTS-P1):
+   * handed to every mutator by the store; a routine-audited one passes it to its routine, which writes the record under it,
+   * and treats its absence as a fault. Optional in the TYPE only, so mutators' existing test fixtures stay valid.
+   */
+  readonly correlationId?: string;
 }
 
 /**
@@ -251,6 +278,10 @@ const CUSTOMER_NOT_FOUND = answer('customer_not_found');
 /** An issuing update's two typed sealed refusals (M7B-INVOICES-ISSUE-P1): each sealed 409 recorded as the completion alone. */
 const ISSUING_NOT_CONFIGURED = answer('issuing_not_configured');
 const AMOUNT_OUT_OF_RANGE = answer('amount_out_of_range');
+/** The payment commands' typed sealed refusals (M7B-PAYMENTS-P1): each sealed 409 recorded as the completion alone. */
+const ALREADY_RECORDED = answer('already_recorded');
+const AMOUNT_EXCEEDS_REMAINING = answer('amount_exceeds_remaining');
+const PAYMENTS_RECORDED = answer('payments_recorded');
 const COMPLETED = answer('completed');
 const LEASE_LOST = answer('lease_lost');
 const COMMITTED = answer('committed');
@@ -275,6 +306,9 @@ const COMMAND_FIELDS: readonly string[] = ['scope', 'lease', 'response', 'unchan
 const REJECTED_FIELDS: readonly string[] = ['conflict', 'invalidState', 'customerNotFound'];
 /** An issuing update's sealed slots (M7B-INVOICES-ISSUE-P1): the three above and its two typed 409s, exactly. */
 const ISSUING_REJECTED_FIELDS: readonly string[] = [...REJECTED_FIELDS, 'issuingNotConfigured', 'amountOutOfRange'];
+/** A payment record's sealed slots (M7B-PAYMENTS-P1) and a payment-aware void's: the three above and their typed 409s, exactly. */
+const RECORD_REJECTED_FIELDS: readonly string[] = [...REJECTED_FIELDS, 'alreadyRecorded', 'amountExceedsRemaining'];
+const VOID_REJECTED_FIELDS: readonly string[] = [...REJECTED_FIELDS, 'paymentsRecorded'];
 /** Any uuid in PostgreSQL's canonical lowercase text form: a new audit subject's shape (M7B-INVOICES-ISSUE-P1). */
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MUTATION_FIELDS: readonly string[] = ['kind', 'aggregateType', 'aggregateId', 'expectedVersion', 'changes'];
@@ -306,19 +340,33 @@ const INVOICE_DRAFT_AGGREGATE = 'invoice_draft';
 /** The aggregate type of an issued invoice (migration 034), the void's target (M7B-INVOICES-VOID-P1). */
 const ISSUED_INVOICE_AGGREGATE = 'issued_invoice';
 /**
- * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly four: the draft edit's
+ * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly five (M7B-PAYMENTS-P1: + the payment reversal's): the draft edit's
  * (M7B-INVOICES-P2), the draft discard's (M7B-INVOICES-DISCARD-P1), the invoice issue's (M7B-INVOICES-ISSUE-P1) and the
  * invoice void's (M7B-INVOICES-VOID-P1), each when its expected tenant is not the store's — rolled back exactly as a
  * create's; any other update answering it is the fault (commit, step 2a'). Literals: the store imports no route module; its
  * test pins this set equal to app.ts's.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze([
+  'store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment reversal's expectedTenant.
+  'store.invoice_payment.reverse',
+]);
 /**
- * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly one: the
+ * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly two (M7B-PAYMENTS-P1: + the payment record's): the
  * issuing-settings write, whose path store is missing, another tenant's or not writable — rolled back exactly as an update's
  * not_found; any other create answering it is the fault. Literals; its test pins this set equal to app.ts's.
  */
-export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze(['tenant.issuing_settings.update']);
+export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze([
+  'tenant.issuing_settings.update',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment record, whose path invoice may be missing, another store's or another tenant's.
+  'store.invoice_payment.record',
+]);
+/**
+ * The kinds whose routine writes their audit record itself (M7B-PAYMENTS-P1, doc 15 §12.5 I2, D-PAY-8): a CLOSED literal list
+ * of exactly the payment record and the payment reversal. A mutator declares `routineAudited: true` exactly when its kind is
+ * here, or the store refuses to build; for these kinds alone commit() writes no audit record of its own.
+ */
+export const ROUTINE_AUDITED_KINDS: readonly string[] = Object.freeze(['store.invoice_payment.record', 'store.invoice_payment.reverse']);
 /** The context scopes each root's store admits (M7B-INVOICES-P1): a mutator's declared scope must be one of its root's. */
 const ADMITTED_SCOPES: Readonly<Record<'platform' | 'tenant', readonly CommandContextScope[]>> = Object.freeze({
   platform: Object.freeze(['platform'] as const), tenant: Object.freeze(['tenant', 'store'] as const),
@@ -526,6 +574,8 @@ interface Command {
    */
   readonly rejected: Readonly<{
     conflict: string; invalidState: string | null; customerNotFound: string | null; issuingNotConfigured: string | null; amountOutOfRange: string | null;
+    /** The payment slots (M7B-PAYMENTS-P1): null for every command whose mutator did not declare the matching paymentRefusals. */
+    alreadyRecorded: string | null; amountExceedsRemaining: string | null; paymentsRecorded: string | null;
   }>;
   readonly mutator: AggregateMutator; readonly mutation: TransactionMutation; readonly audit: AuditEventWriteInput;
   readonly events: readonly EventDraft[]; readonly context: TrustedScope | null;
@@ -574,18 +624,30 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // rejection its own mode can reach would otherwise reach the commit and roll back there instead.
     // M7B-INVOICES-ISSUE-P1: an issuing update's command carries exactly five slots, every other exactly three — so a command
     // whose slots do not match its mutator's declaration is refused here, either way.
+    // M7B-PAYMENTS-P1: a 'record' mutator's command carries exactly five slots (its invalidState sealed although a create), a
+    // 'void' one's exactly four; the slot set must match the declaration either way.
     const issuing = mutator.issuingRefusals === true;
-    if (!isRecord(rawRejected) || !hasExactKeys(rawRejected, issuing ? ISSUING_REJECTED_FIELDS : REJECTED_FIELDS)) return UNAVAILABLE;
+    const record = mutator.paymentRefusals === 'record';
+    const voids = mutator.paymentRefusals === 'void';
+    const slots = issuing ? ISSUING_REJECTED_FIELDS : record ? RECORD_REJECTED_FIELDS : voids ? VOID_REJECTED_FIELDS : REJECTED_FIELDS;
+    if (!isRecord(rawRejected) || !hasExactKeys(rawRejected, slots)) return UNAVAILABLE;
     const { conflict, invalidState, customerNotFound } = rawRejected;
     const issuingNotConfigured: unknown = issuing ? rawRejected.issuingNotConfigured : null;
     const amountOutOfRange: unknown = issuing ? rawRejected.amountOutOfRange : null;
+    const alreadyRecorded: unknown = record ? rawRejected.alreadyRecorded : null;
+    const amountExceedsRemaining: unknown = record ? rawRejected.amountExceedsRemaining : null;
+    const paymentsRecorded: unknown = voids ? rawRejected.paymentsRecorded : null;
     if (!isSealed(conflict) || conflict.length === 0) return UNAVAILABLE;
-    if (mutator.mode === 'update' ? !(isSealed(invalidState) && invalidState.length > 0) : invalidState !== null) return UNAVAILABLE;
+    if (mutator.mode === 'update' || record ? !(isSealed(invalidState) && invalidState.length > 0) : invalidState !== null) return UNAVAILABLE;
     // The typed sealed 422 (M7B-INVOICES-P1): null, or sealed text on a create alone — an update never carries one.
     if (customerNotFound !== null && (mutator.mode !== 'create' || !isSealed(customerNotFound) || customerNotFound.length === 0)) return UNAVAILABLE;
     // The issuing pair: both sealed text on an issuing update (an update by construction, mutatorOf), its 422 slot null.
     if (issuing && (customerNotFound !== null || !isSealed(issuingNotConfigured) || issuingNotConfigured.length === 0
       || !isSealed(amountOutOfRange) || amountOutOfRange.length === 0)) return UNAVAILABLE;
+    // The payment slots (M7B-PAYMENTS-P1): sealed text each, the 422 slot null.
+    if (record && (customerNotFound !== null || !isSealed(alreadyRecorded) || alreadyRecorded.length === 0
+      || !isSealed(amountExceedsRemaining) || amountExceedsRemaining.length === 0)) return UNAVAILABLE;
+    if (voids && (customerNotFound !== null || !isSealed(paymentsRecorded) || paymentsRecorded.length === 0)) return UNAVAILABLE;
     const changes = changeRecordOf(rawChanges);
     if (changes === null || !isRecord(audit) || !hasExactKeys(audit, AUDIT_FIELDS)) return UNAVAILABLE;
     // The typed audit subjects a mutator declares (M7B-INVOICES-ISSUE-P1), from its command's checked change set alone: the
@@ -642,6 +704,8 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
     // The array and its length, each read once: a proxied length cannot pass the bound and then drive the loop past it.
     const count: unknown = Array.isArray(events) && Object.getPrototypeOf(events) === Array.prototype ? events.length : undefined;
     if (!isInteger(count, 0, MAX_EVENTS_PER_COMMAND)) return UNAVAILABLE;
+    // A routine-audited command (M7B-PAYMENTS-P1) enqueues nothing: its contract declares no event (doc 15 §12.1 clarification 3).
+    if (mutator.routineAudited === true && count !== 0) return UNAVAILABLE;
     const version = (expectedVersion === null ? 0 : expectedVersion as number) + 1;
     const drafts: EventDraft[] = [];
     // inv: drafts holds a checked copy of each event below i, each field read once, their IDs distinct; term: i rises to count (at most 8).
@@ -710,10 +774,14 @@ function commandOf(raw: unknown, mutators: ReadonlyMap<string, AggregateMutator>
       rejected: Object.freeze({
         conflict: conflict as string, invalidState: (invalidState ?? null) as string | null, customerNotFound: (customerNotFound ?? null) as string | null,
         issuingNotConfigured: issuingNotConfigured as string | null, amountOutOfRange: amountOutOfRange as string | null,
+        alreadyRecorded: alreadyRecorded as string | null, amountExceedsRemaining: amountExceedsRemaining as string | null,
+        paymentsRecorded: paymentsRecorded as string | null,
       }),
       mutator, mutation: checked, audit: auditEvent, events: Object.freeze(drafts), context,
       authNotAfter: authNotAfter as number | null, sessionKey: sessionKey as string | null,
-      authority: Object.freeze({ context, sessionKey: sessionKey as string | null, authNotAfter: authNotAfter as number | null }),
+      authority: Object.freeze({
+        context, sessionKey: sessionKey as string | null, authNotAfter: authNotAfter as number | null, correlationId: correlationId as string,
+      }),
     });
   } catch {
     return UNAVAILABLE; // a hostile getter: not in contract
@@ -820,13 +888,26 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
     if (!(await completed(sql, c.scope, c.lease, sealed))) return refuse(UNAVAILABLE);
     return applied === 'issuing_not_configured' ? ISSUING_NOT_CONFIGURED : AMOUNT_OUT_OF_RANGE;
   }
+  // 2a''''. The payment commands' typed sealed refusals (M7B-PAYMENTS-P1, doc 15 §12.5): a 'record' create's
+  //     already_recorded and amount_exceeds_remaining, a 'void' update's payments_recorded — each decided by the routine
+  //     before writing anything (DA-36), so its sealed 409 is recorded as the completion HERE and commits alone. Any other
+  //     mutator answering one is the fault.
+  if ((c.mutator.paymentRefusals === 'record' && (applied === 'already_recorded' || applied === 'amount_exceeds_remaining'))
+    || (c.mutator.paymentRefusals === 'void' && applied === 'payments_recorded')) {
+    const sealed = applied === 'already_recorded' ? c.rejected.alreadyRecorded
+      : applied === 'amount_exceeds_remaining' ? c.rejected.amountExceedsRemaining : c.rejected.paymentsRecorded;
+    if (sealed === null) return refuse(UNAVAILABLE);
+    if (!(await completed(sql, c.scope, c.lease, sealed))) return refuse(UNAVAILABLE);
+    return applied === 'already_recorded' ? ALREADY_RECORDED : applied === 'amount_exceeds_remaining' ? AMOUNT_EXCEEDS_REMAINING : PAYMENTS_RECORDED;
+  }
   // An update whose aggregate is absent, or (M7B-INVOICES-ISSUE-P1) a create of a kind in NOT_FOUND_CREATE_KINDS whose target
   // is absent: rolled back, nothing recorded. Any other create answering it is the fault.
   if (applied === 'not_found' && (c.mutator.mode === 'update' || NOT_FOUND_CREATE_KINDS.includes(c.mutator.kind))) return refuse(NOT_FOUND);
   // 2b. The aggregate is there at the expected version, but its current state does not admit this change —
   //     a lifecycle transition from the wrong state, or to the state it already holds (M5-GIAM-D1-P2).
   //     Sealed and recorded exactly as the conflict above, and for the same reason.
-  if (c.mutator.mode === 'update' && applied === 'invalid_state') {
+  // M7B-PAYMENTS-P1: and the payment record, the one create declaring it (the voided invoice).
+  if ((c.mutator.mode === 'update' || c.mutator.paymentRefusals === 'record') && applied === 'invalid_state') {
     if (c.rejected.invalidState === null) return refuse(UNAVAILABLE);
     return (await completed(sql, c.scope, c.lease, c.rejected.invalidState)) ? INVALID_STATE : refuse(UNAVAILABLE);
   }
@@ -840,6 +921,10 @@ async function commit(sql: PgTransactionScope, c: Command, revalidate: ContextRe
     return (await completed(sql, c.scope, c.lease, c.unchanged)) ? UNCHANGED : refuse(UNAVAILABLE);
   }
   if (applied !== 'applied') return refuse(UNAVAILABLE);
+  // 3'. A routine-audited kind (M7B-PAYMENTS-P1, ROUTINE_AUDITED_KINDS, proven at construction): its routine wrote the ONE
+  //     audit record in this transaction and its mutator accepted 'applied' only with that record's id, so the store writes
+  //     none; it carries no event either (commandOf), so only the completion follows. Every other kind continues below.
+  if (c.mutator.routineAudited === true) return (await completed(sql, c.scope, c.lease, c.response)) ? COMMITTED : refuse(UNAVAILABLE);
   // 3. The audit record, through the existing writer, on this transaction and nowhere else. Exactly one row INSERTed, or
   //    the whole transaction rolls back (M7A-CUSTOMERS-P3, decision R6): a BEFORE INSERT trigger answering NULL would
   //    otherwise drop the record while the mutation and its completion committed — the session store's rule, here too.
@@ -976,9 +1061,10 @@ const MUTATOR_SCOPES: readonly string[] = ['platform', 'tenant', 'store'];
 function mutatorOf(raw: unknown): AggregateMutator {
   // The five fields every mutator has — its declared context scope among them, required (M7B-INVOICES-P1, R4) — and at most
   // the two M7B-INVOICES-ISSUE-P1 declarations, only when present.
-  const optional = isRecord(raw) ? ['issuingRefusals', 'auditSubjects'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
+  const optional = isRecord(raw)
+    ? ['issuingRefusals', 'auditSubjects', 'paymentRefusals', 'routineAudited'].filter((key) => Object.prototype.hasOwnProperty.call(raw, key)) : [];
   if (isRecord(raw) && hasExactKeys(raw, [...MUTATOR_FIELDS, ...optional])) {
-    const { kind, mode, aggregateType, apply, contextScope, issuingRefusals, auditSubjects } = raw;
+    const { kind, mode, aggregateType, apply, contextScope, issuingRefusals, auditSubjects, paymentRefusals, routineAudited } = raw;
     // The issuing pair on an update alone, as exactly true; the issued-invoice subjects on a store-scope invoice_draft update
     // alone; the store subject on a tenant-scope create alone; (M7B-INVOICES-VOID-P1) the voided-invoice subject on a
     // store-scope issued_invoice update alone.
@@ -987,12 +1073,24 @@ function mutatorOf(raw: unknown): AggregateMutator {
       || (auditSubjects === 'issued_invoice' && mode === 'update' && aggregateType === INVOICE_DRAFT_AGGREGATE && contextScope === 'store')
       || (auditSubjects === 'store' && mode === 'create' && contextScope === 'tenant')
       || (auditSubjects === 'voided_invoice' && mode === 'update' && aggregateType === ISSUED_INVOICE_AGGREGATE && contextScope === 'store');
+    // M7B-PAYMENTS-P1: 'record' on a create alone, 'void' on an update alone, never beside the issuing pair; and routineAudited
+    // exactly true exactly for a kind in the closed ROUTINE_AUDITED_KINDS — on any other kind it refuses, and a kind there
+    // without it refuses — at store scope, with no typed audit subject (the store writes no record for it).
+    const paymentValid = !optional.includes('paymentRefusals') || (!optional.includes('issuingRefusals')
+      && ((paymentRefusals === 'record' && mode === 'create') || (paymentRefusals === 'void' && mode === 'update')));
+    const routine = typeof kind === 'string' && ROUTINE_AUDITED_KINDS.includes(kind);
+    const auditedValid = routine
+      ? optional.includes('routineAudited') && routineAudited === true && contextScope === 'store' && !optional.includes('auditSubjects')
+      : !optional.includes('routineAudited');
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string' && AGGREGATE_TYPE_RE.test(aggregateType)
-      && typeof apply === 'function' && typeof contextScope === 'string' && MUTATOR_SCOPES.includes(contextScope) && issuingValid && subjectsValid) {
+      && typeof apply === 'function' && typeof contextScope === 'string' && MUTATOR_SCOPES.includes(contextScope) && issuingValid && subjectsValid
+      && paymentValid && auditedValid) {
       return Object.freeze({
         kind, mode, aggregateType, apply: apply as AggregateMutator['apply'], contextScope: contextScope as CommandContextScope,
         ...(optional.includes('issuingRefusals') ? { issuingRefusals: true as const } : {}),
         ...(optional.includes('auditSubjects') ? { auditSubjects: auditSubjects as 'issued_invoice' | 'store' | 'voided_invoice' } : {}),
+        ...(optional.includes('paymentRefusals') ? { paymentRefusals: paymentRefusals as 'record' | 'void' } : {}),
+        ...(routine ? { routineAudited: true as const } : {}),
       });
     }
   }

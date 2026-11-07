@@ -159,7 +159,7 @@ import { defineOutboxEvents } from './outbox.js';
 import type { EventContract } from './outbox.js';
 import { sameKeyMaterial } from './keyMaterial.js';
 import {
-  COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, STORE_SEGMENT, defineRoutes, pathIdBeforeSuffixOf, pathIdOf, sessionPaths, storeTargetOf,
+  COMMAND_REQUEST_INVALID, EnforcementSetupError, PATH_ID_SEGMENT, PAYMENT_ID_SEGMENT, STORE_SEGMENT, defineRoutes, pathIdBeforeSuffixOf, pathIdOf, sessionPaths, storeTargetOf,
 } from './routes.js';
 import type { AuthorizationRequirement, BodyPolicy, RouteDefinition, RouteHandler, SessionAudience, SessionContext, VerifiedPrincipal } from './routes.js';
 import type { TrustedScope } from './principals.js';
@@ -516,23 +516,33 @@ const NO_BYTES = Buffer.alloc(0);
 
 /**
  * The UPDATE contracts whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by kind: a closed
- * set of exactly four (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
+ * set of exactly five (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
  * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT; M7B-INVOICES-ISSUE-P1: the invoice issue's,
- * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT; M7B-INVOICES-VOID-P1: the invoice void's, invoiceVoid.ts INVOICE_VOID_CONTRACT).
+ * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT; M7B-INVOICES-VOID-P1: the invoice void's, invoiceVoid.ts INVOICE_VOID_CONTRACT;
+ * M7B-PAYMENTS-P1: the payment reversal's, invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT).
  * Every other update's is the 503. The tenant store admits the answer from the same kinds alone
  * (postgresTransactionalStore.ts). Literals, as app.ts imports no route module; postgresTransactionalStore.test.ts fails if
  * this set or the store's drifts.
  */
-export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze(['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void']);
+export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze([
+  'store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment reversal's expectedTenant.
+  'store.invoice_payment.reverse',
+]);
 
 /**
  * The CREATE contracts whose store-rolled-back 'not_found' is the unsealed 404 not_found, by kind (M7B-INVOICES-ISSUE-P1): a
- * closed set of exactly one — the issuing-settings write (issuingSettings.ts), a create-mode command whose path names a store
- * that may be missing, another tenant's or not writable — exactly as an update's not_found. Every other create's is the
+ * closed set of exactly two — the issuing-settings write (issuingSettings.ts), a create-mode command whose path names a store
+ * that may be missing, another tenant's or not writable, and (M7B-PAYMENTS-P1) the payment record (invoicePayments.ts), whose
+ * path names an issued invoice that may be missing, another store's or another tenant's — exactly as an update's not_found. Every other create's is the
  * 503. The tenant store admits the answer from the same kinds alone (postgresTransactionalStore.ts); its test pins the two
  * sets equal.
  */
-export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze(['tenant.issuing_settings.update']);
+export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze([
+  'tenant.issuing_settings.update',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment record, whose path invoice may be missing, another store's or another tenant's.
+  'store.invoice_payment.record',
+]);
 
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
 function forwardedForOf(req: Request): string | string[] | undefined {
@@ -982,15 +992,30 @@ export function createApp(deps: AppDeps): Express {
       // writes, a selector among the trusted tenant's stores, never a grant — exactly as the customer edit reads its id.
       // M7B-INVOICES-VOID-P1: the void (POST …/invoices/{id}/void) reads its issued invoice the discard's and the issue's way —
       // the {id} directly before the matched template's own `/void` — after the same store check; no new branch.
+      // M7B-PAYMENTS-P1: the record (POST …/invoices/{id}/payments) reads its invoice the void's way. The reversal (POST
+      // …/invoices/{id}/payments/{paymentId}/reversal), the one template with a second id segment, reads BOTH from the matched
+      // template's own literal segments: its {paymentId} directly before the template's tail (`/reversal`), then its {id}
+      // directly before the template's middle, that payment id and the tail — each a canonical lowercase uuid, else the same
+      // 400 at the same point. The payment id is bound into the fingerprint after the invoice and reaches the planner as
+      // ctx.paymentId; every other route has none, so every other fingerprint and context is unchanged.
       let targetId: string | null = null;
       let storeId: string | null = null;
+      let paymentId: string | null = null;
       if ('command' in route && route.path.includes(STORE_SEGMENT)) {
         const store = storeTargetOf(req.path);
         if (store === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
         if (context === null || context.scope !== 'store' || context.store !== store) {
           return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
         }
-        if (route.path.includes(PATH_ID_SEGMENT)) {
+        if (route.path.includes(PAYMENT_ID_SEGMENT)) {
+          const at = route.path.indexOf(PAYMENT_ID_SEGMENT);
+          const middle = route.path.slice(route.path.indexOf(PATH_ID_SEGMENT) + PATH_ID_SEGMENT.length, at);
+          const tail = route.path.slice(at + PAYMENT_ID_SEGMENT.length);
+          paymentId = pathIdBeforeSuffixOf(req.path, tail);
+          targetId = paymentId === null ? null : pathIdBeforeSuffixOf(req.path, `${middle}/${paymentId}${tail}`);
+          if (targetId === null || paymentId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
+          storeId = store;
+        } else if (route.path.includes(PATH_ID_SEGMENT)) {
           const suffix = route.path.slice(route.path.indexOf(PATH_ID_SEGMENT) + PATH_ID_SEGMENT.length);
           targetId = suffix === '' ? pathIdOf(req.path) : pathIdBeforeSuffixOf(req.path, suffix);
           if (targetId === null) return refuse(req, res, 400, 'invalid_request', 'command_target_invalid');
@@ -1040,6 +1065,8 @@ export function createApp(deps: AppDeps): Express {
           method: route.method, path: route.path, audience, tenant: context.tenant, store: context.store, actor: context.actor, body: bytes,
           // A templated command's validated target (null elsewhere: a literal route's fingerprint is unchanged).
           target: targetId,
+          // M7B-PAYMENTS-P1: the reversal's validated payment id, after the invoice; absent everywhere else.
+          ...(paymentId === null ? {} : { secondTarget: paymentId }),
         });
         const lease = randomBytes(32).toString('base64url');
         const acquired = await acquireIdempotency(store, Object.freeze({ ...operation, lease, ...IDEMPOTENCY_POLICY }), deadlineMs);
@@ -1054,7 +1081,9 @@ export function createApp(deps: AppDeps): Express {
           try {
             plan = route.command.plan(Object.freeze(targetId === null
               ? { audience, body: parsed, newAggregateId }
-              : storeId === null ? { audience, body: parsed, newAggregateId, targetId } : { audience, body: parsed, newAggregateId, targetId, storeId }));
+              : storeId === null ? { audience, body: parsed, newAggregateId, targetId }
+              : paymentId === null ? { audience, body: parsed, newAggregateId, targetId, storeId }
+              : { audience, body: parsed, newAggregateId, targetId, storeId, paymentId }));
           } catch {
             return refuse(req, res, 500, 'internal_error', 'command_plan_failed'); // nothing committed; the lease waits out its time
           }
@@ -1107,9 +1136,11 @@ export function createApp(deps: AppDeps): Express {
           }
           // The aggregate exists at the expected version, but the change its contract asks for is not one
           // its current state allows — a lifecycle transition from the wrong state, or to the state it is
-          // already in (M5-GIAM-D1-P2). Sealed exactly like a conflict; a create seals none, and an
-          // 'invalid_state' from one committed nothing and is the 503 below.
-          if (refused === 'transaction_invalid_state' && contract.mode === 'update' && prepared.rejected.invalidState !== null) {
+          // already in (M5-GIAM-D1-P2). Sealed exactly like a conflict; a create seals none — except (M7B-PAYMENTS-P1) the
+          // payment record, whose contract declares paymentRefusals 'record' (the voided invoice) — and an 'invalid_state'
+          // from any other create committed nothing and is the 503 below.
+          if (refused === 'transaction_invalid_state' && (contract.mode === 'update' || contract.paymentRefusals === 'record')
+            && prepared.rejected.invalidState !== null) {
             return sendRecorded(res, prepared.rejected.invalidState, false, refused);
           }
           // The typed sealed refusal a create opted into (M7B-INVOICES-P1): its mutator found the customer missing from the
@@ -1130,6 +1161,22 @@ export function createApp(deps: AppDeps): Express {
           if (refused === 'transaction_amount_out_of_range' && contract.mode === 'update' && contract.issuingRefusals === true
             && prepared.rejected.amountOutOfRange !== undefined) {
             return sendRecorded(res, prepared.rejected.amountOutOfRange, false, refused);
+          }
+          // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment commands' typed sealed 409s, each decided by its routine before writing
+          // anything and recorded by the store as the completion alone — already_recorded and amount_exceeds_remaining ONLY for
+          // a contract declaring paymentRefusals 'record' (the create-mode invalid_state above too), payments_recorded ONLY for
+          // one declaring 'void'. Any other command answering one committed nothing and is the 503 below.
+          if (refused === 'transaction_already_recorded' && contract.mode === 'create' && contract.paymentRefusals === 'record'
+            && prepared.rejected.alreadyRecorded !== undefined) {
+            return sendRecorded(res, prepared.rejected.alreadyRecorded, false, refused);
+          }
+          if (refused === 'transaction_amount_exceeds_remaining' && contract.mode === 'create' && contract.paymentRefusals === 'record'
+            && prepared.rejected.amountExceedsRemaining !== undefined) {
+            return sendRecorded(res, prepared.rejected.amountExceedsRemaining, false, refused);
+          }
+          if (refused === 'transaction_payments_recorded' && contract.mode === 'update' && contract.paymentRefusals === 'void'
+            && prepared.rejected.paymentsRecorded !== undefined) {
+            return sendRecorded(res, prepared.rejected.paymentsRecorded, false, refused);
           }
           // Changes already in place: the store recorded the plan's unchanged response as the completion in the
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as

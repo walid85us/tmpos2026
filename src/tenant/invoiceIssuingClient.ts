@@ -186,14 +186,15 @@ export type FindIssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedSu
 export type IssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedInvoice } | { readonly kind: 'not-found' } | ReadRefusal;
 /**
  * One void answer (M7B-INVOICES-VOID-P2). `voided`: the exact 200 for the invoice asked — it says nothing of when or why
- * (a read does). Sealed: `already-void` (invalid_state), `version-conflict` (write_conflict). The chain's: `tenant-conflict`
+ * (a read does). Sealed: `already-void` (invalid_state), `version-conflict` (write_conflict), `payments-recorded`
+ * (payments_recorded, M7B-PAYMENTS-P1: the invoice has a standing payment). The chain's: `tenant-conflict`
  * (409 write_conflict), `in-progress`, `key-reused` (422), `not-found`, `step-up` (403 step_up_required), `denied` (any other
  * 403), `signed-out`, `invalid` (400/413/415) and the 429. `not-sent`: refused here, nothing sent. Anything else `unknown`.
  */
 export type VoidResult =
   | { readonly kind: 'voided'; readonly replayed: boolean }
   | {
-    readonly kind: 'already-void' | 'version-conflict' | 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'step-up' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
+    readonly kind: 'already-void' | 'version-conflict' | 'payments-recorded' | 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'step-up' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
   }
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
@@ -856,6 +857,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     // reached the key — a 401, 403 or 429 is decided before it is acquired, so nothing ran.
     if (status === 409 && sealed('invalid_state')) return Object.freeze({ kind: 'already-void' });
     if (status === 409 && sealed('write_conflict')) return Object.freeze({ kind: 'version-conflict' });
+    if (status === 409 && sealed('payments_recorded')) return Object.freeze({ kind: 'payments-recorded' }); // M7B-PAYMENTS-P1
     if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-conflict' });
     if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
     if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });

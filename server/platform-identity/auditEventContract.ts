@@ -161,7 +161,14 @@ export type AuditForbiddenField =
   | 'rawDbError'
   | 'pan'
   | 'cardNumber'
-  | 'providerSecret';
+  | 'providerSecret'
+  // M7B-PAYMENTS-P1 (doc 15 §12.5, docs/phase-4/05 line 38): CVV/CVC, track 1 and 2 and the PIN block, mirroring 036's
+  // audit_event_metadata_no_card_data_keys_chk.
+  | 'cvv'
+  | 'cvc'
+  | 'track1'
+  | 'track2'
+  | 'pinBlock';
 
 /** Runtime mirror of AuditForbiddenField for the offline diagnostic. */
 export const AUDIT_FORBIDDEN_FIELDS: readonly AuditForbiddenField[] = [
@@ -178,4 +185,9 @@ export const AUDIT_FORBIDDEN_FIELDS: readonly AuditForbiddenField[] = [
   'pan',
   'cardNumber',
   'providerSecret',
+  'cvv',
+  'cvc',
+  'track1',
+  'track2',
+  'pinBlock',
 ];

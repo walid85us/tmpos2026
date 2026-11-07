@@ -54,6 +54,13 @@
 //          changing nothing; neither present, it passes (rolled back); and R-DB-2: a void applied but uncommitted holds the
 //          down at its first lock, and the void's commit then refuses it; the up and the down take every lock before a check.
 //
+// THE CHAIN IT WAS WRITTEN FOR (M7B-PAYMENTS-P1). This file proves 035 as the head: 036 (payment recording) revokes tmpos_app's
+// EXECUTE on 035's void, adds an internal foreign-key trigger to issued_invoice and makes 035's own down fail on the dependency,
+// so on a shared service where an earlier step applied 036 it is rolled back through its own committed down and ledger row at
+// setup (rollBackAbove, newest first) and put back, with its exact ledger row, by the teardown; the executor in this file
+// applies THROUGH 035 only. On a fresh cluster there is nothing above 035 and the restore does nothing. 036's own behaviour
+// (and its rollback, which refuses over any payment evidence) is the payment routine suite's.
+//
 // NOT PROVEN HERE: the HTTP command path (audit record, completion, replay, lease) is invoiceVoidHttp's; the exact sign-in
 // bounds on a LIVE frozen clock need libfaketime under the server, which a supplied CI service cannot take — IVR-09 pins them
 // on the routine's own predicate instead (and live on the deterministic side of each bound).
@@ -187,13 +194,13 @@ const KEYS = new Set();
 let issuerKeyBefore;
 let roleCheckDef = null;
 
-/** The trusted executor over the migration files (THROUGH `through` when named; every file when not). */
-async function trustedApply(through) {
+/** The trusted executor over the migration files THROUGH `through` (035 when not named: 036 and later are hidden, this file proves 035 as the head). */
+async function trustedApply(through = '035') {
   const handle = await createPostgresExecutor(assertDisposableTestDsn(TARGET_DSN));
   try {
     const port = createNodeFsPort(MIG_DIR, MIG_REL);
     return await runTrustedApply({
-      fsPort: through === undefined ? port : portThrough(port, through), adapter: handle.adapter, ledger: handle.ledger,
+      fsPort: portThrough(port, through), adapter: handle.adapter, ledger: handle.ledger,
       connectionMode: 'session', credential: MIGRATOR, lockKey: LOCK_KEY, now: NOW, deadlineMs: 300_000,
     });
   } finally {
@@ -373,7 +380,7 @@ await setupStep(async () => {
   end $$;`);
   await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
   await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
-  // Anything above 035 (none today) is rolled back and restored by the teardown; a shared service's 035 is rolled back here
+  // Anything above 035 (036 since M7B-PAYMENTS-P1) is rolled back and restored by the teardown; a shared service's 035 is rolled back here
   // and applied again below (its down refuses, failing the suite loudly, if an earlier step left a void record or void audit
   // record).
   above035 = await rollBackAbove(owner, MIG_DIR, '035');

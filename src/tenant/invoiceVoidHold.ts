@@ -186,9 +186,12 @@ function voidNoteOf(answer: VoidResult): string {
 /** A first send's refusals decided BEFORE the key was acquired: that request ran nothing. */
 const BEFORE_KEY: ReadonlySet<VoidRefusal> = new Set(['signed-out', 'rate-limited', 'step-up', 'denied']);
 /** What decides a first send: every other answer but unknown and in-progress. */
-const FIRST_VOID_DECIDES: ReadonlySet<VoidRefusal> = new Set(['already-void', 'version-conflict', 'tenant-conflict', 'not-found', 'key-reused', 'invalid']);
-/** What decides a Check again (a key that may already have committed): only the key's sealed answers (D-VOID-5). */
-const CHECK_VOID_DECIDES: ReadonlySet<VoidRefusal> = new Set(['already-void', 'version-conflict']);
+const FIRST_VOID_DECIDES: ReadonlySet<VoidRefusal> = new Set(['already-void', 'version-conflict', 'payments-recorded', 'tenant-conflict', 'not-found', 'key-reused', 'invalid']);
+/**
+ * What decides a Check again (a key that may already have committed): only the key's sealed answers (D-VOID-5) —
+ * payments-recorded among them (M7B-PAYMENTS-P1, doc 15 §12.6: the sealed 409 payments_recorded).
+ */
+const CHECK_VOID_DECIDES: ReadonlySet<VoidRefusal> = new Set(['already-void', 'version-conflict', 'payments-recorded']);
 /** A Check again's answers after which this attempt can no longer be checked again here (it stays unresolved). */
 const CHECK_WITHDRAWN: ReadonlySet<VoidResult['kind']> = new Set(['step-up', 'key-reused']);
 const refusalIn = (set: ReadonlySet<VoidRefusal>, kind: VoidResult['kind']): kind is VoidRefusal => (set as ReadonlySet<string>).has(kind);

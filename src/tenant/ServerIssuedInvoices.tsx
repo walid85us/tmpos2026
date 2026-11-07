@@ -290,6 +290,8 @@ export const VOID_TEXT = Object.freeze({
 export const VOID_REFUSED_TEXT: Readonly<Record<VoidRefusal, string>> = Object.freeze({
   'already-void': 'Not voided: this invoice is already void.',
   'version-conflict': 'Not voided: this invoice changed on the server since it was reviewed.',
+  /** M7B-PAYMENTS-P1 (doc 15 §12.6): the key's sealed 409 payments_recorded — exactly this sentence. */
+  'payments-recorded': "This invoice has payments recorded, so it can't be voided. If a payment was recorded by mistake, reverse that payment first.",
   'tenant-conflict': "Not voided: this store isn't part of that tenant any more.",
   /** A chain 404 on the POST may be the host's refusal before any route ran (design R21): it names no invoice state. */
   'not-found': 'Not voided: the server refused this request.',

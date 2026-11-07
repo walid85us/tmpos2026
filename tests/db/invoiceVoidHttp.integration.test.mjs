@@ -1,10 +1,11 @@
 // Phase 4.0 M7B-INVOICES-VOID-P1 — voiding an issued store invoice END TO END: the tenant entry (server/entry/tenantEntry.ts,
 // startTenantEntry) serving POST /api/v1/stores/{storeId}/invoices/{id}/void, GET …/invoices/{id}/void-eligibility and the
 // lifecycle-aware GET /api/v1/stores/{storeId}/invoices and GET …/invoices/{id} over REAL loopback HTTP and a disposable
-// PostgreSQL holding every migration in the directory (001-035), composed exactly as server/entry/tenantMain.ts composes it
+// PostgreSQL holding every migration in the directory (001-036), composed exactly as server/entry/tenantMain.ts composes it
 // but for its construction. The route module (server/runtime/invoiceVoid.ts), the chain (its recent sign-in, the store-scope
 // authorizer and revalidator), the tenant command transaction, the void's mutator (server/persistence/postgresInvoiceVoid.ts:
-// ONE call into migration 035's tmpos_invoice_void.m7b_invoice_void, then the recent sign-in judged again on the database
+// ONE call into migration 036's tmpos_invoice_payment.m7b_invoice_void_v2 — 035's void with the payment check (M7B-PAYMENTS-P1;
+// tmpos_app no longer executes 035's own) — then the recent sign-in judged again on the database
 // clock), the issued reads' adapters over 035's v2 reads, the audit writer's issued-invoice-alone statement and the
 // idempotency kernel are production's own code. Every invoice is issued through the production POST …/issue on a draft saved
 // through the production POST; every store's issuing settings are written by the tenant owner through the production PUT;
@@ -126,8 +127,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const WIRE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 /** 034's o_issued_at encoding (035's voided_at on the wire), bound as a parameter of to_char. */
 const UTC_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
-/** The void routine's statement (035): where a void waits for the issued header, the role's key or its INSERT's park. */
-const AT_VOID = /tmpos_invoice_void\.m7b_invoice_void\(/;
+/** The void routine's statement (036's v2 since M7B-PAYMENTS-P1): where a void waits for the issued header, the role's key or its INSERT's park. */
+const AT_VOID = /tmpos_invoice_payment\.m7b_invoice_void_v2\(/;
 const AT_HOLD = /m5_hold_tenant_standing/;
 /** The idempotency kernel's acquisition (006): where a same-key request waits on an in-flight attempt's fence. */
 const AT_ACQUIRE = /m6_idempotency_acquire/;
@@ -331,12 +332,12 @@ async function teardown() {
             'tmpos_invoice_void.issued_invoice_void'::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         voids: 0, void_audits: 0, settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0,
-        customers: 0, anchors: 0, latest: '035',
+        customers: 0, anchors: 0, latest: '036',
         triggers: ['trg_invoice_draft_immutable:A', 'trg_invoice_draft_line_terminal:A', 'trg_invoice_draft_terminal:A', 'trg_issued_invoice_commit_check:A',
           'trg_issued_invoice_guard:A', 'trg_issued_invoice_line_guard:A', 'trg_issued_invoice_line_truncate:A', 'trg_issued_invoice_truncate:A',
           'trg_issued_invoice_void_guard:A', 'trg_issued_invoice_void_truncate:A',
           'trg_store_invoice_counter_guard:A', 'trg_store_invoice_counter_truncate:A', 'trg_store_issuing_settings_guard:A', 'trg_store_issuing_settings_truncate:A'].sort().join(','),
-      }, 'nothing of this suite blocks 035\'s rollback, and every guard is ALWAYS again');
+      }, 'nothing of this suite blocks 035\'s or 036\'s rollback, and every guard is ALWAYS again');
     });
   } finally {
     await step(() => probe.end({ timeout: 5 }));
@@ -391,8 +392,8 @@ function startRelay() {
 }
 /** An applied void's anchor: its audit INSERT (only an applied void writes one). */
 const AUDIT_ANCHOR = Buffer.from('insert into public.audit_event');
-/** The void's one call into 035 (the outage case cuts the connection as it is sent). */
-const VOID_ANCHOR = Buffer.from('tmpos_invoice_void.m7b_invoice_void(');
+/** The void's one call into 036's v2 (the outage case cuts the connection as it is sent). */
+const VOID_ANCHOR = Buffer.from('tmpos_invoice_payment.m7b_invoice_void_v2(');
 const COMMIT_PARSE = Buffer.from('\0commit\0');
 function trapCommit(relay, mode, anchor) {
   const hit = [];
@@ -483,8 +484,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('028', '029', '030', '031', '032', '033', '034', '035')`;
-  assert.equal(applied, 8, 'migrations 028-035 are applied: the drafts, their edit, save, discard, the issuing of 034 and the void of 035');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('028', '029', '030', '031', '032', '033', '034', '035', '036')`;
+  assert.equal(applied, 9, 'migrations 028-036 are applied: the drafts, their edit, save, discard, the issuing of 034, the void of 035 and its v2 of 036');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -2141,7 +2142,7 @@ test('IVH-12 (VOID-15, D-VOID-1, D-VOID-6): after a void the issue is unchanged 
 // IVH-13: logs and containment (last)
 // ===========================================================================
 
-test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a reason code (as a value), a reason label, the audit sentence or code, a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 31 routes, the void\'s eligibility then its command right after the issued detail', () => {
+test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a reason code (as a value), a reason label, the audit sentence or code, a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 36 routes, the void\'s eligibility then its command right after the issued detail', () => {
   const forbidden = [...SECRETS, ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e), IDEMPOTENCY_KEY.toString(e)])];
   // The distinctive codes as substrings too; 'duplicate' and 'other' are common words, checked as whole values below.
   const reasonTexts = ['invoice_void_', 'Issued invoice voided', ...REASONS.map(([, label]) => label),
@@ -2170,6 +2171,14 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
     '{\\"event\\":\\"request\\",\\"reason\\":\\"authz_denied\\",\\"route\\":\\"other\\"}']) {
     assert.equal(KEYED_REASON.test(line), false, `${line}: a benign line passes`);
   }
+  // The routine-name exemption's own proof: it removes the fixed name token (schema-qualified or bare) and nothing else.
+  const VOID_V2_NAME = /(?<![A-Za-z0-9_])(?:tmpos_invoice_payment\.)?m7b_invoice_void_v2(?![A-Za-z0-9_])/g;
+  assert.equal('STATEMENT:  select * from tmpos_invoice_payment.m7b_invoice_void_v2($1::text, $2::uuid)'.replace(VOID_V2_NAME, '').includes('invoice_void_'), false, 'the call name is exempt');
+  assert.equal('PL/pgSQL function m7b_invoice_void_v2(text) line 9'.replace(VOID_V2_NAME, '').includes('invoice_void_'), false, 'the bare name is exempt');
+  for (const line of ['tmpos_invoice_payment.m7b_invoice_void_v2($1) reason_code=invoice_void_other', 'x.m7b_invoice_void_v2x invoice_void_duplicate',
+    'm7b_invoice_void_v2_invoice_void_issued_in_error', 'tmpos_invoice_payment.m7b_invoice_void_v2(invoice_void_wrong_customer)']) {
+    assert.equal(line.replace(VOID_V2_NAME, '').includes('invoice_void_'), true, `${line}: a reason code beside or inside the name still refuses`);
+  }
   assert.ok(ALL_LOG_LINES.length > 0 && SECRETS.size > 0, 'log lines and secrets were actually captured across the suite');
   const values = (v) => (Array.isArray(v) ? v.flatMap(values) : v !== null && typeof v === 'object' ? Object.values(v).flatMap(values) : [v]);
   for (const l of ALL_LOG_LINES) {
@@ -2188,13 +2197,17 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
   if (cluster !== null) {
     const text = readFileSync(`${cluster.root}/postgres.log`, 'utf8');
     assert.deepEqual(forbidden.filter((v) => text.includes(v)).map((v) => v.slice(0, 6)), [], 'the cluster\'s server log carries no secret');
-    assert.deepEqual(reasonTexts.filter((v) => text.includes(v)), [], 'nor a void reason');
-    assert.deepEqual(reasonSentences.filter((v) => text.includes(v)), [], 'nor a void audit sentence');
-    assert.equal(KEYED_REASON.test(text), false, 'nor a keyed void reason');
+    // M7B-PAYMENTS-P1: the void's routine is now tmpos_invoice_payment.m7b_invoice_void_v2 (doc 15 §12.2, a fixed name), which
+    // contains the code prefix 'invoice_void_', and a statement the server logs names it. Exactly that name token is removed
+    // before the reason checks; every code, label, sentence and keyed reason anywhere else in the log still refuses.
+    const reasonScan = text.replace(VOID_V2_NAME, '');
+    assert.deepEqual(reasonTexts.filter((v) => reasonScan.includes(v)), [], 'nor a void reason');
+    assert.deepEqual(reasonSentences.filter((v) => reasonScan.includes(v)), [], 'nor a void audit sentence');
+    assert.equal(KEYED_REASON.test(reasonScan), false, 'nor a keyed void reason');
   }
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 31, 'exactly the 31 shipping routes');
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 36, 'exactly the 36 shipping routes (M7B-PAYMENTS-P1 adds five)');
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path}`);
-  assert.equal(new Set(served).size, 31, 'no route twice');
+  assert.equal(new Set(served).size, 36, 'no route twice');
   const detail = served.indexOf('GET /api/v1/stores/{storeId}/invoices/{id}');
   assert.ok(detail >= 0, 'the issued detail is served');
   assert.deepEqual(served.slice(detail + 1, detail + 3), ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/void'],

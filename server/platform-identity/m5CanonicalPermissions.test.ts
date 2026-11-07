@@ -537,13 +537,13 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-test('M7B: exactly seven store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1), none shadowing a tenant key', () => {
+test('M7B: exactly nine store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1) and the payment reversal (M7B-PAYMENTS-P1), none shadowing a tenant key', () => {
   assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()],
-    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices']);
+    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices', 'record_invoice_payments', 'reverse_invoice_payments']);
   // M7B-INVOICES-VOID-P1 (D-VOID-2): the void at Invoices Approve with Customers View, the one sensitive store entry.
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('void_issued_invoices'),
     { key: 'void_issued_invoices', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
-  assert.deepEqual([...STORE_ROUTE_PERMISSIONS].filter(([, entry]) => entry.sensitive).map(([key]) => key), ['void_issued_invoices'], 'the one sensitive store entry');
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS].filter(([, entry]) => entry.sensitive).map(([key]) => key), ['void_issued_invoices', 'reverse_invoice_payments'], 'the two sensitive store entries (M7B-PAYMENTS-P1: + the reversal)');
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
     { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
@@ -936,5 +936,63 @@ test('M7B-INVOICES-VOID-P1 (D-VOID-2): void_issued_invoices is Invoices at Appro
     assert.equal(evaluateCanonicalPermission({ scope, roleId: 'store_owner', permission: 'void_issued_invoices', limitation: 'none', levels: {} }), 'denied', scope);
     assert.equal(canonicalPermission(scope, 'void_issued_invoices'), null, scope);
     assert.equal(isDecidablePermission(scope, 'void_issued_invoices'), false, scope);
+  }
+});
+
+// --- M7B-PAYMENTS-P1: record_invoice_payments and reverse_invoice_payments, admitted by name only -----------------------------
+
+test('M7B-PAYMENTS-P1 (D-PAY-6): the store guard admits record_invoice_payments non-sensitive and reverse_invoice_payments sensitive, each exactly Invoices Approve with Customers View; every other widening still refuses', () => {
+  const CUSTOMERS_VIEW = Object.freeze({ parent: 'customers', threshold: 'view' });
+  const entry = (key: string, sensitive: unknown, threshold: string, over: Record<string, unknown> = {}) =>
+    Object.freeze({ key, plane: 'tenant' as const, parent: 'invoices', sensitive, threshold, corequisite: CUSTOMERS_VIEW, ...over });
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('record_invoice_payments'),
+    { key: 'record_invoice_payments', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
+  assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('reverse_invoice_payments'),
+    { key: 'reverse_invoice_payments', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
+  const without = [...STORE_ROUTE_PERMISSIONS].filter(([key]) => key !== 'record_invoice_payments' && key !== 'reverse_invoice_payments');
+  const table = (...extra: Array<[string, unknown]>) => new Map([...without, ...extra]) as never;
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table()), 'the table without the two payment keys loads');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table(['record_invoice_payments', entry('record_invoice_payments', false, 'approve')])), 'the record, exactly');
+  assert.doesNotThrow(() => assertStoreRoutePermissions(table(['reverse_invoice_payments', entry('reverse_invoice_payments', true, 'approve')])), 'the reversal, exactly');
+  const { corequisite: _none, ...bare } = entry('record_invoice_payments', false, 'approve');
+  for (const [label, extra] of [
+    ['the record sensitive', ['record_invoice_payments', entry('record_invoice_payments', true, 'approve')]],
+    ['the reversal non-sensitive', ['reverse_invoice_payments', entry('reverse_invoice_payments', false, 'approve')]],
+    ['the reversal sensitive as a word', ['reverse_invoice_payments', entry('reverse_invoice_payments', 'true', 'approve')]],
+    ['the record at Manage', ['record_invoice_payments', entry('record_invoice_payments', false, 'manage')]],
+    ['the record at Full', ['record_invoice_payments', entry('record_invoice_payments', false, 'full')]],
+    ['the reversal at Edit', ['reverse_invoice_payments', entry('reverse_invoice_payments', true, 'edit')]],
+    ['the reversal at Full', ['reverse_invoice_payments', entry('reverse_invoice_payments', true, 'full')]],
+    ['the record without its corequisite', ['record_invoice_payments', Object.freeze(bare)]],
+    ['the reversal with a Customers Create corequisite', ['reverse_invoice_payments', entry('reverse_invoice_payments', true, 'approve', { corequisite: Object.freeze({ parent: 'customers', threshold: 'create' }) })]],
+    ['the record on Customers', ['record_invoice_payments', entry('record_invoice_payments', false, 'approve', { parent: 'customers' })]],
+    ['the record under the reversal key', ['record_invoice_payments', entry('reverse_invoice_payments', false, 'approve')]],
+    ['a near name at Approve', ['record_invoice_payment', entry('record_invoice_payment', false, 'approve')]],
+    ['a refund key at Approve', ['refund_invoice_payments', entry('refund_invoice_payments', true, 'approve')]],
+  ] as const) {
+    assert.throws(() => assertStoreRoutePermissions(table(extra as [string, unknown])),
+      /nor reverse_invoice_payments sensitive at Invoices Approve with Customers View/, label);
+  }
+});
+
+test('M7B-PAYMENTS-P1 (D-PAY-6): the two payment keys are Invoices at Approve AND Customers at View on every built-in role, exactly as void_issued_invoices; decided at store scope only', () => {
+  const LEVELS = ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full'];
+  for (const permission of ['record_invoice_payments', 'reverse_invoice_payments']) {
+    for (const roleId of TENANT_ROLE_IDS) for (const limitation of ['none', 'read_only'] as const) {
+      for (const invoices of LEVELS) for (const customers of LEVELS) {
+        const levels = { invoices, customers };
+        assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId, permission, limitation, levels }),
+          evaluateCanonicalPermission({ scope: 'store', roleId, permission: 'void_issued_invoices', limitation, levels }), `${permission} ${roleId} ${limitation} ${invoices}/${customers}`);
+      }
+    }
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission, limitation: 'none', levels: { invoices: 'manage', customers: 'full' } }), 'denied', `${permission}: Manage alone`);
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission, limitation: 'none', levels: { invoices: 'approve', customers: 'view' } }), 'granted', `${permission}: Approve with Customers View`);
+    assert.equal(isDecidablePermission('store', permission), true, permission);
+  }
+  assert.equal(canonicalPermission('store', 'record_invoice_payments')?.sensitive, false);
+  assert.equal(canonicalPermission('store', 'reverse_invoice_payments')?.sensitive, true);
+  for (const scope of ['tenant', 'platform'] as const) {
+    assert.equal(canonicalPermission(scope, 'record_invoice_payments'), null, scope);
+    assert.equal(canonicalPermission(scope, 'reverse_invoice_payments'), null, scope);
   }
 });

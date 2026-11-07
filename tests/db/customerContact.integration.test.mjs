@@ -91,6 +91,8 @@ const UP_033 = readFileSync(`${MIG_DIR}/033_m7b_invoice_draft_discard.up.sql`, '
 const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
 /** M7B-INVOICES-VOID-P1: 035 sits above 034 and is applied with it. */
 const UP_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.up.sql`, 'utf8');
+/** M7B-PAYMENTS-P1: 036 sits above 035 and is applied with it. */
+const UP_036 = readFileSync(`${MIG_DIR}/036_m7b_invoice_payment.up.sql`, 'utf8');
 const DOWN_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.down.sql`, 'utf8');
 const UP_020 = readFileSync(`${MIG_DIR}/020_m7a_tenant_role_levels.up.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
@@ -115,7 +117,7 @@ const RC = 'isolation level read committed';
  * rolled-back transaction) it accepts.
  */
 const PREFLIGHT_AT_023 = Object.freeze({ runtimeLogin: ['role_privilege_missing', 'role_privilege_unexpected'], migrationLedger: ['migration_missing'] });
-/** 024, 025, 026 (M5-INVOICES-AUTH-P1), 027 and 028 (M7B-INVOICES-P1), 029 (M7B-INVOICES-P2), 030 (M7B-INVOICES-P2-R1), 031 (M7B-INVOICES-P1-R3), 032 (M7B-INVOICES-P1-R4), 033 (M7B-INVOICES-DISCARD-P1), 034 (M7B-INVOICES-ISSUE-P1) and 035 (M7B-INVOICES-VOID-P1) applied on `tx`, their ledger rows recorded, as the trusted executor would leave them. */
+/** 024, 025, 026 (M5-INVOICES-AUTH-P1), 027 and 028 (M7B-INVOICES-P1), 029 (M7B-INVOICES-P2), 030 (M7B-INVOICES-P2-R1), 031 (M7B-INVOICES-P1-R3), 032 (M7B-INVOICES-P1-R4), 033 (M7B-INVOICES-DISCARD-P1), 034 (M7B-INVOICES-ISSUE-P1), 035 (M7B-INVOICES-VOID-P1) and 036 (M7B-PAYMENTS-P1) applied on `tx`, their ledger rows recorded, as the trusted executor would leave them. */
 async function applyLater(tx) {
   await tx.unsafe(UP_024).simple();
   await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
@@ -153,6 +155,9 @@ async function applyLater(tx) {
   await tx.unsafe(UP_035).simple();
   await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
     values ('035', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/035_m7b_invoice_void.up.sql`)).digest('hex')}, false, now(), now())`;
+  await tx.unsafe(UP_036).simple();
+  await tx`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
+    values ('036', ${createHash('sha256').update(readFileSync(`${MIG_DIR}/036_m7b_invoice_payment.up.sql`)).digest('hex')}, false, now(), now())`;
 }
 const PROFILE_NULLS = Object.freeze({ o_tenant_id: null, o_customer_id: null, o_name: null, o_phone: null, o_email: null, o_created_at: null });
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
@@ -222,10 +227,10 @@ test.after(async () => {
   // Every customer this file made, legacy or created through 023: a later suite's rollback of 023 refuses while any
   // customer holds a creation time, so none of ours may stay behind.
   if (TENANTS.length > 0) await quietly(() => owner`delete from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[])`);
-  // The shared service is left with 023, 024, 025, 026, 027, 028, 029, 030, 031, 032, 033, 034 AND 035 applied, whatever failed above: the executor applies what is not
+  // The shared service is left with 023, 024, 025, 026, 027, 028, 029, 030, 031, 032, 033, 034, 035 AND 036 applied, whatever failed above: the executor applies what is not
   // (024 and 025, which this file keeps out while it proves 023, always).
   await quietly(async () => {
-    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '035') as applied`;
+    const [{ applied }] = await owner`select exists (select 1 from public.schema_migrations where version = '036') as applied`;
     if (!applied) await trustedApply();
   });
   if (keyBeforeSuite !== undefined) {
@@ -537,7 +542,7 @@ test('M7CN-03: the login executes 023\'s two routines and uses their schema, exe
   const verdict = await rolledBack(RC, (tx) => preflightOn(tx));
   assert.deepEqual(verdict.value, PREFLIGHT_AT_023, `the P8 runtime refuses a 023 database: ${JSON.stringify(verdict)}`);
   const with024 = await rolledBack(RC, async (tx) => { await applyLater(tx); return preflightOn(tx); });
-  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's, 025's, 026's, 027's, 028's, 029's, 030's, 031's, 032's, 033's, 034's and 035's applied: accepted (${JSON.stringify(with024)})`);
+  assert.deepEqual(with024.value, { runtimeLogin: [], migrationLedger: [] }, `023's grants with 024's, 025's, 026's, 027's, 028's, 029's, 030's, 031's, 032's, 033's, 034's, 035's and 036's applied: accepted (${JSON.stringify(with024)})`);
 });
 
 // ---------------------------------------------------------------------------

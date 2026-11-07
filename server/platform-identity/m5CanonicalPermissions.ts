@@ -125,6 +125,13 @@
 // before, and void_issued_invoices sensitive, each on Invoices with exactly the Customers View corequisite — and `sensitive`
 // for void_issued_invoices ONLY; any other key at Approve, either key in any other shape, any other sensitive store entry, and
 // Full anywhere still refuse to load. No role-name shortcut (store_owner is Full by the materializer, not by name).
+//
+// M7B-PAYMENTS-P1 UPDATE (doc 15 §12.3, D-PAY-6) — TWO MORE APPROVE KEYS. record_invoice_payments (POST
+// /api/v1/stores/{storeId}/invoices/{id}/payments and its action-only eligibility) and reverse_invoice_payments (POST
+// …/invoices/{id}/payments/{paymentId}/reversal and its action-only eligibility) are each the Invoices domain at Approve or above
+// AND Customers at View or above on the same role, decided exactly as issue_invoices is. record_invoice_payments is NOT
+// sensitive (no recent sign-in); reverse_invoice_payments IS (its POST requires the recent sign-in, judged as the void's). The
+// store guard admits each BY NAME only, with that exact sensitivity and shape; any other key, shape or sensitivity still refuses.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -286,7 +293,13 @@ assertTenantRoutePermissions(TENANT_ROUTE_PERMISSIONS);
  *     /api/v1/stores/{storeId}/invoices/{id}/void-eligibility (M7B-INVOICES-VOID-P1, D-VOID-2): the Invoices domain at Approve
  *     or above AND the Customers domain at View or above. SENSITIVE: a recent sign-in is required on the POST (its route
  *     declares it; the revalidator requires and judges the deadline); the eligibility declares none. Manage alone does not
- *     reach it; read-only never does. The second entry admitted at Approve, and the one sensitive store entry.
+ *     reach it; read-only never does. The second entry admitted at Approve, and the first sensitive store entry.
+ *   * record_invoice_payments — POST /api/v1/stores/{storeId}/invoices/{id}/payments and its action-only eligibility GET
+ *     /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility (M7B-PAYMENTS-P1, D-PAY-6): the Invoices domain at Approve or
+ *     above AND the Customers domain at View or above; NOT sensitive (no recent sign-in).
+ *   * reverse_invoice_payments — POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal and its action-only
+ *     eligibility GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility (M7B-PAYMENTS-P1, D-PAY-6): the same
+ *     levels; SENSITIVE (a recent sign-in on the POST, as the void's; none on the eligibility).
  */
 export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> = Object.freeze(new Map<string, CanonicalPermission>([
   ['view_invoice_drafts', Object.freeze({ key: 'view_invoice_drafts', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'view' as const })],
@@ -308,6 +321,14 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
     key: 'void_issued_invoices', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'approve' as const,
     corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
   })],
+  ['record_invoice_payments', Object.freeze({
+    key: 'record_invoice_payments', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'approve' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
+  ['reverse_invoice_payments', Object.freeze({
+    key: 'reverse_invoice_payments', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'approve' as const,
+    corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
+  })],
 ]));
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
@@ -316,15 +337,19 @@ const STORE_ROUTE_MANAGE_KEY = 'discard_invoice_drafts';
 /**
  * The store route permissions admitted at Approve, each with the exact `sensitive` it must carry: issue_invoices
  * (M7B-INVOICES-ISSUE-P1) non-sensitive and void_issued_invoices (M7B-INVOICES-VOID-P1) sensitive — each on Invoices with
- * exactly Customers View. The second is the one store key admitted sensitive.
+ * exactly Customers View. M7B-PAYMENTS-P1 (D-PAY-6): record_invoice_payments non-sensitive and reverse_invoice_payments
+ * sensitive, the same shape — each admitted by name only.
  */
-const STORE_ROUTE_APPROVE_KEYS: ReadonlyMap<string, boolean> = new Map<string, boolean>([['issue_invoices', false], ['void_issued_invoices', true]]);
+const STORE_ROUTE_APPROVE_KEYS: ReadonlyMap<string, boolean> = new Map<string, boolean>([
+  ['issue_invoices', false], ['void_issued_invoices', true], ['record_invoice_payments', false], ['reverse_invoice_payments', true],
+]);
 
 /**
  * The load-time guard over a store route permission table: throws unless every entry is non-sensitive at View, Create or
  * Edit, or is exactly the discard pair (key discard_invoice_drafts, parent invoices, threshold manage, no corequisite), or
  * exactly the issue entry (key issue_invoices, parent invoices, threshold approve, corequisite exactly Customers View,
- * non-sensitive), or exactly the void entry (key void_issued_invoices, the same shape, sensitive); any other key at Manage or
+ * non-sensitive), or exactly the void entry (key void_issued_invoices, the same shape, sensitive), or exactly one of the two
+ * payment entries (record_invoice_payments non-sensitive, reverse_invoice_payments sensitive, the same shape; M7B-PAYMENTS-P1); any other key at Manage or
  * Approve, any key in any other threshold, corequisite or sensitivity, and Full anywhere are refused. Exported so its
  * refusals can be exercised; the module runs it on STORE_ROUTE_PERMISSIONS below and refuses to load otherwise.
  */
@@ -340,7 +365,7 @@ export function assertStoreRoutePermissions(permissions: ReadonlyMap<string, Can
         ? entry.key !== key || entry.parent !== 'invoices' || entry.threshold !== 'approve'
           || entry.corequisite?.parent !== 'customers' || entry.corequisite.threshold !== 'view'
         : !STORE_ROUTE_THRESHOLDS.has(entry.threshold))) {
-      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View, nor void_issued_invoices sensitive at Invoices Approve with Customers View');
+      throw new Error('store route permission is not a non-sensitive View, Create or Edit threshold, nor discard_invoice_drafts at Invoices Manage, nor issue_invoices at Invoices Approve with Customers View, nor void_issued_invoices sensitive at Invoices Approve with Customers View, nor record_invoice_payments at Invoices Approve with Customers View, nor reverse_invoice_payments sensitive at Invoices Approve with Customers View');
     }
     const corequisite = entry.corequisite;
     if (corequisite !== undefined && (corequisite.threshold !== 'view' || corequisite.parent === entry.parent)) {

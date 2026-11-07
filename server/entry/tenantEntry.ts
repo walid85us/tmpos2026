@@ -33,7 +33,8 @@
 //       profile's — M7A-CUSTOMERS-P6, over 024's versioned routine since -P7 — then the search's — -P8 — then the store
 //       directory's — M7B-INVOICES-P1, 027's — then the invoice drafts' two reads — M7B-INVOICES-P1, 028's — then the four
 //       issuing reads — M7B-INVOICES-ISSUE-P1, 034's settings read and preview and, since M7B-INVOICES-VOID-P1, 035's v2 page and
-//       get — each refusing an absent key), and the idempotency store and the command port answer theirs (006's probe);
+//       get — then the payments read — M7B-PAYMENTS-P1, 036's — each refusing an absent key), and the idempotency store and
+//       the command port answer theirs (006's probe);
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
 // ever opened. There is no degraded mode, no in-memory fallback, no automatic migration and no key installation.
@@ -78,7 +79,14 @@
 // M7B-INVOICES-VOID-P1 (docs/phase-4/13) — GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility, whether a void would
 // be authorized at that store now (action-only: it reads no invoice), and POST …/invoices/{id}/void, a terminal logical void
 // of that issued invoice on a recent sign-in (idempotent, committed through the tenant store with its audit record and NO
-// outbox event; the invoice id is the fingerprint's target); the issued list and detail now show each invoice's lifecycle;
+// outbox event; the invoice id is the fingerprint's target); the issued list and detail now show each invoice's lifecycle; —
+// M7B-PAYMENTS-P1 (docs/phase-4/15 §12.3), appended right after the void's in this fixed order, each eligibility before its
+// command and the read last — GET …/invoices/{id}/payment-eligibility, POST …/invoices/{id}/payments (a payment recorded
+// against that issued invoice, idempotent, committed through the tenant store with the routine's own audit record and NO
+// outbox event), GET …/invoices/{id}/payment-reversal-eligibility, POST …/invoices/{id}/payments/{paymentId}/reversal (that
+// payment reversed on a recent sign-in, the same way; the invoice and the payment are the fingerprint's two targets) and GET
+// …/invoices/{id}/payments, the invoice's payments, amounts due and payment status, read-only; the void now refuses an
+// invoice with an unreversed payment (sealed 409 payments_recorded);
 // each store route authorized only through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
@@ -147,6 +155,12 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/void', access: 'session', body: 'json', idempotency: 'required' },
+  // M7B-PAYMENTS-P1: the five payment routes, in the header's fixed order.
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payments', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payments', access: 'session', body: 'none', idempotency: 'none' },
 ].map((route) => Object.freeze(route)));
 
 /**

@@ -31,6 +31,7 @@ import {
   buildAdminSessionAuditEvent,
   buildSessionAuditEvent,
   SESSION_AUDIT_METADATA_KEYS,
+  ROUTINE_AUDITED_ACTION_IDS,
   type AuditEventWriteInput,
 } from './auditEventWriter';
 import { AUDIT_CONTRACT_VERSION, SCOPE_TYPE_VALUES } from './authorizationConstants';
@@ -869,4 +870,30 @@ test('M7B-INVOICES-VOID-P1 (R-SEC-07): dispatch matches the triple FIRST, then t
   assert.ok(!/metadata,\s*subject_issued_invoice_id\s*\)/.test(issued.calls[0].sql.toLowerCase()), 'the issue never takes the alone statement');
   assert.deepEqual(issued.calls[0].values.slice(-3), [DRAFT, ISSUED, CUSTOMER]);
   assert.deepEqual(voided.calls[0].values.slice(-1), [ISSUED]);
+});
+
+// ---------------------------------------------------------------------------
+// M7B-PAYMENTS-P1 — the routine-audited payment actions and the card-data keys (doc 15 §12.5)
+// ---------------------------------------------------------------------------
+
+test('S3-W-PAY-1: the two payment actions are their routines\' to write — this path refuses either before any statement, at any scope; a near action id still writes', async () => {
+  assert.deepEqual([...ROUTINE_AUDITED_ACTION_IDS], ['store.invoice_payment.record', 'store.invoice_payment.reverse']);
+  assert.ok(Object.isFrozen(ROUTINE_AUDITED_ACTION_IDS));
+  for (const actionId of ROUTINE_AUDITED_ACTION_IDS) {
+    assert.throws(() => validateAuditEventInput({ ...baseEvent(), actionId }), AuditEventValidationError, actionId);
+    const r = recorder();
+    await assert.rejects(writeAuditEvent({ ...baseEvent(), actionId }, { executor: r.executor }), AuditEventValidationError, `${actionId}: the writer`);
+    assert.equal(r.calls.length, 0, `${actionId}: nothing sent`);
+  }
+  const near = recorder();
+  await writeAuditEvent({ ...baseEvent(), actionId: 'store.invoice_payment.recorded' }, { executor: near.executor });
+  assert.equal(near.calls.length, 1, 'a near action id is not the routine\'s');
+});
+
+test('S3-W-PAY-2: CVV/CVC, track 1 and 2 and the PIN block are forbidden metadata keys (036\'s CHECK mirrored): refused by validation and dropped by the sanitizer', () => {
+  for (const key of ['cvv', 'cvc', 'track1', 'track2', 'pinBlock']) {
+    assert.ok((AUDIT_FORBIDDEN_FIELDS as readonly string[]).includes(key), key);
+    assert.throws(() => validateAuditEventInput({ ...baseEvent(), metadata: { [key]: 'v' } as never }), AuditEventValidationError, key);
+    assert.deepEqual(sanitizeAuditMetadata({ [key]: 'v', phase: 'p' }), { phase: 'p' }, `${key}: dropped`);
+  }
 });

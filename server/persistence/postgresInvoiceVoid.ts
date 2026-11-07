@@ -33,6 +33,11 @@
 // and Customers >= View can call this routine directly and void with no audit record, no idempotency completion and none of
 // the HTTP checks; the routine's own sign-in check narrows that only to sessions whose minted authenticated_at is recent.
 //
+// M7B-PAYMENTS-P1 (migration 036, doc 15 §12.3/§12.5): the call is 036's tmpos_invoice_payment.m7b_invoice_void_v2 — 035's
+// void argument for argument and word for word, plus 'payments_recorded' (an unreversed payment on the invoice) after
+// 'invalid_state' and before 'conflict', passed through as the sealed 409 its completion alone commits (the mutator declares
+// `paymentRefusals: 'void'`). 036 revokes tmpos_app's EXECUTE on 035's m7b_invoice_void, so the older entry point is gone.
+//
 // No driver error message, row value, key or body is ever logged. IT CONSTRUCTS NOTHING AND READS NOTHING at import.
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
 import { INVOICE_VOID_CONTRACT, isInvoiceVoidReasonCode } from '../runtime/invoiceVoid.js';
@@ -53,7 +58,7 @@ const MAX = Number.MAX_SAFE_INTEGER;
 
 const VOID_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_actor_id', 'o_membership_id', 'o_version', 'o_invoice_id'];
 /** The routine's refusals, each with every other column null; 'tenant_mismatch' is the store's 'precondition_failed'. */
-const VOID_REFUSALS: ReadonlySet<string> = new Set(['not_found', 'invalid_state', 'conflict', 'refused']);
+const VOID_REFUSALS: ReadonlySet<string> = new Set(['not_found', 'invalid_state', 'payments_recorded', 'conflict', 'refused']);
 
 async function applyInvoiceVoid(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<unknown> {
   const context = authority?.context ?? null;
@@ -67,7 +72,7 @@ async function applyInvoiceVoid(sql: PgStatement, mutation: TransactionMutation,
     || !isInt(authNotAfter, 1, MAX)) return 'unavailable';
   if (!isUuid(aggregateId) || !isUuid(expectedTenant) || !isInvoiceVoidReasonCode(reasonCode) || !isInt(expectedVersion, 1, MAX - 1)) return 'unavailable';
   const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version, o_invoice_id
-    from tmpos_invoice_void.m7b_invoice_void(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid, ${expectedTenant}::uuid,
+    from tmpos_invoice_payment.m7b_invoice_void_v2(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid, ${expectedTenant}::uuid,
       ${String(expectedVersion)}::bigint, ${reasonCode}::text)`;
   if (rows.length !== 1 || !hasColumns(rows[0], VOID_COLUMNS)) return 'mismatch';
   const {
@@ -93,5 +98,6 @@ export const INVOICE_VOID_MUTATOR: AggregateMutator = Object.freeze({
   aggregateType: INVOICE_VOID_CONTRACT.aggregateType,
   contextScope: 'store',
   auditSubjects: 'voided_invoice',
+  paymentRefusals: 'void',
   apply: applyInvoiceVoid,
 });

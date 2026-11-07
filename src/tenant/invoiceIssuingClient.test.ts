@@ -1062,3 +1062,27 @@ test('IIC-31. the void eligibility: allowed ONLY for a 200 exactly { eligibility
   for (const id of NOT_VOID_TARGETS) assert.deepEqual(await client.voidEligibility(STORE, id, CSRF), { kind: 'denied' }, id);
   assert.equal(calls.length, 0);
 });
+
+test('IIC-32. M7B-PAYMENTS-P1: the void\'s sealed 409 exactly {"error":"payments_recorded"} (replayed too) is its own outcome, payments-recorded; the chain\'s envelope, an extra key, another status or a near word is never it — each ONE fetch, never retried', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [sealed(409, 'payments_recorded'), { kind: 'payments-recorded' }],
+    [json(409, { error: 'payments_recorded' }, { 'idempotent-replayed': 'true' }), { kind: 'payments-recorded' }], // its replay under the key
+    [new Response('{"error":"payments_recorded"}', { status: 409, headers: { 'content-type': 'application/json' } }), { kind: 'payments-recorded' }], // the exact bytes
+    [refused(409, 'payments_recorded'), { kind: 'unknown', responded: true }], // the chain never says it
+    [json(409, { error: 'payments_recorded', more: 1 }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'payments_recorded', requestId: 7 }), { kind: 'unknown', responded: true }],
+    [sealed(409, 'payment_recorded'), { kind: 'unknown', responded: true }],
+    [sealed(409, 'PAYMENTS_RECORDED'), { kind: 'unknown', responded: true }],
+    [sealed(409, 'already_recorded'), { kind: 'unknown', responded: true }], // the record's word, never the void's
+    [sealed(409, 'amount_exceeds_remaining'), { kind: 'unknown', responded: true }],
+    [sealed(422, 'payments_recorded'), { kind: 'unknown', responded: true }],
+    [sealed(200, 'payments_recorded'), { kind: 'unknown', responded: true }],
+    [new Response('{"error":"payments_recorded"}', { status: 409 }), { kind: 'unknown', responded: true }], // no JSON content type
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), outcome, name);
+    assert.equal(calls.length, 1, name); // one fetch: nothing re-sends on its own
+  }
+});

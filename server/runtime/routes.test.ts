@@ -1086,3 +1086,88 @@ test('M7B-INVOICES-VOID-P1: lookup — GET …/invoices/{id}, GET …/invoices/{
   }
   assert.equal(pathIdBeforeSuffixOf(`/api/v1/stores/${STORE}/invoices/${ID}/void-eligibility`, suffix), null, 'the eligibility path is not the void\'s');
 });
+
+// ---------------------------------------------------------------------------
+// M7B-PAYMENTS-P1 — the five payment templates; the reversal is the one with a second id segment (doc 15 §12.3)
+// ---------------------------------------------------------------------------
+
+const STORE_RECORD = { scope: 'store', permission: 'record_invoice_payments' };
+const STORE_REVERSE = { scope: 'store', permission: 'reverse_invoice_payments' };
+const PAYMENT_ELIGIBILITY = '/api/v1/stores/{storeId}/invoices/{id}/payment-eligibility';
+const PAYMENTS = '/api/v1/stores/{storeId}/invoices/{id}/payments';
+const REVERSAL_ELIGIBILITY = '/api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility';
+const REVERSAL = '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal';
+const PAYMENT_ID = '5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b';
+const paymentRoutes = () => [
+  storeRead({ path: PAYMENT_ELIGIBILITY, policy: SESSION('tenant', STORE_RECORD) }),
+  storeCreate({ path: PAYMENTS, policy: SESSION('tenant', STORE_RECORD), body: { kind: 'json', maxBytes: 1_024, required: true } }),
+  storeRead({ path: REVERSAL_ELIGIBILITY, policy: SESSION('tenant', STORE_REVERSE) }),
+  storeCreate({ path: REVERSAL, policy: SESSION('tenant', STORE_REVERSE), body: { kind: 'json', maxBytes: 1_024, required: true }, recentAuth: 'required' }),
+  storeRead({ path: PAYMENTS, policy: SESSION('tenant', STORE_VIEW_ISSUED) }),
+];
+
+test('M7B-PAYMENTS-P1: the five new store templates register — the record and the reversal as idempotency-required commands (the reversal with a recent sign-in), the two eligibilities and the payments read as plain GETs; twenty store templates, seven of them commands; every other shape stays refused', () => {
+  const all = [...draftRoutes(), ...issueRoutes(), ...voidRoutes(), ...paymentRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite(), directory()];
+  assert.equal(setupCode(all), undefined, 'twenty store templates, five tenant templates and the store directory together');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}')).length, 20, 'twenty store templates');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}') && def.idempotency === 'required').length, 7, 'seven of them commands');
+  const table = defineRoutes(all);
+  const record = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments`);
+  assert.ok(record !== undefined && 'command' in record && record.idempotency === 'required' && record.recentAuth === 'none', 'the record: keyed, no recent sign-in');
+  const reversal = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal`);
+  assert.ok(reversal !== undefined && 'command' in reversal && reversal.idempotency === 'required' && reversal.recentAuth === 'required', 'the reversal: keyed, a recent sign-in');
+  const read = table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}/payments`);
+  assert.ok(read !== undefined && 'handler' in read && read.idempotency === 'none', 'the read: a plain GET on the record\'s path');
+  for (const [label, def] of [
+    ['the reversal as a GET read', storeRead({ path: REVERSAL, policy: SESSION('tenant', STORE_REVERSE) })],
+    ['the record under a key on the eligibility', storeCreate({ path: PAYMENT_ELIGIBILITY, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the record as a PATCH', storeCreate({ method: 'PATCH', path: PAYMENTS, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the reversal POST without idempotency, as a handler', storeRead({ method: 'POST', path: REVERSAL, policy: SESSION('tenant', STORE_REVERSE), body: { kind: 'json', maxBytes: 1_024, required: true } })],
+    ['a second id segment anywhere else', storeCreate({ path: '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}', policy: SESSION('tenant', STORE_REVERSE) })],
+    ['a second id segment under the drafts', storeCreate({ path: '/api/v1/stores/{storeId}/invoice-drafts/{id}/payments/{paymentId}/reversal', policy: SESSION('tenant', STORE_REVERSE) })],
+    ['the payment id segment on a tenant template', storeCreate({ path: '/api/v1/customers/{paymentId}', policy: SESSION('tenant', STORE_REVERSE) })],
+    ['the reversal under a tenant-scope requirement', storeCreate({ path: REVERSAL, policy: SESSION('tenant', SETTINGS_KEY) })],
+    ['the record on the admin boundary', storeCreate({ path: PAYMENTS, policy: SESSION('admin', { scope: 'platform', permission: 'probe.read' }) })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  assert.equal(setupCode([...paymentRoutes(), ...paymentRoutes()]), 'route_duplicate');
+});
+
+test('M7B-PAYMENTS-P1: lookup — the reversal resolves only by the rule tried after every other, with both id segments raw; the record and the read share …/payments by method; the eligibilities, the void and the detail are unchanged; nothing shadows', () => {
+  const table = defineRoutes([...draftRoutes(), ...issueRoutes(), ...voidRoutes(), ...paymentRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite()]);
+  const hit = (path: string, method = 'GET'): string | undefined => table.lookup(method, path)?.path;
+  for (const segment of [ID, ID.toUpperCase(), '{id}', 'x', 'payments', 'reversal', 'a'.repeat(128)]) {
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}`), INVOICE, `detail ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/payment-eligibility`), PAYMENT_ELIGIBILITY, `record eligibility ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/payment-reversal-eligibility`), REVERSAL_ELIGIBILITY, `reversal eligibility ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/payments`, 'POST'), PAYMENTS, `record ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/payments`), PAYMENTS, `read ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${ID}/payments/${segment}/reversal`, 'POST'), REVERSAL, `reversal, payment ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/payments/${PAYMENT_ID}/reversal`, 'POST'), REVERSAL, `reversal, invoice ${segment}`);
+    assert.equal(hit(`/api/v1/stores/${STORE}/invoices/${segment}/void`, 'POST'), VOID, `void ${segment}`);
+  }
+  assert.deepEqual(table.lookup('GET', `/api/v1/stores/${STORE}/invoices/${ID}/payments`)?.policy, SESSION('tenant', STORE_VIEW_ISSUED));
+  assert.deepEqual(table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments`)?.policy, SESSION('tenant', STORE_RECORD));
+  assert.deepEqual(table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal`)?.policy, SESSION('tenant', STORE_REVERSE));
+  for (const [method, miss] of [
+    ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal`], ['PUT', `/api/v1/stores/${STORE}/invoices/${ID}/payments`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}`], ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal/`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/Reversal`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal/x`], ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payment/${PAYMENT_ID}/reversal`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments//reversal`], ['POST', `/api/v1/stores/${STORE}/invoices//payments/${PAYMENT_ID}/reversal`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments/${'a'.repeat(129)}/reversal`], ['POST', `/api/v1/stores/${STORE}/invoice-drafts/${ID}/payments/${PAYMENT_ID}/reversal`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/x/payments/${PAYMENT_ID}/reversal`], ['POST', `/api/v1/stores/${STORE}/payments/${PAYMENT_ID}/reversal`],
+    ['POST', `/api/v1/stores/${STORE}/invoices/${ID}/payment-eligibility`], ['GET', `/api/v1/stores/${STORE}/invoices/${ID}/payments/`],
+  ] as const) {
+    assert.equal(hit(miss, method), undefined, `${method} ${miss}`);
+  }
+  // The chain's two targets (app.ts): the payment id directly before the template's tail, then the invoice id directly
+  // before the template's middle, that payment and the tail — both from the template's own literals.
+  const tail = REVERSAL.slice(REVERSAL.indexOf('/{paymentId}') + '/{paymentId}'.length);
+  const middle = REVERSAL.slice(REVERSAL.indexOf('/{id}') + '/{id}'.length, REVERSAL.indexOf('/{paymentId}'));
+  assert.deepEqual([middle, tail], ['/payments', '/reversal']);
+  const path = `/api/v1/stores/${STORE}/invoices/${ID}/payments/${PAYMENT_ID}/reversal`;
+  assert.equal(pathIdBeforeSuffixOf(path, tail), PAYMENT_ID, 'the payment id');
+  assert.equal(pathIdBeforeSuffixOf(path, `${middle}/${PAYMENT_ID}${tail}`), ID, 'the invoice id');
+});

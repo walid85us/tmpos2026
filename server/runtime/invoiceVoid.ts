@@ -121,8 +121,10 @@ const hasExactly = (value: Record<string, unknown>, keys: readonly string[]): bo
 // ---------------------------------------------------------------------------
 
 /**
- * The void: an update of the issued invoice that enqueues NO event (D-VOID-4) and opts into nothing — its sealed refusals
- * are the update vocabulary's own (invalid_state, conflict). Its change set carries the expected tenant and the reason code.
+ * The void: an update of the issued invoice that enqueues NO event (D-VOID-4); its sealed refusals are the update vocabulary's
+ * own (invalid_state, conflict) and, since M7B-PAYMENTS-P1 (doc 15 §12.3, A2/A3), `payments_recorded` — an invoice with an
+ * unreversed payment is never voided — decided after "already void" and before the version (contract opt-in
+ * `paymentRefusals: 'void'`). Its change set carries the expected tenant and the reason code.
  */
 export const INVOICE_VOID_CONTRACT: CommandContract = Object.freeze({
   kind: 'store.invoice.void',
@@ -134,6 +136,7 @@ export const INVOICE_VOID_CONTRACT: CommandContract = Object.freeze({
     reasonCode: Object.freeze({ type: 'enum', values: INVOICE_VOID_REASON_CODES } as const),
   }),
   events: Object.freeze([]),
+  paymentRefusals: 'void',
 });
 
 const VOID_BODY_KEYS: readonly string[] = ['expectedTenant', 'reasonCode'];

@@ -132,6 +132,8 @@ export const MAX_SEALED_LENGTH = Math.ceil(((IV_BYTES + MAX_ENVELOPE_BYTES + TAG
 // The error words only the runtime answers with: an operation's outcome may not borrow one.
 const RESERVED_ERRORS: ReadonlySet<string> = new Set([
   'request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state', 'customer_not_found', 'issuing_not_configured', 'amount_out_of_range',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment commands' three sealed 409s.
+  'already_recorded', 'amount_exceeds_remaining', 'payments_recorded',
 ]);
 /**
  * The deterministic post-authorization rejections a command seals as its own completion
@@ -148,9 +150,14 @@ const RESERVED_ERRORS: ReadonlySet<string> = new Set([
  * M7B-INVOICES-ISSUE-P1 adds two TYPED 409s, sealed only by an update contract that opts into them (commandTransaction.ts
  * `issuingRefusals`): `issuing_not_configured` — the store has no issuing settings — and `amount_out_of_range` — the total,
  * or the store's number series, is out of range — each decided inside the committing transaction before anything is written.
+ *
+ * M7B-PAYMENTS-P1 adds three TYPED 409s (commandTransaction.ts `paymentRefusals`): `already_recorded` and
+ * `amount_exceeds_remaining`, sealed only by the 'record' create, and `payments_recorded`, sealed only by the 'void' update —
+ * each decided by its routine inside the committing transaction before anything is written.
  */
 const SEALED_REFUSAL_STATUS: ReadonlyMap<string, number> = new Map([
   ['write_conflict', 409], ['invalid_state', 409], ['customer_not_found', 422], ['issuing_not_configured', 409], ['amount_out_of_range', 409],
+  ['already_recorded', 409], ['amount_exceeds_remaining', 409], ['payments_recorded', 409],
 ]);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
@@ -219,6 +226,12 @@ export interface OperationBinding {
    * other; when absent the fingerprint is byte-identical to contract version 2's.
    */
   readonly target?: string | null;
+  /**
+   * A SECOND validated target (M7B-PAYMENTS-P1): only the payment reversal's {paymentId}, after its invoice `target`. When
+   * present it is appended to the fingerprint after the target, so one key sent to another payment is a 422; absent or null
+   * everywhere else, where every fingerprint stays byte-identical. Never present without a target.
+   */
+  readonly secondTarget?: string | null;
 }
 
 /** A target slot: absent, null, or one uuid in canonical lowercase text form. */
@@ -344,7 +357,8 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
  * The runtime's OWN sealed refusal for a deterministic post-authorization rejection (M5-GIAM-D1-P2-R1):
  * a bounded response carrying exactly one refusal word and nothing else, at that word's one fixed status — 409 for the
  * two conflicts, 422 for M7B-INVOICES-P1's typed `customer_not_found`, 409 for M7B-INVOICES-ISSUE-P1's typed
- * `issuing_not_configured` and `amount_out_of_range` — or null for any word that is not one of the five. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
+ * `issuing_not_configured` and `amount_out_of_range`, 409 for M7B-PAYMENTS-P1's typed `already_recorded`,
+ * `amount_exceeds_remaining` and `payments_recorded` — or null for any word that is not one of the eight. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
  * one — and this is the single place that mints it, from a fixed token this module owns: never from a
  * plan, a port, a handler or a request.
  *
@@ -394,12 +408,17 @@ export function createIdempotencyKeyring(secret: unknown): IdempotencyKeyring {
       if (target !== undefined && target !== null && (typeof target !== 'string' || !TARGET_RE.test(target))) {
         throw new TypeError('idempotency_binding_invalid');
       }
+      const second = binding.secondTarget;
+      if (second !== undefined && second !== null
+        && (typeof second !== 'string' || !TARGET_RE.test(second) || target === undefined || target === null)) {
+        throw new TypeError('idempotency_binding_invalid');
+      }
       const scope = digest(tag('scope', digest(tag('key', clientKey)), digest(tag('principal', principal.authProvider, principal.authProviderUid))));
       const body = createHash('sha256').update(binding.body).digest('base64url');
       // A literal route builds exactly contract version 2's array; a target is one more element after the body, and the
       // JSON framing keeps an array of one length from ever equalling one of another.
       const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, binding.actor, body,
-        ...(target === undefined || target === null ? [] : [target])));
+        ...(target === undefined || target === null ? [] : [target]), ...(second === undefined || second === null ? [] : [second])));
       return Object.freeze({ scope, fingerprint });
     },
     seal(envelope: ReplayEnvelope, operation: OperationIdentity): string {

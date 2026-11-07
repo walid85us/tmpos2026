@@ -46,6 +46,12 @@ const SENSITIVE_KEY_FRAGMENTS = [
   'customerphone',
   'owneremail',
   'labelurl',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): card security codes, track data and the PIN block.
+  'cvv',
+  'cvc',
+  'track1',
+  'track2',
+  'pinblock',
 ];
 
 const REDACTED = '[REDACTED]';

@@ -69,6 +69,11 @@
 // `/invoices`, read like the discard and the issue: its target is the {id} before the matched route's own `/void` suffix) and
 // its action-only eligibility GET …/invoices/{id}/void-eligibility — fifteen store templates, five of them commands. The
 // detail GET …/invoices/{id} is unchanged: a GET of …/invoices/{id}/void is no route, and a POST of …/invoices/{id} none.
+// M7B-PAYMENTS-P1 (doc 15 §12.3) adds five: GET …/invoices/{id}/payment-eligibility, POST …/invoices/{id}/payments (a sixth
+// store command, read like the void), GET …/invoices/{id}/payment-reversal-eligibility, POST
+// …/invoices/{id}/payments/{paymentId}/reversal (a seventh — the table's ONE template with a second id segment, matched only
+// after every earlier rule failed, so no existing match moves) and GET …/invoices/{id}/payments — twenty store templates,
+// seven of them commands.
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -245,6 +250,13 @@ export interface CommandContext {
    * fingerprint target: the trusted store is bound into the fingerprint already. Absent on every other route.
    */
   readonly storeId?: string;
+  /**
+   * Set by the runtime ONLY for the payment reversal (M7B-PAYMENTS-P1: POST
+   * /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal, the one template with a second id segment): the
+   * canonical lowercase uuid of its {paymentId} segment, bound into the fingerprint after `targetId` (the invoice). Still
+   * untrusted as a target, like `targetId`. Absent on every other route.
+   */
+  readonly paymentId?: string;
 }
 
 type PlanRecord = Readonly<Record<string, string | number | boolean>>;
@@ -439,6 +451,10 @@ const TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
 const IDEMPOTENT_TEMPLATED_ROUTES: ReadonlySet<string> = new Set(['PATCH /api/v1/customers/{id}', 'PUT /api/v1/issuing-settings/{id}']);
 /** The store selector segment of the store templates (M7B-INVOICES-P1). */
 export const STORE_SEGMENT = '/{storeId}';
+/**
+ * The second id segment of exactly one store template, the payment reversal (M7B-PAYMENTS-P1); it matches what {id} matches.
+ */
+export const PAYMENT_ID_SEGMENT = '/{paymentId}';
 /** The store templates' common prefix; the store directory (below) is exactly this literal path. */
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
 /**
@@ -464,17 +480,26 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   // M7B-INVOICES-VOID-P1: the void's action-only eligibility and the void itself.
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void-eligibility`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void`,
+  // M7B-PAYMENTS-P1: the record and its eligibility, the reversal's eligibility and the reversal, and the payments read.
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-eligibility`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-reversal-eligibility`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments${PAYMENT_ID_SEGMENT}/reversal`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
 ]);
 /**
  * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit,
  * (M7B-INVOICES-DISCARD-P1) the draft discard, (M7B-INVOICES-ISSUE-P1) the invoice issue and (M7B-INVOICES-VOID-P1) the
- * invoice void.
+ * invoice void — and (M7B-PAYMENTS-P1) the payment record and the payment reversal.
  */
 const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/discard`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}/issue`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/void`,
+  // M7B-PAYMENTS-P1: the payment record and the payment reversal.
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments${PAYMENT_ID_SEGMENT}/reversal`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -690,7 +715,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly fifteen declared strings (M7B-INVOICES-VOID-P1), so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly twenty declared strings (M7B-PAYMENTS-P1), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -761,7 +786,9 @@ const isIdSegment = (segment: string): boolean =>
  * other lookup. M7B-INVOICES-P2: failing those, the store template with {id} before one literal last segment matches when
  * the segment before the last is an id segment and the rest is exactly that template's (the edit eligibility's GET and,
  * since M7B-INVOICES-DISCARD-P1, the discard's POST and its eligibility's GET are declared, so another method or any other
- * suffix there matches nothing).
+ * suffix there matches nothing). M7B-PAYMENTS-P1: failing all of those, the one store template with a second id segment
+ * (…/invoices/{id}/payments/{paymentId}/reversal) matches when the fourth and second segments from the end are id segments and
+ * the rest is exactly that template's literals; no path an earlier rule matched reaches it.
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
@@ -795,8 +822,16 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
       ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, last)}${PATH_ID_SEGMENT}`) : undefined;
     if (final !== undefined) return final;
     const before = rest.lastIndexOf('/', last - 1);
-    return before > 0 && isIdSegment(rest.slice(before + 1, last))
+    const suffixed = before > 0 && isIdSegment(rest.slice(before + 1, last))
       ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, before)}${PATH_ID_SEGMENT}${rest.slice(last)}`) : undefined;
+    if (suffixed !== undefined || before <= 0) return suffixed;
+    // M7B-PAYMENTS-P1, tried only after every rule above failed: the one template with a second id segment,
+    // …/{id}/<literal>/{paymentId}/<literal> — the fourth segment from the end is {id}, the second {paymentId}.
+    const literal2 = rest.lastIndexOf('/', before - 1);
+    const id = literal2 > 0 ? rest.lastIndexOf('/', literal2 - 1) : -1;
+    return id >= 0 && isIdSegment(rest.slice(id + 1, literal2)) && isIdSegment(rest.slice(before + 1, last))
+      ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, id)}${PATH_ID_SEGMENT}${rest.slice(literal2, before)}${PAYMENT_ID_SEGMENT}${rest.slice(last)}`)
+      : undefined;
   };
   return Object.freeze({
     lookup: (method: string, path: string) => {

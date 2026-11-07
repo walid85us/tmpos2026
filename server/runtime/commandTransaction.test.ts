@@ -1021,3 +1021,121 @@ test('M7B-INVOICES-ISSUE-P1: the issue\'s kind answers precondition_failed with 
     assert.equal((await reasons(logs, 3))[0], 'transaction_not_found');
   });
 });
+
+// --- M7B-PAYMENTS-P1: the payment opt-ins — 'record' on a create, 'void' on an update (doc 15 §12.5) ---------------------
+
+/** The create under the payment record's kind, opted into 'record' (synthetic: an item). */
+const RECORD_CREATE = Object.freeze({ ...TEST_CREATE, kind: 'store.invoice_payment.record', paymentRefusals: 'record' as const });
+/** The rename under the void's kind, opted into 'void' (synthetic: an item, its rename event). */
+const VOID_RENAME = Object.freeze({ ...TEST_RENAME, kind: 'store.invoice.void', paymentRefusals: 'void' as const });
+const paymentRoutes: RouteDefinition[] = [
+  { method: 'POST', path: '/v1/items/record', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: RECORD_CREATE, plan: createPlanner } },
+  { method: 'POST', path: '/v1/items/void', policy: WRITE, body: JSON_BODY, idempotency: 'required', trustedContext: 'required', recentAuth: 'none', command: { contract: VOID_RENAME, plan: renamePlanner } },
+];
+type PaymentWord = 'already_recorded' | 'amount_exceeds_remaining' | 'payments_recorded' | 'invalid_state';
+/** A port that records the command's sealed payment refusal `word` as the completion, in the one commit, as the store does. */
+const recordingPayment = (word: PaymentWord) => (_inner: CommandTransactionPort, state: MemoryTransactionalState): CommandTransactionPort => ({
+  commit: (c) => {
+    const record = state.idempotency.records.get(c.scope);
+    const sealed = word === 'already_recorded' ? c.rejected.alreadyRecorded : word === 'amount_exceeds_remaining' ? c.rejected.amountExceedsRemaining
+      : word === 'payments_recorded' ? c.rejected.paymentsRecorded : c.rejected.invalidState;
+    if (record === undefined || record.lease !== c.lease || record.response !== null || sealed === undefined || sealed === null) return { outcome: 'unavailable' };
+    state.idempotency.records.set(c.scope, { ...record, response: sealed });
+    return { outcome: word };
+  },
+  probe: () => true,
+});
+
+test('M7B-PAYMENTS-P1: paymentRefusals registers \'record\' on a create alone and \'void\' on an update alone, never beside another opt-in; a contract that does not declare it keeps its fields', () => {
+  const registered = defineCommands([RECORD_CREATE, VOID_RENAME, TEST_CREATE, TEST_RENAME], events);
+  assert.deepEqual(Object.keys(registered.contract(RECORD_CREATE.kind) as object), ['kind', 'mode', 'aggregateType', 'changes', 'events', 'contextScope', 'paymentRefusals']);
+  assert.deepEqual([registered.contract(RECORD_CREATE.kind)?.paymentRefusals, registered.contract(VOID_RENAME.kind)?.paymentRefusals], ['record', 'void']);
+  assert.equal(Object.hasOwn(registered.contract(TEST_CREATE.kind) as object, 'paymentRefusals'), false, 'not declared, not present');
+  for (const [label, bad] of [
+    ['record on an update', { ...TEST_RENAME, paymentRefusals: 'record' }], ['void on a create', { ...TEST_CREATE, paymentRefusals: 'void' }],
+    ['another word', { ...TEST_CREATE, paymentRefusals: 'payments' }], ['true', { ...TEST_RENAME, paymentRefusals: true }],
+    ['undefined', { ...TEST_CREATE, paymentRefusals: undefined }],
+    ['record beside the 422', { ...TEST_CREATE, sealedRefusal: 'customer_not_found', paymentRefusals: 'record' }],
+    ['void beside the issuing pair', { ...TEST_RENAME, issuingRefusals: true, paymentRefusals: 'void' }],
+  ] as const) {
+    assert.throws(() => defineCommands([bad], events), (e: unknown) => e instanceof EnforcementSetupError && e.code === 'command_registry_invalid', label);
+  }
+});
+
+test('M7B-PAYMENTS-P1: a \'record\' create seals five slots — its invalid_state although a create, already_recorded and amount_exceeds_remaining, no 422 — and a \'void\' update four (payments_recorded); every other command keeps exactly three', () => {
+  const registered = defineCommands([RECORD_CREATE, VOID_RENAME], events);
+  const b = binding();
+  const recorded = prepareCommand(registered.contract(RECORD_CREATE.kind) as CommandContract, events, createPlan(b.newAggregateId), b);
+  assert.ok(recorded !== null);
+  assert.deepEqual(Object.keys(recorded.command.rejected).sort(), ['alreadyRecorded', 'amountExceedsRemaining', 'conflict', 'customerNotFound', 'invalidState']);
+  assert.deepEqual(Object.keys(recorded.rejected).sort(), ['alreadyRecorded', 'amountExceedsRemaining', 'conflict', 'customerNotFound', 'invalidState']);
+  assert.equal(recorded.command.rejected.customerNotFound, null);
+  const envelope = (word: string) => ({ status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ error: word }) });
+  for (const [slot, word] of [['invalidState', 'invalid_state'], ['alreadyRecorded', 'already_recorded'], ['amountExceedsRemaining', 'amount_exceeds_remaining']] as const) {
+    assert.deepEqual(recorded.rejected[slot], envelope(word), slot);
+    assert.deepEqual(keyring.unseal(recorded.command.rejected[slot] as string, op), envelope(word), `${slot}: sealed under the operation`);
+  }
+  const plan = { aggregateId: randomUUID(), expectedVersion: 1, changes: { name: 'n' }, events: [], response: { status: 200, body: { ok: true } } };
+  const voided = prepareCommand(registered.contract(VOID_RENAME.kind) as CommandContract, events, plan, binding());
+  assert.ok(voided !== null);
+  assert.deepEqual(Object.keys(voided.command.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState', 'paymentsRecorded']);
+  assert.deepEqual(voided.rejected.paymentsRecorded, envelope('payments_recorded'));
+  assert.deepEqual(keyring.unseal(voided.command.rejected.paymentsRecorded as string, op), envelope('payments_recorded'));
+  for (const [label, contract, raw] of [['the plain rename', rename, plan], ['a create', create, createPlan(b.newAggregateId)]] as const) {
+    const plain = prepareCommand(contract, events, raw, b);
+    assert.ok(plain !== null, label);
+    assert.deepEqual(Object.keys(plain.command.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], `${label}: three keys, no new one`);
+  }
+  assert.equal(prepareCommand(create, events, createPlan(b.newAggregateId), b)?.command.rejected.invalidState, null, 'any other create seals no invalid_state');
+});
+
+test('M7B-PAYMENTS-P1: the three words are obeyed only as exact answers, are reserved — an outcome may not spell them — and mint at 409 alone', async () => {
+  const command = commandOf();
+  const verdictOf = (answer: unknown): Promise<unknown> =>
+    commitCommand(createCommandTransactions({ port: { commit: () => answer, probe: () => true } }), command, 1_000);
+  for (const word of ['already_recorded', 'amount_exceeds_remaining', 'payments_recorded']) {
+    assert.equal(await verdictOf({ outcome: word }), `transaction_${word}`);
+    assert.equal(await verdictOf({ outcome: word, status: 409 }), 'transaction_outcome_invalid', `${word}: exact`);
+    assert.equal(await verdictOf({ outcome: word.toUpperCase() }), 'transaction_outcome_invalid', `${word}: case`);
+    assert.equal(envelopeFromOutcome({ status: 409, body: { error: word } }), null, `${word}: an outcome may not borrow it`);
+    assert.equal(envelopeFromOutcome({ status: 200, body: { error: word } }), null, `${word}: at any status`);
+    assert.deepEqual(refusalEnvelope(word), { status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ error: word }) });
+  }
+  assert.equal(await verdictOf({ outcome: 'payment_recorded' }), 'transaction_outcome_invalid');
+  assert.equal(refusalEnvelope('payment_recorded'), null);
+});
+
+test('M7B-PAYMENTS-P1 §12.3: a \'record\' create\'s already_recorded, amount_exceeds_remaining and invalid_state, and a \'void\' update\'s payments_recorded, are sent as recorded and replay; a contract that did not declare them answering any is a 503 that records nothing', async () => {
+  for (const [word, path] of [['already_recorded', '/v1/items/record'], ['amount_exceeds_remaining', '/v1/items/record'], ['invalid_state', '/v1/items/record'],
+    ['payments_recorded', '/v1/items/void']] as const) {
+    await withCommands({ port: recordingPayment(word), extra: paymentRoutes }, async ({ port, logs, plans }) => {
+      const key = randomUUID();
+      const body = path === '/v1/items/void' ? renameBody() : undefined;
+      const refused = await post(port, { key, path, body });
+      assert.deepEqual([refused.status, JSON.parse(refused.body)], [409, { error: word }], `${word}: the sealed body alone`);
+      assert.equal(refused.headers['idempotent-replayed'], undefined, 'the first answer is the decision');
+      const replay = await post(port, { key, path, body });
+      assert.deepEqual([replay.status, replay.body, replay.headers['idempotent-replayed']], [409, refused.body, 'true'], `${word}: replayed byte for byte`);
+      assert.equal(plans.length, 1, 'planned once');
+      assert.deepEqual((await reasons(logs, 2)), [`transaction_${word}`, 'idempotency_replayed']);
+    });
+  }
+  for (const word of ['already_recorded', 'amount_exceeds_remaining', 'payments_recorded']) {
+    await withCommands({ port: answering(word), extra: paymentRoutes }, async ({ port, logs }) => {
+      // The create that did not declare it, the rename that did not, and the wrong declaration for the word.
+      const created = await post(port, { key: randomUUID() });
+      assert.deepEqual([created.status, errorOf(created)], [503, 'service_unavailable'], `${word}: a plain create`);
+      const renamed = await post(port, { key: randomUUID(), path: '/v1/items/rename', body: renameBody() });
+      assert.deepEqual([renamed.status, errorOf(renamed)], [503, 'service_unavailable'], `${word}: a plain update`);
+      const wrong = word === 'payments_recorded' ? await post(port, { key: randomUUID(), path: '/v1/items/record' })
+        : await post(port, { key: randomUUID(), path: '/v1/items/void', body: renameBody() });
+      assert.deepEqual([wrong.status, errorOf(wrong)], [503, 'service_unavailable'], `${word}: the other declaration`);
+      assert.equal((await reasons(logs, 3)).filter((r) => r === `transaction_${word}`).length, 3);
+    });
+  }
+  // A plain create answering invalid_state is still the 503.
+  await withCommands({ port: answering('invalid_state'), extra: paymentRoutes }, async ({ port }) => {
+    const created = await post(port, { key: randomUUID() });
+    assert.deepEqual([created.status, errorOf(created)], [503, 'service_unavailable']);
+  });
+});

@@ -410,19 +410,32 @@ const PINNED = {
   // The two sha256 values pin the 035 bytes this stage commits.
   [`035_m7b_invoice_${'void'}.up.sql`]: '84163190420381524dcf3865c50ff413dd8267b6b4c0cf2962f608aa92e84d0e',
   [`035_m7b_invoice_${'void'}.down.sql`]: 'd5cadcd170a17098cab99fbcc0269be24b3b0d93ffb564618ae38e2238ee98b7',
+  // Phase 4.0 M7B-PAYMENTS-P1 — recording payments against an issued store invoice. In its OWN schema tmpos_invoice_payment: two
+  // append-only tables (the payment and its reversal, row security on, no policy, no runtime privilege, composite foreign keys onto
+  // 034's issued-invoice scope key and the payment's own key), the SECURITY DEFINER record, reverse and void-v2 routines and the
+  // payments read granted to tmpos_app alone, the ENABLE ALWAYS guards that keep both records whole, the audit table's
+  // subject_invoice_payment_id column, its partial index and the card-data metadata CHECK, and a SQL-standard-body anchor naming the
+  // 035 functions it relies on; tmpos_app loses EXECUTE on 035's void (m7b_invoice_void_v2 replaces it). Its rollback refuses while
+  // any payment, reversal or payment audit record exists and otherwise restores the 035-era grants exactly; 035's own rollback fails
+  // on the dependency while 036 is applied. Proved against disposable PostgreSQL only; applied to no managed, persistent or
+  // application database. D4 now names the contiguous chain through 036; the exact-[005] gate is unchanged and still refuses. Both
+  // 036 keys are assembled at run time, as 035's are.
+  // The two sha256 values pin the 036 bytes this stage commits.
+  [`036_m7b_invoice_${'payment'}.up.sql`]: '93fe0ba90dcc1bb6404d92b0a6a8c1a852ad462d5d2d11e6f730239a0536746d',
+  [`036_m7b_invoice_${'payment'}.down.sql`]: '131e112e16695caa947b24f0c89c5d30a32c2043348826eedb32d622302a68d7',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the seventy expected files', () => {
+test('the migrations directory holds exactly the seventy-two expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

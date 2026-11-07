@@ -51,14 +51,16 @@ const refusal = (outcome: string) => ({ o_outcome: outcome, ...nulls(OUT) });
 const FRESH = [{ fresh: true }];
 
 test('IVP-01 the void mutator: store scope, update of the issued invoice, the voided-invoice audit subject, no issuing opt-in; ONE fixed call binding the key, the REVALIDATED store, the invoice, the tenant, the version as bigint text and the code — then the deadline on the database clock', async () => {
+  // M7B-PAYMENTS-P1: the void declares the payment refusal 'void' (payments_recorded) and is not routine-audited.
   assert.deepEqual([INVOICE_VOID_MUTATOR.kind, INVOICE_VOID_MUTATOR.mode, INVOICE_VOID_MUTATOR.aggregateType, INVOICE_VOID_MUTATOR.contextScope,
-    INVOICE_VOID_MUTATOR.auditSubjects, INVOICE_VOID_MUTATOR.issuingRefusals], ['store.invoice.void', 'update', 'issued_invoice', 'store', 'voided_invoice', undefined]);
+    INVOICE_VOID_MUTATOR.auditSubjects, INVOICE_VOID_MUTATOR.issuingRefusals, INVOICE_VOID_MUTATOR.paymentRefusals, INVOICE_VOID_MUTATOR.routineAudited],
+  ['store.invoice.void', 'update', 'issued_invoice', 'store', 'voided_invoice', undefined, 'void', undefined]);
   assert.ok(Object.isFrozen(INVOICE_VOID_MUTATOR));
   const r = recorder([applied()], FRESH);
   assert.equal(await INVOICE_VOID_MUTATOR.apply(r.sql, voidMutation(), authority()), 'applied', 'the bare word: the audit names the invoice alone');
   assert.equal(r.texts.length, 2, 'the routine, then the clock');
   assert.equal(squash(r.texts[0]), 'select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version, o_invoice_id '
-    + 'from tmpos_invoice_void.m7b_invoice_void(?::text, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text)', 'the exact statement');
+    + 'from tmpos_invoice_payment.m7b_invoice_void_v2(?::text, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text)', 'the exact statement (M7B-PAYMENTS-P1: 036\'s v2)');
   assert.deepEqual(r.values[0], [KEY, STORE, INVOICE, TENANT, '1', 'issued_in_error']);
   assert.equal(squash(r.texts[1]), 'select (pg_catalog.clock_timestamp() <= pg_catalog.to_timestamp(?::bigint / 1000.0)) as fresh', 'the deadline, after the routine');
   assert.deepEqual(r.values[1], [String(DEADLINE)]);
@@ -81,8 +83,9 @@ test('IVP-02 a sign-in that went stale while the routine waited refuses the void
   for (const clock of [[], [{ fresh: 'true' }], [{ fresh: null }], [{ fresh: true }, { fresh: true }]]) {
     await assert.rejects(INVOICE_VOID_MUTATOR.apply(recorder([applied()], clock).sql, voidMutation(), authority()), /session store unavailable/, JSON.stringify(clock));
   }
+  // M7B-PAYMENTS-P1: payments_recorded (an unreversed payment) is passed through as the sealed word, never asking the clock.
   for (const [word, answer] of [['tenant_mismatch', 'precondition_failed'], ['not_found', 'not_found'], ['invalid_state', 'invalid_state'], ['conflict', 'conflict'],
-    ['refused', 'refused']] as const) {
+    ['refused', 'refused'], ['payments_recorded', 'payments_recorded']] as const) {
     const r = recorder([refusal(word)], [{ fresh: false }]);
     assert.equal(await INVOICE_VOID_MUTATOR.apply(r.sql, voidMutation(), authority()), answer, word);
     assert.equal(r.texts.length, 1, `${word}: no clock`);
@@ -99,7 +102,7 @@ test('IVP-03 (R-BR-07, R-BR-09) every malformed or mismatched row is mismatch, b
     ...OUT.map((c): [string, unknown[]] => [`a refusal naming ${c}`, [{ ...refusal('invalid_state'), [c]: c === 'o_version' ? '2' : INVOICE }]]),
     ['tenant_mismatch naming the tenant', [{ ...refusal('tenant_mismatch'), o_tenant_id: TENANT }]],
     ['an unknown word', [refusal('voided')]], ['unchanged (never a void answer)', [refusal('unchanged')]], ['precondition_failed spelled by the routine', [refusal('precondition_failed')]],
-    ['the issue\'s word', [refusal('issuing_not_configured')]], ['a null word', [refusal(null as unknown as string)]], ['an uppercase word', [applied({ o_outcome: 'APPLIED' })]],
+    ['the issue\'s word', [refusal('issuing_not_configured')]], ['the record\'s word', [refusal('already_recorded')]], ['a near word', [refusal('payment_recorded')]], ['a null word', [refusal(null as unknown as string)]], ['an uppercase word', [applied({ o_outcome: 'APPLIED' })]],
     ['two rows', [applied(), applied()]], ['no row', []], ['an extra column', [{ ...applied(), o_voided_by: ACTOR }]],
     ['a missing column', [Object.fromEntries(Object.entries(applied()).filter(([k]) => k !== 'o_invoice_id'))]], ['a row that is no object', ['applied']],
   ];

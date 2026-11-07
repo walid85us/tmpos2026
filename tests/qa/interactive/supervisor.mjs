@@ -1,7 +1,7 @@
 // QA-INTERACTIVE-P1 — the one long-lived owner of an interactive QA session, started detached by `cli.mjs start` under
 // tsx and alive after that terminal ends. It owns, in this order: the QA front on :5000 (claimed first, so nothing else
 // can take the Preview port), its private control socket (0600, never reachable over HTTP), the Firebase emulators, one
-// disposable PostgreSQL cluster from the test harness (migrations 001–035 through the same trusted-apply path every
+// disposable PostgreSQL cluster from the test harness (migrations 001–036 through the same trusted-apply path every
 // DB suite uses), the real tenant runtime (startTenantEntry with the QA verifier as its only substitute), and the
 // seeded synthetic world. A failed part leaves the session honestly unavailable; nothing falls back to a real service.
 import { spawnSync } from 'node:child_process';

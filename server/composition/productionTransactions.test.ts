@@ -441,9 +441,22 @@ test('a command route needs its mutator, a partial construction composes nothing
     ['a mutator of another mode', [{ ...mutator, mode: 'update' }]],
     ['a mutator of another aggregate type', [{ ...mutator, aggregateType: 'other_aggregate' }]],
     ['two mutators of one kind', [mutator, { ...mutator }]],
+    // M7B-PAYMENTS-P1: a payment-refusals opt-in on the mutator alone.
+    ['a mutator opting into the record refusals alone', [{ ...mutator, paymentRefusals: 'record' }]],
   ] as const) {
     assert.deepEqual(blockersOf({ routes: [command], mutators: mutators as readonly AggregateMutator[] }, CONFIGURED), ['command_mutator_unavailable'], label);
   }
+  // ...on the contract alone, or as different words on the two sides; the same word on both composes.
+  const paying = (paymentRefusals: 'record' | 'void'): RouteDefinition => ({ ...command, command: { contract: { ...TEST_CREATE, paymentRefusals }, plan: () => assert.fail('never planned') } });
+  for (const [label, routes, mutators] of [
+    ['a contract opting into the record refusals alone', [paying('record')], [mutator]],
+    ['a contract opting into the void refusals alone', [paying('void')], [mutator]],
+    ['a record contract served by a void mutator', [paying('record')], [{ ...mutator, paymentRefusals: 'void' }]],
+  ] as const) {
+    assert.deepEqual(blockersOf({ routes, mutators: mutators as readonly AggregateMutator[] }, CONFIGURED), ['command_mutator_unavailable'], label);
+  }
+  assert.ok(assembleTransactions({ routes: [paying('record')], mutators: [{ ...mutator, paymentRefusals: 'record' }] }, CONFIGURED, counted().factories) !== null,
+    'the same payment word on both sides composes');
   // M7B-INVOICES-P1 (design R4): route scope = contract scope = mutator scope, and this root admits platform alone — each as
   // DECLARED: a contract or a mutator with no scope (an untyped caller, outside the type system) gets no default.
   const { contextScope: _contractScope, ...undeclaredContract } = TEST_CREATE;
@@ -1288,7 +1301,7 @@ test('M7TK-02 composeReadTransactions refuses APP_DATABASE_URL, the issuer key a
     (err: unknown) => err instanceof TransactionCompositionError && err.blockers.join() === 'database_tls_invalid');
 });
 
-test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the sixteen reads classified as reads, the eight commands not', async () => {
+test('M7TK-03 the tenant root builds its kernel once and serves exactly the tenant routes: the customer reads session-bound, the twenty reads classified as reads, the eleven commands not', async () => {
   const customerId = randomUUID();
   const kernel = recordingKernel((text) => (text.includes('m7a_customer_page_v3') || text.includes('m7a_customer_get')
     ? [{ o_outcome: 'customer', o_tenant_id: REVAL_TENANT, o_customer_id: customerId, o_name: 'n' }]
@@ -1332,6 +1345,10 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['GET', '/api/v1/stores/{storeId}/invoices/{id}', 'session', 'tenant', 'required', 'required', 'none'],
     // M7B-INVOICES-VOID-P1: the void's action-only eligibility, a session-bound store-scope read appended after the issued detail.
     ['GET', '/api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
+    // M7B-PAYMENTS-P1: the record's and the reversal's action-only eligibilities and the payments read, appended after the void's.
+    ['GET', '/api/v1/stores/{storeId}/invoices/{id}/payment-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
+    ['GET', '/api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', 'session', 'tenant', 'required', 'required', 'none'],
+    ['GET', '/api/v1/stores/{storeId}/invoices/{id}/payments', 'session', 'tenant', 'required', 'required', 'none'],
     ['POST', '/api/v1/customers', 'session', 'tenant', 'none', 'required', 'required'],
     ['PATCH', '/api/v1/customers/{id}', 'session', 'tenant', 'none', 'required', 'required'],
     ['PUT', '/api/v1/roles/levels', 'session', 'tenant', 'none', 'required', 'required'],
@@ -1346,13 +1363,18 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
     ['POST', '/api/v1/stores/{storeId}/invoice-drafts/{id}/issue', 'session', 'tenant', 'none', 'required', 'required'],
     // M7B-INVOICES-VOID-P1: the void (store scope), last.
     ['POST', '/api/v1/stores/{storeId}/invoices/{id}/void', 'session', 'tenant', 'none', 'required', 'required'],
+    // M7B-PAYMENTS-P1: the payment record and the payment reversal (store scope), last.
+    ['POST', '/api/v1/stores/{storeId}/invoices/{id}/payments', 'session', 'tenant', 'none', 'required', 'required'],
+    ['POST', '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal', 'session', 'tenant', 'none', 'required', 'required'],
   ]);
   assert.deepEqual([...ttx.tenantReads], ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices',
     'GET /api/v1/stores', 'GET /api/v1/stores/{storeId}/invoice-drafts', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}',
     'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility',
     'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'GET /api/v1/issuing-settings/{id}',
     'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview',
-    'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}', 'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility'],
+    'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}', 'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility',
+    'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility', 'GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility',
+    'GET /api/v1/stores/{storeId}/invoices/{id}/payments'],
     'the reads alone are classified as reads — the detail and the profile by their templates, never an id — and never a command');
   assert.deepEqual(tenantRouteDeclarations().map((r) => `${r.method} ${r.path}`),
     ['GET /api/v1/customers', 'GET /api/v1/customers/{id}', 'GET /api/v1/customers/{id}/profile', 'GET /api/v1/roles/levels', 'GET /api/v1/roles/levels/invoices', 'GET /api/v1/stores',
@@ -1360,11 +1382,15 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility',
       'GET /api/v1/issuing-settings/{id}', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview', 'GET /api/v1/stores/{storeId}/invoices', 'GET /api/v1/stores/{storeId}/invoices/{id}',
-      'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts',
+      'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility',
+      'GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', 'GET /api/v1/stores/{storeId}/invoices/{id}/payments',
+      'POST /api/v1/customers', 'PATCH /api/v1/customers/{id}', 'PUT /api/v1/roles/levels', 'POST /api/v1/stores/{storeId}/invoice-drafts',
       'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard', 'PUT /api/v1/issuing-settings/{id}',
-      'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue', 'POST /api/v1/stores/{storeId}/invoices/{id}/void']);
+      'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue', 'POST /api/v1/stores/{storeId}/invoices/{id}/void',
+      'POST /api/v1/stores/{storeId}/invoices/{id}/payments', 'POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal']);
   assert.deepEqual(ttx.routes[5].policy, { access: 'session', audience: 'tenant', authorization: null }, 'the store directory declares no authorization');
-  assert.deepEqual([6, 7, 8, 20, 9, 21, 10, 22].map((i) => ttx.routes[i].policy), [
+  // M7B-PAYMENTS-P1: three more reads precede the commands, so each command's index moved by three.
+  assert.deepEqual([6, 7, 8, 23, 9, 24, 10, 25].map((i) => ttx.routes[i].policy), [
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'view_invoice_drafts' } },
     { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'create_invoice_drafts' } },
@@ -1376,7 +1402,7 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   ], 'the draft routes require the STORE route permissions — each eligibility read exactly its command\'s');
   // M7B-INVOICES-ISSUE-P1: the settings read and write under the owner-only TENANT permission; the issue, its eligibility and
   // its preview under issue_invoices; the issued reads under view_issued_invoices.
-  assert.deepEqual([11, 23, 12, 13, 24, 14, 15].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth]), [
+  assert.deepEqual([11, 26, 12, 13, 27, 14, 15].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth]), [
     ['GET /api/v1/issuing-settings/{id}', { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'edit_issuing_settings' } }, 'none'],
     ['PUT /api/v1/issuing-settings/{id}', { access: 'session', audience: 'tenant', authorization: { scope: 'tenant', permission: 'edit_issuing_settings' } }, 'required'],
     ['GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'issue_invoices' } }, 'none'],
@@ -1387,14 +1413,25 @@ test('M7TK-03 the tenant root builds its kernel once and serves exactly the tena
   ]);
   // M7B-INVOICES-VOID-P1 (R-SEC-03): the void's eligibility and the void under void_issued_invoices — no recent sign-in on the
   // eligibility, a recent sign-in required on the POST.
-  assert.deepEqual([16, 25].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth, ttx.routes[i].body]), [
+  assert.deepEqual([16, 28].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth, ttx.routes[i].body]), [
     ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'void_issued_invoices' } }, 'none',
       { kind: 'none' }],
     ['POST /api/v1/stores/{storeId}/invoices/{id}/void', { access: 'session', audience: 'tenant', authorization: { scope: 'store', permission: 'void_issued_invoices' } }, 'required',
       { kind: 'json', maxBytes: 1024, required: true }],
   ]);
-  assert.equal(ttx.routes.length, 26, 'seventeen reads and nine commands');
-  assert.deepEqual([8, 20, 9, 21, 10, 22].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
+  // M7B-PAYMENTS-P1 (doc 15 §12.3): the record and its eligibility under record_invoice_payments (no recent sign-in), the
+  // reversal and its eligibility under reverse_invoice_payments (a recent sign-in on the POST alone), the read under
+  // view_issued_invoices.
+  const req = (permission: string) => ({ access: 'session', audience: 'tenant', authorization: { scope: 'store', permission } });
+  assert.deepEqual([17, 29, 18, 30, 19].map((i) => [`${ttx.routes[i].method} ${ttx.routes[i].path}`, ttx.routes[i].policy, ttx.routes[i].recentAuth, ttx.routes[i].body]), [
+    ['GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility', req('record_invoice_payments'), 'none', { kind: 'none' }],
+    ['POST /api/v1/stores/{storeId}/invoices/{id}/payments', req('record_invoice_payments'), 'none', { kind: 'json', maxBytes: 1024, required: true }],
+    ['GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', req('reverse_invoice_payments'), 'none', { kind: 'none' }],
+    ['POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal', req('reverse_invoice_payments'), 'required', { kind: 'json', maxBytes: 1024, required: true }],
+    ['GET /api/v1/stores/{storeId}/invoices/{id}/payments', req('view_issued_invoices'), 'none', { kind: 'none' }],
+  ]);
+  assert.equal(ttx.routes.length, 31, 'twenty reads and eleven commands');
+  assert.deepEqual([8, 23, 9, 24, 10, 25].map((i) => `${ttx.routes[i].method} ${ttx.routes[i].path}`),
     ['GET /api/v1/stores/{storeId}/invoice-drafts/eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/edit-eligibility', 'PATCH /api/v1/stores/{storeId}/invoice-drafts/{id}',
       'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/discard-eligibility', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard']);
@@ -1566,13 +1603,17 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
     'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents', 'o_total_cents', 'o_position', 'o_description', 'o_quantity', 'o_unit_price_cents',
     'o_line_total_cents', 'o_status', 'o_voided_at', 'o_reason_code']);
   let issuedGot: unknown = issuedGetDenied;
+  // M7B-PAYMENTS-P1: 036's payments read, refusing with every other column null.
+  const paymentsDenied = nulls(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_applied_cents',
+    'o_remaining_cents', 'o_payment_status', 'o_payment_id', 'o_attempt_id', 'o_amount_cents', 'o_method', 'o_recorded_at', 'o_reversed_at', 'o_reason_code']);
+  let paymentsGot: unknown = paymentsDenied;
   let minted: unknown = [{ outcome: 'invalid' }];
   const kernel = recordingKernel((text) => (text.includes('m7a_issuer_key_check') ? answer : text.includes('m7a_customer_page_v3') ? page
     : text.includes('m7a_customer_get') ? got : text.includes('m7a_customer_profile') ? profiled : text.includes('m7a_customer_search') ? searched
       : text.includes('m7b_store_directory') ? stored : text.includes('m7b_invoice_draft_page') ? draftPage : text.includes('m7b_invoice_draft_get') ? draftGot
         : text.includes('m7b_issuing_settings_get') ? settingsDenied : text.includes('m7b_invoice_issue_preview') ? previewDenied
           : text.includes('m7b_issued_invoice_page') ? issuedPageDenied : text.includes('m7b_issued_invoice_get') ? issuedGot
-            : text.includes('m7a_session_create') ? minted : []));
+            : text.includes('m7b_invoice_payments_get') ? paymentsGot : text.includes('m7a_session_create') ? minted : []));
   const ttx = composeTenantTransactions(TENANT_CONFIGURED, () => kernel.client);
   const signal = new AbortController().signal;
   assert.equal(await ttx.issuerKey(signal), 'match');
@@ -1593,20 +1634,28 @@ test('M7TK-05 the issuer-key probe sends a 32-byte fingerprint and never the key
   assert.ok(!JSON.stringify(kernel.statements).includes(keyHex) && !JSON.stringify(kernel.statements).includes(TENANT_CONFIGURED.TENANT_SESSION_ISSUER_KEY),
     'no statement carries the key in any spelling');
   kernel.statements.length = 0;
-  assert.equal(await ttx.readsProbe(signal), true, 'all eleven routines\' one refusal of an unknown key');
+  assert.equal(await ttx.readsProbe(signal), true, 'all twelve routines\' one refusal of an unknown key');
   const asked = (): string[] => kernel.statements.map((st) => (/m7a_customer_page_v3\(/.test(st.text) ? 'page_v3' : /m7a_customer_get\(/.test(st.text) ? 'get'
     : /tmpos_customer_edit\.m7a_customer_profile\(/.test(st.text) ? 'profile' : /tmpos_customer_search\.m7a_customer_search\(/.test(st.text) ? 'search'
       : /tmpos_store_access\.m7b_store_directory\(/.test(st.text) ? 'stores' : /tmpos_invoice_discard\.m7b_invoice_draft_page_v2\(/.test(st.text) ? 'draft_page'
         : /tmpos_invoice_discard\.m7b_invoice_draft_get_v2\(/.test(st.text) ? 'draft_get'
           : /tmpos_invoice_issue\.m7b_issuing_settings_get\(/.test(st.text) ? 'settings' : /tmpos_invoice_issue\.m7b_invoice_issue_preview\(/.test(st.text) ? 'preview'
-            : /tmpos_invoice_void\.m7b_issued_invoice_page_v2\(/.test(st.text) ? 'issued_page' : /tmpos_invoice_void\.m7b_issued_invoice_get_v2\(/.test(st.text) ? 'issued_get' : 'other'));
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get'],
-    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then the drafts\' two reads (M7B-INVOICES-P1; 033\'s open-only page_v2 and get_v2 since M7B-INVOICES-DISCARD-P1), then the four issuing reads (M7B-INVOICES-ISSUE-P1; 035\'s v2 page and get since M7B-INVOICES-VOID-P1)');
+            : /tmpos_invoice_void\.m7b_issued_invoice_page_v2\(/.test(st.text) ? 'issued_page' : /tmpos_invoice_void\.m7b_issued_invoice_get_v2\(/.test(st.text) ? 'issued_get'
+              : /tmpos_invoice_payment\.m7b_invoice_payments_get\(/.test(st.text) ? 'payments' : 'other'));
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get', 'payments'],
+    'the probe asks 020\'s routine, then 022\'s, then 024\'s (M7A-CUSTOMERS-P7), then 025\'s (M7A-CUSTOMERS-P8), then 027\'s, then the drafts\' two reads (M7B-INVOICES-P1; 033\'s open-only page_v2 and get_v2 since M7B-INVOICES-DISCARD-P1), then the four issuing reads (M7B-INVOICES-ISSUE-P1; 035\'s v2 page and get since M7B-INVOICES-VOID-P1), then 036\'s payments read (M7B-PAYMENTS-P1)');
+  // M7B-PAYMENTS-P1: the payments read is asked last, and answering anything else is not ready.
+  paymentsGot = [{ ...paymentsDenied[0], o_outcome: 'not_found' }];
+  kernel.statements.length = 0;
+  assert.equal(await ttx.readsProbe(signal), false, 'the payments read answering anything else is not ready');
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get', 'payments']);
+  paymentsGot = paymentsDenied;
   // M7B-INVOICES-ISSUE-P1: the issuing reads are asked last, and the issued get answering anything else is not ready.
   issuedGot = [{ ...issuedGetDenied[0], o_outcome: 'not_found' }];
   kernel.statements.length = 0;
   assert.equal(await ttx.readsProbe(signal), false, 'the issued get answering anything else is not ready');
-  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get']);
+  assert.deepEqual(asked(), ['page_v3', 'get', 'profile', 'search', 'stores', 'draft_page', 'draft_get', 'settings', 'preview', 'issued_page', 'issued_get'],
+    'short-circuit: the payments read is not asked once the issued get is not ready');
   issuedGot = issuedGetDenied;
   // M7B-INVOICES-P1: the invoice drafts' two reads are asked last, only once the store directory's has refused.
   draftGot = [{ ...draftGetDenied[0], o_outcome: 'not_found' }];
@@ -1693,6 +1742,12 @@ test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; only
   // A write route with no mutator of its kind, or one that is no idempotent command, refuses before any client exists.
   const slot = TENANT_INVENTORY.writes;
   assert.ok(slot !== undefined);
+  // M7B-PAYMENTS-P1: the composed slot (which booted above) carries matching payment declarations on both sides.
+  for (const [kind, word] of [['store.invoice.void', 'void'], ['store.invoice_payment.record', 'record']] as const) {
+    const route = slot.routes.find((r) => 'command' in r && r.command.contract.kind === kind);
+    assert.ok(route !== undefined && 'command' in route, kind);
+    assert.deepEqual([route.command.contract.paymentRefusals, slot.mutators.find((m) => m.kind === kind)?.paymentRefusals], [word, word], kind);
+  }
   for (const [label, writes] of [
     ['no mutator', { ...slot, mutators: [] }],
     ['a mutator of another mode', { ...slot, mutators: [{ ...slot.mutators[0], mode: 'update' }] }],
@@ -1704,6 +1759,15 @@ test('M7TK-06 a fault after the kernel exists ends it once and is rethrown; only
       ? Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'issuingRefusals')) : m)) }],
     ['the discard mutator with the issuing opt-in', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'store.invoice_draft.discard'
       ? { ...m, issuingRefusals: true } : m)) }],
+    // M7B-PAYMENTS-P1: the payment refusals declared by one side alone, or as different words on the two sides.
+    ['the void mutator without its payment opt-in', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'store.invoice.void'
+      ? Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'paymentRefusals')) : m)) }],
+    ['the record mutator without its payment opt-in', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'store.invoice_payment.record'
+      ? Object.fromEntries(Object.entries(m).filter(([k]) => k !== 'paymentRefusals')) : m)) }],
+    ['the record mutator declaring the void refusals', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'store.invoice_payment.record'
+      ? { ...m, paymentRefusals: 'void' } : m)) }],
+    ['the discard mutator with the void opt-in', { ...slot, mutators: slot.mutators.map((m) => (m.kind === 'store.invoice_draft.discard'
+      ? { ...m, paymentRefusals: 'void' } : m)) }],
   ] as const) {
     try {
       composeReadTransactions({ ...TENANT_INVENTORY, writes } as never, TENANT_CONFIGURED, () => assert.fail('no client may be built'));

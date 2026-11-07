@@ -41,6 +41,9 @@
 //   store scope, and — M7B-INVOICES-VOID-P1 (migration 035) — the invoice void's issued invoice ALONE, admitted only for
 //   action store.invoice.void at store scope and written by its own statement. Anywhere else an issued-invoice subject is
 //   refused before any statement is sent.
+// ROUTINE-AUDITED ACTIONS (M7B-PAYMENTS-P1, doc 15 §12.5 I2): store.invoice_payment.record and store.invoice_payment.reverse
+//   are written by migration 036's routines ALONE, in the payment's own transaction; this TypeScript path refuses either
+//   action id before any statement is sent.
 //
 // ISOLATION (binding): server-side only — NEVER imported by src/ (the client
 // bundle). Imports NO Express, NO frontend, NO sessionResolve, NO runtime route
@@ -351,6 +354,12 @@ export class AuditEventValidationError extends Error {
 }
 
 /**
+ * The action ids whose audit record a database routine writes itself (M7B-PAYMENTS-P1, migration 036): the payment record and
+ * the payment reversal. validateAuditEventInput refuses them, so this path can never write one.
+ */
+export const ROUTINE_AUDITED_ACTION_IDS: readonly string[] = Object.freeze(['store.invoice_payment.record', 'store.invoice_payment.reverse']);
+
+/**
  * Assert the event is well-formed and safe to persist. Throws
  * AuditEventValidationError (with a non-sensitive label only) on any violation.
  * Returns the event unchanged on success. Does NOT mutate; logs nothing.
@@ -367,6 +376,10 @@ export function validateAuditEventInput(event: AuditEventWriteInput): AuditEvent
   };
   requireStr('requestId', event.requestId);
   requireStr('actionId', event.actionId);
+  // M7B-PAYMENTS-P1: the two payment actions are their routines' to write, never this path's (header: ROUTINE-AUDITED ACTIONS).
+  if (ROUTINE_AUDITED_ACTION_IDS.includes(event.actionId)) {
+    throw new AuditEventValidationError('audit event action is written by its routine alone');
+  }
   requireStr('requiredPermission', event.requiredPermission);
   requireStr('reasonCode', event.reasonCode);
   requireStr('humanReadableReason', event.humanReadableReason);

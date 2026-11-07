@@ -138,6 +138,8 @@ const MAX_EVENT_VERSION = 1_000;
 const FORBIDDEN_NAME_PARTS: readonly string[] = [
   'token', 'secret', 'password', 'passwd', 'pwd', 'passphrase', 'cookie', ['cred', 'ential'].join(''), 'authorization', 'bearer', 'apikey', 'privatekey', 'idempotency',
   'csrf', 'session', 'connection', 'dsn', 'databaseurl', 'jwt', 'jwks', 'servicerole', 'rawbody', 'rawdb', 'cvv', 'cardnumber',
+  // M7B-PAYMENTS-P1 (doc 15 §12.5): track 1 and 2 and the PIN block, beside cvv, cvc and pin.
+  'track1', 'track2', 'pinblock',
 ];
 const FORBIDDEN_NAMES: readonly string[] = ['pan', 'pin', 'otp', 'cvc'];
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;

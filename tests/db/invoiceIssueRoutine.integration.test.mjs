@@ -40,7 +40,8 @@
 // dependency, so on a shared service where an earlier step applied 035 it is rolled back through its own committed down and
 // ledger row at setup (rollBackAbove, newest first) and put back, with its exact ledger row, by the teardown; the executor in
 // this file applies THROUGH 034 only. On a fresh cluster there is nothing above 034 and the restore does nothing. 035's own
-// behaviour (and its rollback, which refuses over a void record) is the void routine suite's.
+// behaviour (and its rollback, which refuses over a void record) is the void routine suite's. M7B-PAYMENTS-P1: 036 sits above
+// 035 and is rolled back first and put back last the same way (rollBackAbove takes every version above 034, newest first).
 //
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file creates
 // and destroys. Every fixture is synthetic and randomly suffixed. It rolls 034 (and once 033) back and re-applies it, so on a
@@ -325,7 +326,7 @@ test.after(async () => {
         settings: 0, counters: 0, invoices: 0, lines: 0, drafts: 0, audits: 0, roles: 0, sessions: 0, role_check: true, no_fault: true, login: false,
       }, 'left as found: 034 applied and recorded, every guard ALWAYS, nothing of this suite\'s retained');
     });
-    // M7B-INVOICES-VOID-P1: a shared service's 035, rolled back at setup, is put back with its exact ledger row (nothing to do on a fresh cluster).
+    // M7B-INVOICES-VOID-P1 (and M7B-PAYMENTS-P1): a shared service's 035 (and 036), rolled back at setup, is put back with its exact ledger row (nothing to do on a fresh cluster).
     await step(() => above034.restore());
   } finally {
     await step(() => owner.end({ timeout: 5 }));
@@ -344,8 +345,8 @@ await owner.unsafe(`do $$ begin
 end $$;`);
 await owner.unsafe(`revoke create on database "${DATABASE}" from public`);
 await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
-// 035 (when an earlier step of a shared service applied it) is rolled back through its own committed down and ledger row, and
-// restored by the teardown; on a fresh cluster there is nothing above 034 and the restore does nothing.
+// 035 and 036 (when an earlier step of a shared service applied them) are rolled back through their own committed downs and
+// ledger rows, newest first, and restored by the teardown; on a fresh cluster there is nothing above 034 and the restore does nothing.
 const above034 = await rollBackAbove(owner, MIG_DIR, '034');
 const applyReport = await trustedApply();
 await owner.unsafe(`do $$ begin

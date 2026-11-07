@@ -2581,7 +2581,7 @@ describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-
     const rows: Array<[VoidResult, Partial<HeldVoid> | 'removed', Partial<HeldVoid> | 'removed']> = [
       [{ kind: 'voided', replayed: false }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
       [{ kind: 'voided', replayed: true }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
-      ...(['already-void', 'version-conflict', 'tenant-conflict', 'not-found', 'key-reused', 'invalid'] as const)
+      ...(['already-void', 'version-conflict', 'payments-recorded', 'tenant-conflict', 'not-found', 'key-reused', 'invalid'] as const)
         .map((kind): [VoidResult, Partial<HeldVoid>, Partial<HeldVoid>] => [{ kind }, refusedAs(kind), refusedAs(kind)]),
       [{ kind: 'unknown', responded: true }, unresolved(VOID_NOTE_TEXT.answered), unresolved(VOID_NOTE_TEXT.answered)],
       [{ kind: 'unknown', responded: false }, unresolved(VOID_NOTE_TEXT.noAnswer), unresolved(VOID_NOTE_TEXT.noAnswer)],
@@ -2612,6 +2612,7 @@ describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-
       [{ kind: 'voided', replayed: true }, { state: 'voided', body: '', note: '' }],
       [{ kind: 'already-void' }, refusedAs('already-void')],
       [{ kind: 'version-conflict' }, refusedAs('version-conflict')],
+      [{ kind: 'payments-recorded' }, refusedAs('payments-recorded')], // M7B-PAYMENTS-P1: the key's sealed payments_recorded
     ];
     const unresolved: Array<[VoidResult, string]> = [
       [{ kind: 'step-up' }, VOID_NOTE_TEXT.stepUp],
@@ -3284,6 +3285,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     { name: 'a sealed 409 invalid_state (already void)', answer: () => sealed(409, 'invalid_state'), refusal: 'already-void' as const, reread: true },
     { name: 'a chain 404 (it may be the host\'s, R21)', answer: () => chain(404, 'not_found'), refusal: 'not-found' as const, reread: true },
     { name: 'a sealed 409 write_conflict (the version)', answer: () => sealed(409, 'write_conflict'), refusal: 'version-conflict' as const, reread: true },
+    { name: 'a sealed 409 payments_recorded (M7B-PAYMENTS-P1)', answer: () => sealed(409, 'payments_recorded'), refusal: 'payments-recorded' as const, reread: false },
     { name: 'a chain 409 write_conflict (the tenant)', answer: () => chain(409, 'write_conflict'), refusal: 'tenant-conflict' as const, reread: false },
     { name: 'a 422 idempotency_key_reused', answer: () => chain(422, 'idempotency_key_reused'), refusal: 'key-reused' as const, reread: false },
     { name: 'a 400 invalid_request', answer: () => chain(400, 'invalid_request'), refusal: 'invalid' as const, reread: false },
@@ -3310,6 +3312,9 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await click('issued-void-keep');
     await waitFor(() => expect(box()).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(refusal === 'already-void' ? tid('issued-view-close') : tid('issued-view-void')));
+  });
+  it('SII-152. doc 15 §12.6: the payments_recorded refusal SII-90 shows is exactly the contract\'s sentence', () => {
+    expect(VOID_REFUSED_TEXT['payments-recorded']).toBe("This invoice has payments recorded, so it can't be voided. If a payment was recorded by mistake, reverse that payment first.");
   });
 
   const UNKNOWN = [

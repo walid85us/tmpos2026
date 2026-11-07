@@ -119,7 +119,16 @@
 // and detail keep theirs, whose adapter now asks 035's v2 reads, and the reads probe asks those two in place of 034's page
 // and get (probeInvoiceIssuing), still last.
 //
-// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, probeCustomerSearch, probeStoreDirectory, probeInvoiceDrafts, then probeInvoiceIssuing), answered over the same kernel. The routes are
+// M7B-PAYMENTS-P1 UPDATE (payments; docs/phase-4/15 §12.5). Two commands in `writes`, last, in this order: the payment record,
+// POST /api/v1/stores/{storeId}/invoices/{id}/payments, and the payment reversal, POST …/payments/{paymentId}/reversal
+// (invoicePayments.ts), each over its routine-audited store-scope mutator into migration 036 (postgresInvoicePayments.ts),
+// neither declaring an event; the void's mutator now calls 036's m7b_invoice_void_v2. Three reads in `reads`, last, in this
+// order: the record's action-only eligibility, the reversal's action-only eligibility (both portless, under their command's own
+// requirement, no recent sign-in) and the payments read, GET …/invoices/{id}/payments, over one new port, `invoicePayments`
+// (createPostgresInvoicePayments). Readiness: the reads probe asks 036's read last (probeInvoicePayments), after the issuing
+// reads'.
+//
+// Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, probeCustomerSearch, probeStoreDirectory, probeInvoiceDrafts, probeInvoiceIssuing, then probeInvoicePayments), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
 import { CUSTOMER_CREATE_MUTATOR } from '../persistence/postgresCustomerCreate.js';
@@ -140,6 +149,9 @@ import {
   INVOICE_ISSUE_MUTATOR, ISSUING_SETTINGS_UPDATE_MUTATOR, createPostgresInvoiceIssuing, createPostgresIssuingSettings, probeInvoiceIssuing,
 } from '../persistence/postgresInvoiceIssuing.js';
 import { INVOICE_VOID_MUTATOR } from '../persistence/postgresInvoiceVoid.js';
+import {
+  INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR, createPostgresInvoicePayments, probeInvoicePayments,
+} from '../persistence/postgresInvoicePayments.js';
 import type { SupervisedPgClient } from '../persistence/supervisedPgClient.js';
 import type { RuntimeDatabaseEndpoint } from '../platform-identity/databaseEndpoint.js';
 import { TENANT_OWNER_ROLE_ID, materializeTenantPermissions } from '../platform-identity/permissionCatalog.js';
@@ -162,6 +174,11 @@ import {
 } from '../runtime/invoiceIssuing.js';
 import type { InvoiceIssuePorts } from '../runtime/invoiceIssuing.js';
 import { INVOICE_VOID_ROUTE, createInvoiceVoidEligibilityRoute } from '../runtime/invoiceVoid.js';
+import {
+  INVOICE_PAYMENT_RECORD_ROUTE, INVOICE_PAYMENT_REVERSE_ROUTE, createInvoicePaymentEligibilityRoute, createInvoicePaymentReversalEligibilityRoute,
+  createInvoicePaymentsRoute,
+} from '../runtime/invoicePayments.js';
+import type { InvoicePaymentsPorts } from '../runtime/invoicePayments.js';
 import { ISSUING_SETTINGS_UPDATE_ROUTE, createIssuingSettingsReadRoute } from '../runtime/issuingSettings.js';
 import type { IssuingSettingsPorts } from '../runtime/issuingSettings.js';
 import type { RouteDefinition } from '../runtime/routes.js';
@@ -171,10 +188,11 @@ import type { ReadInventory, ReadTransactions } from './transactionKernel.js';
 /**
  * The tenant reads' ports: the customer directory's, the customer detail's (M7A-CUSTOMERS-P4), the customer profile's
  * (M7A-CUSTOMERS-P6), the role levels' read-backs (Customers, M7A-CUSTOMERS-P3-R2; Invoices, M5-INVOICES-AUTH-P1), the
- * store directory's and the invoice drafts' (M7B-INVOICES-P1), the issuing settings' and the issuing reads' (M7B-INVOICES-ISSUE-P1).
+ * store directory's and the invoice drafts' (M7B-INVOICES-P1), the issuing settings' and the issuing reads' (M7B-INVOICES-ISSUE-P1),
+ * and the payments read's (M7B-PAYMENTS-P1).
  */
 type TenantReadPorts = CustomerDirectoryPorts & CustomerDetailPorts & CustomerProfilePorts & RoleLevelDirectoryPorts & InvoiceRoleLevelDirectoryPorts
-  & StoreDirectoryPorts & InvoiceDraftPorts & IssuingSettingsPorts & InvoiceIssuePorts;
+  & StoreDirectoryPorts & InvoiceDraftPorts & IssuingSettingsPorts & InvoiceIssuePorts & InvoicePaymentsPorts;
 
 const notComposed = (): never => { throw new Error('read port not composed'); };
 /** A port that answers nothing: the routes' declarations are built over it, before any client exists. */
@@ -188,6 +206,7 @@ const INERT: TenantReadPorts = Object.freeze({
   invoiceDrafts: Object.freeze({ page: notComposed, get: notComposed }),
   issuingSettings: Object.freeze({ settings: notComposed }),
   invoiceIssuing: Object.freeze({ preview: notComposed, page: notComposed, invoice: notComposed }),
+  invoicePayments: Object.freeze({ payments: notComposed }),
 });
 
 /** A role's catalog default on `domain`: the tenant authorizer's own materializer, with no edit, unlimited. */
@@ -210,12 +229,13 @@ function withCatalogDefaults(domain: string, stored: (tenant: string, signal: Ab
  * then — only once that has refused — the profile's (M7A-CUSTOMERS-P6), then — only once that has refused — the name
  * search's (M7A-CUSTOMERS-P8), then — only once that has refused — the store directory's, then — only once that has
  * refused — the invoice drafts' two reads (M7B-INVOICES-P1), then — only once those have refused — the four issuing reads
- * (M7B-INVOICES-ISSUE-P1; 034's settings read and preview, and 035's v2 page and get since M7B-INVOICES-VOID-P1).
+ * (M7B-INVOICES-ISSUE-P1; 034's settings read and preview, and 035's v2 page and get since M7B-INVOICES-VOID-P1), then — only
+ * once those have refused — 036's payments read (M7B-PAYMENTS-P1).
  */
 const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal): Promise<boolean> =>
   (await probeCustomerDirectory(client, signal)) && (await probeCustomerDetail(client, signal)) && (await probeCustomerProfile(client, signal))
   && (await probeCustomerSearch(client, signal)) && (await probeStoreDirectory(client, signal)) && (await probeInvoiceDrafts(client, signal))
-  && probeInvoiceIssuing(client, signal);
+  && (await probeInvoiceIssuing(client, signal)) && probeInvoicePayments(client, signal);
 
 // The tenant route inventory, added to here and only here: the customer directory over its production adapter, the
 // customer create over its mutator (M7A-CUSTOMERS-P3), the role-level edit over its mutator and the role-level reads
@@ -229,13 +249,15 @@ const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal)
 // its store-scope mutator and its discard eligibility, a portless store-scope read under the discard's own requirement
 // (M7B-INVOICES-DISCARD-P1), and the owner's issuing-settings read and write, the issue eligibility, preview and command,
 // and the store's issued list and detail (M7B-INVOICES-ISSUE-P1), and the invoice void over its store-scope mutator and its
-// action-only eligibility, a portless store-scope read under the void's own requirement (M7B-INVOICES-VOID-P1). Every read
-// is in `reads`, so a read-only actor reaches the five eligibility routes and the preview too — and the evaluator denies it
-// create, edit, discard, issue and void, the same 403.
+// action-only eligibility, a portless store-scope read under the void's own requirement (M7B-INVOICES-VOID-P1), and the payment
+// record and reversal over their routine-audited store-scope mutators, their two action-only eligibilities and the payments
+// read over its session-bound read (M7B-PAYMENTS-P1). Every read is in `reads`, so a read-only actor reaches the seven
+// eligibility routes and the preview too — and the evaluator denies it create, edit, discard, issue, void, record and reverse,
+// the same 403.
 export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({
-  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftDiscardEligibilityRoute, createIssuingSettingsReadRoute, createInvoiceIssueEligibilityRoute, createInvoiceIssuePreviewRoute, createIssuedInvoiceListRoute, createIssuedInvoiceDetailRoute, createInvoiceVoidEligibilityRoute]),
-  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE, INVOICE_DRAFT_DISCARD_ROUTE, ISSUING_SETTINGS_UPDATE_ROUTE, INVOICE_ISSUE_ROUTE, INVOICE_VOID_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR, INVOICE_DRAFT_DISCARD_MUTATOR, ISSUING_SETTINGS_UPDATE_MUTATOR, INVOICE_ISSUE_MUTATOR, INVOICE_VOID_MUTATOR]) }),
-  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }), invoiceDrafts: createPostgresInvoiceDrafts({ client }), issuingSettings: createPostgresIssuingSettings({ client }), invoiceIssuing: createPostgresInvoiceIssuing({ client }) }),
+  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftDiscardEligibilityRoute, createIssuingSettingsReadRoute, createInvoiceIssueEligibilityRoute, createInvoiceIssuePreviewRoute, createIssuedInvoiceListRoute, createIssuedInvoiceDetailRoute, createInvoiceVoidEligibilityRoute, createInvoicePaymentEligibilityRoute, createInvoicePaymentReversalEligibilityRoute, createInvoicePaymentsRoute]),
+  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE, INVOICE_DRAFT_DISCARD_ROUTE, ISSUING_SETTINGS_UPDATE_ROUTE, INVOICE_ISSUE_ROUTE, INVOICE_VOID_ROUTE, INVOICE_PAYMENT_RECORD_ROUTE, INVOICE_PAYMENT_REVERSE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR, INVOICE_DRAFT_DISCARD_MUTATOR, ISSUING_SETTINGS_UPDATE_MUTATOR, INVOICE_ISSUE_MUTATOR, INVOICE_VOID_MUTATOR, INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR]) }),
+  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }), invoiceDrafts: createPostgresInvoiceDrafts({ client }), issuingSettings: createPostgresIssuingSettings({ client }), invoiceIssuing: createPostgresInvoiceIssuing({ client }), invoicePayments: createPostgresInvoicePayments({ client }) }),
   inert: INERT,
   probe: probeTenantReads,
   roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => createPostgresRoleLevels({ client }), held: readRoleLevels }),

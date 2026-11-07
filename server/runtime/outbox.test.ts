@@ -52,7 +52,9 @@ test('a record schema is flat, closed and bounded, and refuses a field named for
   ] as const) {
     assert.equal(parseRecordSchema(schema), null, label);
   }
-  for (const name of [...AUDIT_FORBIDDEN_FIELDS, 'credential', 'clientCredentials', 'sessionId', 'csrfToken', 'idempotencyKey', 'apiKey', 'bearerToken', 'cookieValue', 'connectionUri', 'dsn', 'rawBody', 'cvv', 'pin', 'otp', 'jwt']) {
+  for (const name of [...AUDIT_FORBIDDEN_FIELDS, 'credential', 'clientCredentials', 'sessionId', 'csrfToken', 'idempotencyKey', 'apiKey', 'bearerToken', 'cookieValue', 'connectionUri', 'dsn', 'rawBody', 'cvv', 'pin', 'otp', 'jwt',
+    // M7B-PAYMENTS-P1: track data and the PIN block, in any case or position, beside cvv, cvc and pin.
+    'cvc', 'track1', 'cardTrack2', 'pinBlock', 'customerPinblock', 'TRACK1']) {
     assert.equal(parseRecordSchema({ [name]: { type: 'boolean' } }), null, `a field named ${name} is refused`);
   }
   assert.ok(parseRecordSchema({ company: { type: 'boolean' }, footprint: { type: 'boolean' } }), 'short names are refused whole, never as a part of another word');
