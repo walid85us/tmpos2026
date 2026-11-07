@@ -1,6 +1,12 @@
 # 15 — Recording payments against an issued store invoice: decision pack
 
-**Status: PROPOSED — NOT ADOPTED (stage M7B-PAYMENTS-D1-P0, documentation only).**
+**Status: ADOPTED (owner decisions of 2026-11-07, stage M7B-PAYMENTS-P1; [10](./10-architecture-decision-records.md) ADR-52).**
+- The owner chose D-PAY-1 to D-PAY-10 and accepted amendments A1, A2 and A3; A4 is not adopted and not needed under D-PAY-8 A. §12.1 records each choice, and §12 is the P1 implementation contract.
+- Adoption is not delivery. At adoption nothing of §12 is committed, run or deployed; the stage records its delivered state in §12 and in [08](./08-production-gate-and-risk-register.md).
+- Every production gate stays OPEN (37), including G-PCI. Nothing here is a PCI, legal or production-readiness claim.
+- The text from here to §11 is the proposal as written at D1-P0. It is kept as history, except for two wording corrections marked "(narrowed 2026-11-07)" (§7's Effect, §11's D-PAY-6 rationale) and one note above §11's table. §12 reconciles anything in it that the P1 contract refines.
+
+**Original status at D1-P0 (history): PROPOSED — NOT ADOPTED (stage M7B-PAYMENTS-D1-P0, documentation only).**
 - Recording payments is not available in the product.
 - This document adopts no policy. It adds no payment, amount due, permission, route, read change, grant or migration.
 - Pushing it is not approval, and a green CI run is not approval either. Every recommendation below waits for the owner's explicit choice in §11.
@@ -337,7 +343,7 @@ No other adopted text is replaced. Doc 13's decisions, reason codes and held-att
 - The record and reverse routines insert their own `audit_event` row in the same transaction, after their last refusal. Each raises unless that insert wrote exactly one row, which guards against a trigger silently dropping it.
 - Every value in the audit row except the correlation id is derived by the routine itself: actor, tenant, store, permission, action and the fixed sentence. The correlation id must be a canonical uuid.
 - The store does not write a second audit record for these kinds (I2).
-- **Effect.** Every committed payment or reversal, through any permitted entry point, has an audit record, which meets [05] §5's audit rule.
+- **Effect.** Every committed payment or reversal, through any permitted entry point, has an audit record, which meets [05] §5's audit rule. (Narrowed 2026-11-07.) This addresses audit coupling only. It does not close the other direct-call bypasses listed below.
 - **Apply-time checks for 036.** The routine owner can insert into `public.audit_event` (whether it can is not established), and row security is not forced on that table. This follows the pattern of 035's prerequisite checks.
 - **What A does not do:**
   - A direct call still commits with no idempotency completion, CSRF check, rate limit or chain step-up. **So under A, payments still widen DA-118, in an audited form.**
@@ -456,6 +462,8 @@ Only the owner's returned choices authorize adopting any of this policy or start
 
 Every recommendation is PROPOSED and unadopted. The Owner choice column is left for the owner.
 
+*(2026-11-07: the owner's choices are recorded in §12.1. The table is kept as proposed, with the "—" cells unchanged as history.)*
+
 | ID | Existing constraint | Realistic options | Recommendation | Rationale / trade-off | Prerequisite (and what it blocks) | Owner choice |
 |---|---|---|---|---|---|---|
 | **D-PAY-1** Amount due and currency | Immutable USD Total in integer cents; no amount due, balance, discount or deposit | **A** derived: due = Total; remaining = Total − active payments, never stored; voided → 0. **B** a stored balance. **C** a configurable due | **A**, with tax included and discounts, deposits, balances, tips and rounding excluded | One source of truth that the snapshot already fixes; B can drift; C rewrites what was invoiced | A1. Blocks every amount check and read | — |
@@ -463,8 +471,155 @@ Every recommendation is PROPOSED and unadopted. The Owner choice column is left 
 | **D-PAY-3** Methods | G-PCI; [05] §5's data boundary; no provider | **A** `cash` and `external_card_terminal`, recorded by staff, no reference. **B** A plus cheque, bank transfer or `other`. **C** wait for the integrated flow. **D** A plus a bounded, non-card-shaped terminal reference, with refusal tests | **A** | An assertion, not a settlement. A reference is a card-number channel, and D reduces that risk but does not remove it | Does not satisfy G-PCI. Blocks the method CHECK and the labels | — |
 | **D-PAY-4** History and correction | Append-only precedent | **A** append-only payments plus a whole-payment reversal with six closed reasons, and no back-dating. **B** record only. **C** editable payments | **A** | B leaves mistakes uncorrectable; C destroys history; refunds stay deferred | The reason list. Blocks the reversal and the record shapes | — |
 | **D-PAY-5** Void interaction | D-VOID-1: any issued invoice is voidable | **A** void refused while a payment is active; recording on a voided invoice refused. **B** void allowed. **C** void auto-reverses | **A** | B shows money on a void document; C hides it. A blocks voiding a genuinely paid wrong invoice until refunds exist | A2, A3. Blocks 036's void replacement | — |
-| **D-PAY-6** Permissions and sign-in | Seven store keys; levels stored for Customers and Invoices only; DA-119 | Record at **A** Approve + Customers View; **A′** A plus a recent sign-in; **B** Create + Customers View | **A** for recording; reversal at Approve + Customers View, sensitive, with a reason; reading as issued-invoice readers | A matches issue's holders, but a hijacked idle session could record. A′ closes that at the cost of re-authentication. B widens who asserts money arrived | I1. Blocks the keys and the guard | — |
+| **D-PAY-6** Permissions and sign-in | Seven store keys; levels stored for Customers and Invoices only; DA-119 | Record at **A** Approve + Customers View; **A′** A plus a recent sign-in; **B** Create + Customers View | **A** for recording; reversal at Approve + Customers View, sensitive, with a reason; reading as issued-invoice readers | A matches issue's holders, but a hijacked idle session could record. A′ narrows that to sessions with a recent sign-in, at the cost of re-authentication; it does not stop a hijacked fresh session or an issuer-key holder (narrowed 2026-11-07). B widens who asserts money arrived | I1. Blocks the keys and the guard | — |
 | **D-PAY-7** Atomicity, concurrency, replay | Idempotency 24 h; header lock pattern; no SAVEPOINT; sealed-slot list | **A** header FOR UPDATE under READ COMMITTED, separate checks, attempt id unique per invoice, record = create and reverse = update. **B** A without the attempt id. **C** a version on the wire | **A** | Payments are not one per invoice, so a new-key resend can duplicate; B bounds that only by the remaining amount | I3. Blocks the command contract | — |
 | **D-PAY-8** Direct-call prerequisite | DA-118, DA-119, DA-132 OPEN; TypeScript audit only; [05] §5 audit rule | **A** routines write their own audit record (bounded). **B** a wider DA-118 remedy first. **C** inherit the class | **A**, required before PAYMENTS-P1 | A makes payments self-auditing but still widens DA-118 in audited form; B delays payments; C needs explicit deferral and A4 | I2 and a kernel review. Blocks **PAYMENTS-P1 as a whole** | — |
 | **D-PAY-9** Retention | DA-187 undecided; F-5, F-2 missing | **A** keep everything as an interim default; 036's down refuses once data exists. **B** set a period now | **A** | B needs legal input the repository lacks; reversal erases nothing; staff ids are personal data | F-5, F-2, G-PRIVACY. Blocks the final retention policy and live use, not 036's interim down | — |
 | **D-PAY-10** P1 boundary | VOID-P1/P2 split; exact shop decoders | **A** P1 server plus the payments read plus the shop's void decoder; recording UI in P2. **B** everything in one stage | **A** | It isolates the money boundary's evidence, and the void's refusal is not left undecodable | D-PAY-1 to D-PAY-9. Blocks stage planning | — |
+
+## 12. P1 implementation contract (ADOPTED, M7B-PAYMENTS-P1)
+
+**Status of this section: ADOPTED by the owner's stage instruction of 2026-11-07 ([10](./10-architecture-decision-records.md) ADR-52); implementation in progress at adoption.** It is the contract stage M7B-PAYMENTS-P1 implements, written before any shared code changes. At adoption none of it is committed, run or deployed. §3 to §8 apply as reconciled here; each refinement is named. The names below are fixed, no longer illustrative.
+
+### 12.1 The owner's choices (2026-11-07)
+
+| Decision | Choice | What it fixes |
+|---|---|---|
+| D-PAY-1 | **A** | Amounts are derived in USD integer cents (§12.4). |
+| A1 | **ACCEPTED** | A separate payments read treats the version-1 Total as the starting amount due. The issued list and detail answers, the snapshot and `snapshotVersion` 1 are unchanged. It is an explicit amendment of ADR-50 decision 1 and D-ISS-1, not a silent reinterpretation; no shop text says "Unpaid". |
+| D-PAY-2 | **A** | Partial recording is allowed; an applied overpayment is refused; tendered cash and change are not stored. |
+| D-PAY-3 | **A** | `cash` and `external_card_terminal`, entered by staff, with no reference or card-data field. |
+| D-PAY-4 | **A**, the six reasons **ACCEPTED** | Append-only records and whole-recording reversal; no back-dating. |
+| D-PAY-5 | **A** | No void while an active payment exists; no recording on a voided invoice. |
+| A2, A3 | **ACCEPTED** | The void restriction, and `payments_recorded` as the void's sealed refusal. |
+| D-PAY-6 | **A** | Recording at Invoices ≥ Approve with Customers ≥ View, no recent sign-in. Reversal is its own sensitive capability at the same levels, with a sign-in within 10 minutes and a required closed reason. Reads use `view_issued_invoices`. |
+| D-PAY-7 | **A** | The shared issued-header lock, separate checks, an attempt id unique per (tenant, store, invoice), and the existing HTTP idempotency. |
+| D-PAY-8 | **A** | The two payment routines write their own audit record atomically. §7's residual risks are kept for bounded development. A4 is not adopted and not required. |
+| D-PAY-9 | **ACCEPTED** (interim default) | Nothing is deleted; 036's down refuses once payment evidence exists. Final retention and live use stay unresolved (F-5, F-2, G-PRIVACY). |
+| D-PAY-10 | **A** | Backend, the payments read and the void's compatibility in P1; the shop's recording and reversal controls in P2. |
+
+**Bounded clarifications of the stage instruction.**
+1. **D-PAY-10's row.** Checked: its recommendation, rationale and prerequisite cells are complete in §11, so the row is unchanged.
+2. **Security wording.** Self-auditing addresses audit coupling, not every direct-call bypass. A′ (not chosen) would reduce stale-session exposure; it would not stop a hijacked fresh session or an issuer-key holder. §7 and §11 carry the narrowed text; the choice stays A.
+3. **Events and outbox.** Resolved from adopted contracts, not a new policy. No approved event contract exists for payments, and none is invented, as for the customer create ([10](./10-architecture-decision-records.md) ADR-34), the draft discard, the issue and the void. The three commands declare `events: []`: nothing is enqueued, no outbox row is written, and there is no worker, publisher or delivery promise. The tenant root composes no delivery port. The payment and reversal rows are themselves the append-only record of each manual payment's transitions ([05](./05-canonical-data-ownership-and-api-db-contracts.md) §5's `payment_event` role for a manual recording); integrated flows will need their own decision.
+
+**A2's eligibility text, reconciled.** §6 said "the void eligibility read … gain[s] the refusal". The adopted void eligibility is action-only and target-blind ([13](./13-m7b-invoice-void-and-correction-decision-pack.md) §12.4), and the stage instruction keeps eligibility advisory. So the eligibility answer is unchanged and is not proof that an invoice has no active payment; the POST decides `payments_recorded`, and the shop's void flow decodes it.
+
+### 12.2 Names
+
+| Item | Name |
+|---|---|
+| Migration | `036_m7b_invoice_payment.up.sql` and `.down.sql`, schema `tmpos_invoice_payment` (the next free number: the folder ends at 035) |
+| Tables | `invoice_payment`, `invoice_payment_reversal` |
+| Routines (EXECUTE to `tmpos_app`) | `m7b_invoice_payment_record`, `m7b_invoice_payment_reverse`, `m7b_invoice_void_v2`, `m7b_invoice_payments_get` |
+| Granted to nobody | `m7b_invoice_payment_guard`, `m7b_invoice_payment_truncate_guard`, `m7b_invoice_payment_reversal_guard`, `m7b_invoice_payment_reversal_truncate_guard`, the anchor `m7b_invoice_payment_prerequisites` |
+| Store permissions | `record_invoice_payments` (not sensitive), `reverse_invoice_payments` (sensitive) |
+| Command kinds | `store.invoice_payment.record` (create), `store.invoice_payment.reverse` (update); aggregate `invoice_payment`; context scope `store`; also the audit action ids |
+| Audit additions | column `public.audit_event.subject_invoice_payment_id`; index `idx_audit_event_subject_invoice_payment_occurred`; CHECK `audit_event_metadata_no_card_data_keys_chk` |
+| Server modules | `server/runtime/invoicePayments.ts`, `server/persistence/postgresInvoicePayments.ts` |
+
+**Methods**, pinned in this order in the database CHECK, the server enum and the audit text: `cash` ("Cash"), `external_card_terminal` ("Card on a separate terminal").
+
+**Reversal reasons**, pinned in this order: `recorded_in_error` ("Recorded by mistake"), `wrong_amount` ("Wrong amount"), `wrong_method` ("Wrong method"), `wrong_invoice` ("Wrong invoice"), `duplicate` ("Payment recorded twice"), `other` ("Other reason"). Changing either list is a migration.
+
+### 12.3 HTTP
+
+| Route | Permission | Recent sign-in | Body | Idempotency |
+|---|---|---|---|---|
+| `POST /api/v1/stores/{storeId}/invoices/{id}/payments` | `record_invoice_payments` | none | JSON ≤ 1,024 bytes, exactly `{"expectedTenant", "attemptId", "amountCents", "method"}` | required |
+| `GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility` | `record_invoice_payments` | none | none | none |
+| `POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal` | `reverse_invoice_payments` | **required** | JSON ≤ 1,024 bytes, exactly `{"expectedTenant", "reasonCode"}` | required |
+| `GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility` | `reverse_invoice_payments` | none | none | none |
+| `GET /api/v1/stores/{storeId}/invoices/{id}/payments` | `view_issued_invoices` | none | none; query empty or exactly `?after=<payment id>` | none |
+| `POST /api/v1/stores/{storeId}/invoices/{id}/void` (changed) | `void_issued_invoices` | required | unchanged | required |
+
+Every route is a tenant session route with a trusted store context, CSRF, session binding and the per-client limit, as the void's. Server-derived actor, tenant, store and times are never caller assertions.
+
+- **Body values.** `expectedTenant` and `attemptId`: canonical lowercase uuids. `amountCents`: a JSON safe integer, 1 to 2^53 − 1. `method`: one of the two codes. `reasonCode`: one of the six. Any other key, a missing key, a version, an actor, a time, a reference or a card-shaped field is the 400 `invalid_request` after the key is taken.
+- **Targets.** `{id}` (the issued invoice) and `{paymentId}` must be canonical lowercase uuids in the outbox's aggregate-id shape; otherwise 400 after the key. The reversal is the route table's one template with two id segments. Its idempotency fingerprint appends the invoice id and then the payment id, so one key sent to another invoice or another payment is a 422, never a replay. Every existing fingerprint is unchanged.
+- **Record answers.** Sealed and replayable: `201 {"payment": {"id", "invoiceId", "attemptId", "amountCents", "method"}}` (the runtime's new payment id; built by the planner, nothing read back, no Location header); `409 {"error": "already_recorded"}`; `409 {"error": "invalid_state"}` (voided); `409 {"error": "amount_exceeds_remaining"}`; `409 {"error": "write_conflict"}` (carried by every command, unreachable here).
+- **Reversal answers.** Sealed: `200 {"payment": {"id", "invoiceId", "status": "reversed"}}`; `409 invalid_state` (already reversed); `409 write_conflict` (a version other than 1, unreachable through HTTP because the planner pins 1).
+- **Void answers.** Unchanged, plus the sealed `409 {"error": "payments_recorded"}`.
+- **Unsealed answers**, the chain's `{error, requestId}`: `409 write_conflict` (the tenant changed); `404 not_found` (missing, another store's or another tenant's invoice, or a payment not of this invoice, one shape); 400, 401, 403 (`forbidden`, `step_up_required`), 413, 415, 429 with their existing words; `409 request_in_progress`; `422 idempotency_key_reused`; `503 service_unavailable` for every outage, routine refusal, stale session or sign-in after the waits, timeout or ambiguous COMMIT (the outcome unknown; never a claimed rollback). Nothing re-sends automatically.
+- **Eligibility.** Each answers `200 {"eligibility": "allowed"}` exactly when the chain admits its permission at that store now. Action-only and target-blind: not proof that the invoice exists, is not voided, has a remaining amount or a reversible payment, or that the sign-in is recent enough for the reversal.
+- **The payments read.** `200` with exactly these members, in this order:
+  - `invoice`: `{"id", "status"}`, status `issued` or `voided`;
+  - `amounts`: `{"currency": "USD", "dueCents", "appliedCents", "remainingCents"}`;
+  - `paymentStatus`: one of the five words of §3 D-PAY-1;
+  - `payments`: a page of at most 50, oldest first by (recorded time, payment id), each `{"id", "attemptId", "amountCents", "method", "recordedAt", "reversal"}`, where `reversal` is `null` or `{"reversedAt", "reasonCode"}`;
+  - `nextCursor`: the last payment id of a full page when more exist, else `null`.
+
+  Times use the issued reads' exact encoding (UTC, microseconds, `Z`). The amounts and the word cover the invoice's complete history, never one page. The page, the amounts, the word and the invoice's status come from one statement and one snapshot, so a concurrent record, reversal or void is seen wholly or not at all. No staff identifier, audit field or correlation id is returned. Refusals: `400 invalid_request` (any query but `after`, a bad id, an unknown cursor); `403 forbidden`; `404 not_found`; `503`. The issued list and detail answers stay byte-identical.
+
+**Precedence, record (the runtime's real order).** The chain's checks → the body read → the key and its acquisition (replay, `request_in_progress`, `422`) → the 400 plan → in the transaction: the lease fence (503) → revalidation, `record_invoice_payments` decided again (503) → the routine: authority (503), tenant (409 unsealed), the invoice header (404), levels re-read and session expiry after the waits (503), **reused attempt on this invoice → sealed `already_recorded`**, **voided → sealed `invalid_state`**, **amount above remaining → sealed `amount_exceeds_remaining`**, then the payment and its audit record → the completion → 201.
+
+**Precedence, reversal.** The chain (including `403 step_up_required` past 10 minutes) → body → key → plan → fence → revalidation with the deadline → the routine: authority, tenant, the path invoice's header (404), the payment by (payment, invoice, tenant, store) (404), levels re-read, session expiry and the 10-minute sign-in after the waits (503), **already reversed → sealed `invalid_state`**, **version other than 1 → sealed `write_conflict`**, then the reversal and its audit record → the adapter's sign-in re-check (503) → the completion → 200.
+
+**Precedence, void.** Doc 13 §12.3 unchanged to "already void → sealed `invalid_state`", then **an active payment → sealed `payments_recorded`**, then the version → `write_conflict`.
+
+### 12.4 Database (migration 036, schema `tmpos_invoice_payment`)
+
+- **`invoice_payment`.** `payment_id uuid` primary key (the runtime's new aggregate id); `tenant_id`, `store_id`, `invoice_id uuid not null`; `attempt_id uuid not null`; `amount_cents bigint not null` CHECK 1 to 9,007,199,254,740,991; `method text collate "C" not null` CHECK the two codes; `recorded_at timestamptz not null` (the routine's `clock_timestamp()` after its last lock); `recorded_by uuid not null` (never returned). Composite foreign key `(invoice_id, tenant_id, store_id)` onto 034's `issued_invoice_scope_key`, RESTRICT both ways. UNIQUE `(invoice_id, tenant_id, store_id, attempt_id)`: the attempt is permanently unique within its tenant, store and invoice. UNIQUE `(payment_id, invoice_id, tenant_id, store_id)` as the reversal's reference target.
+- **`invoice_payment_reversal`.** `payment_id uuid` primary key (at most one reversal per payment); `tenant_id`, `store_id`, `invoice_id uuid not null`; `reason_code text collate "C" not null` CHECK the six; `reversed_at timestamptz not null`; `reversed_by uuid not null` (never returned). Composite foreign key `(payment_id, invoice_id, tenant_id, store_id)` onto the payment's key, RESTRICT both ways.
+- **No other column.** No stored balance, due or status, no back-dated or effective time, no reference, free text or card field, no tendered amount or change.
+- **Guards.** Both tables: row security on, no policy, no runtime-role privilege. ENABLE ALWAYS BEFORE INSERT OR UPDATE OR DELETE row guards refuse every update and delete, and admit an insert only for its own scope (a payment of an issued invoice of the same tenant and store, recorded at or after the issue; a reversal of a payment of the same invoice, tenant and store, reversed at or after the recording). ENABLE ALWAYS BEFORE TRUNCATE guards refuse every truncate. Not covered, as for 033 to 035: the table owner disabling a trigger, replaced functions, DDL and a superuser.
+- **Amounts.** For an issued invoice: due = `total_cents`; applied = the sum of unreversed `amount_cents`; remaining = due − applied, all in `numeric`. For a voided invoice: due, applied and remaining are 0 and the history stays. A read that finds applied above due, or an unreversed payment on a voided invoice, raises (503) rather than hide it.
+- **`m7b_invoice_payment_record(p_session_key text, p_store_id uuid, p_invoice_id uuid, p_expected_tenant uuid, p_payment_id uuid, p_attempt_id uuid, p_amount_cents bigint, p_method text, p_correlation_id uuid)`.** plpgsql, VOLATILE, SECURITY DEFINER, search path `pg_catalog, pg_temp`, `row_security` off. In order: every argument (fixed-text `invalid_parameter_value`; the correlation id a version-4 uuid); READ COMMITTED (else 55000); the caller derived as 035's void derives it → `refused`; both levels unlocked (Invoices ≥ Approve, Customers ≥ View) → `refused`; the tenant precondition → `tenant_mismatch`; **the issued header FOR UPDATE** by id, derived tenant and path store → `not_found`; key 530030 SHARED and the levels re-read (editable roles) → `refused`; session expiry on `clock_timestamp()` after the last wait → `refused`; separate statements: the attempt on this invoice → `already_recorded`; a void record → `invalid_state`; active sum + amount > Total → `amount_exceeds_remaining`; then one payment insert, its verification read, one audit insert and its verification; `applied` with tenant, store, actor, membership, payment, invoice and the audit event id. Nothing is written before the last refusal (DA-36).
+- **`m7b_invoice_payment_reverse(p_session_key text, p_store_id uuid, p_invoice_id uuid, p_payment_id uuid, p_expected_tenant uuid, p_expected_version bigint, p_reason_code text, p_correlation_id uuid)`.** The same attributes. In order: arguments (version 1 to 2^53 − 2; the six reasons); READ COMMITTED; caller; levels; tenant; **the path invoice's header FOR UPDATE** → `not_found`; the payment by (payment, invoice, tenant, store) → `not_found`; key 530030 and the levels re-read; on one `clock_timestamp()` after the last wait, the session's expiry and its `authenticated_at` (NULL, more than 5,000 ms ahead, or older than 600,000 ms → `refused`; exactly at the bound holds) — the routine's own check, as 035's step 6; separate statement: a reversal exists → `invalid_state`; a version other than 1 → `conflict`; one reversal insert and verification, one audit insert and verification; `applied` with tenant, store, actor, membership, version 2, payment and the audit event id (a payment's lifecycle version is 1 while active and 2 once reversed, derived, never stored).
+- **`m7b_invoice_void_v2`.** 035's void, argument for argument and step for step, with one more separate statement after "already void" and before the version: an unreversed payment of this invoice → `payments_recorded`. It writes no audit record (as 035's). 036 revokes `tmpos_app`'s EXECUTE on 035's `m7b_invoice_void`, so A2 cannot be bypassed through the older entry point; 035's function stays in place for the rollback.
+- **`m7b_invoice_payments_get(p_session_key text, p_expected_tenant uuid, p_expected_store uuid, p_invoice_id uuid, p_after_payment_id uuid, p_limit integer)`.** STABLE, SECURITY DEFINER, one snapshot, locks nothing. Its authority is 035's `m7b_issued_invoice_get_v2`'s, called inside it: `denied` and `not_found` are that read's words; `cursor_unknown` when `p_after_payment_id` is not a payment of this invoice; otherwise `payments` rows (one per payment on the page, each also carrying the header, amounts and word; one row with null payment columns for an empty page). `p_limit` 1 to 51.
+- **The audit record each payment routine writes**, after its last refusal, in the same transaction: `request_id` = the correlation id; `occurred_at` default `now()` (the transaction start); the derived actor, `scope_type` `store`, tenant and store; `action_id` = the kind; `required_permission` = the permission; `decision` `allow`; `result_status` `succeeded`; `reason_code` `invoice_payment_recorded_<method>` or `invoice_payment_reversed_<reason>`; the fixed sentence "Payment recorded against an issued invoice. Method: <label>." or "Recorded payment reversed. Reason: <label>."; `source_of_truth` `invoice_payment_routine`; `evaluated_by` `m7b_invoice_payment_routine@v1`; `evidence_level` `durable_compliance_event`; metadata `{}`; `subject_invoice_payment_id` = the payment and no other subject. The routine raises unless exactly one row was inserted and reads it back, so a trigger that silently drops it rolls the money record back. No amount, customer, seller or line text is in the audit record; the payment row holds the amount.
+- **Grants.** USAGE on `tmpos_invoice_payment` and EXECUTE on the four routines to `tmpos_app`; nothing else to any runtime role. The startup preflight requires exactly 001–036 and the grant list loses `tmpos_app`'s EXECUTE on 035's void and gains the USAGE line and the four EXECUTE lines.
+- **Lock order.** Record and reverse: the prefix (fence → 016's hold → session and ledger → issuer key → membership and store FOR SHARE) → **the issued header FOR UPDATE** (035's step-4 slot) → for the reversal, the payment read → key 530030 SHARED → the payment or reversal reads → the insert (its foreign-key check takes FOR KEY SHARE on a header, or a payment row, this transaction already holds or that nothing locks exclusively) → the audit insert → (the runtime) completion → COMMIT. The void v2: 035's order, with plain payment reads after the header lock. Records, reversals and voids of one invoice serialize on its header; no new wait cycle is introduced. Deadlock freedom is argued per path, not proven.
+- **Apply.** ACCESS EXCLUSIVE locks first, before any check, in the writers' order (`public.store`, the role tables, `tmpos_customer.customer`, the draft tables, 034's four issuing tables, 035's void table, `public.audit_event`); then READ COMMITTED; 035's objects exactly as 035 left them (the void routine and its two-entry ACL, the v2 get, the void table, the anchor); none of 036's objects; the runtime roles; and the applier's reach: EXECUTE on 016's hold and admission read and on 035's v2 get, ownership (or the owner's role) of every table the definers read, lock or insert into, `public.audit_event` and the void table included, none with forced row security, and INSERT on `public.audit_event`. Fixed-text refusals. No ledger clause (R-GATE-2).
+- **The audit table's additions.** `subject_invoice_payment_id uuid` (nullable, no default, no FK; comment), its partial index, and the CHECK refusing the metadata keys `cvv`, `cvc`, `track1`, `track2` and `pinBlock` (002's CHECK is unchanged). The audit writer's table-wide INSERT (005) covers the column.
+- **Anchor.** `m7b_invoice_payment_prerequisites()` names only 035's `m7b_invoice_void` and `m7b_issued_invoice_get_v2`, so 035's down fails closed (2BP01) while 036 is applied; the payment foreign key also blocks 034's drop. Roll 036 back first.
+- **Down.** The same locks first; READ COMMITTED; it refuses, changing nothing, while any payment, any reversal, any audit record of the two payment actions, or any audit record with `subject_invoice_payment_id` set exists. Otherwise it drops 036's objects, the audit column, index and CHECK, and restores `tmpos_app`'s EXECUTE on 035's `m7b_invoice_void` exactly. It never deletes a row, so after the first payment it is one-way.
+- **Operations.** Apply and rollback run with the tenant runtime stopped, as 034's and 035's do. The preflight refuses a mismatched start either way.
+
+### 12.5 Kernel, store and composition
+
+- **Contracts.** The record contract declares `paymentRefusals: 'record'` (a create): its command carries the three usual slots with `invalidState` sealed (the create-mode `invalid_state`), plus `alreadyRecorded` and `amountExceedsRemaining`. The void contract declares `paymentRefusals: 'void'`: its command adds `paymentsRecorded`. Every other command's slots are unchanged. The three words join the runtime's reserved, sealed 409 words.
+- **Closed kind lists, extended by name.** `NOT_FOUND_CREATE_KINDS` gains `store.invoice_payment.record`; `PRECONDITION_UPDATE_KINDS` gains `store.invoice_payment.reverse` (`server/runtime/app.ts` and `server/persistence/postgresTransactionalStore.ts`, kept equal).
+- **Routine-audited dispatch (I2).** The store holds a closed literal list of the two payment kinds. A mutator must declare `routineAudited: true` exactly when its kind is in that list, or the store refuses to build. For those kinds alone the store writes no audit record of its own; for every other kind it writes exactly as before. Nothing in a request, a plan, a change set or a routine's answer can change this. The store hands the routine-audited mutators the command's correlation id; the mutator accepts `applied` only with a canonical audit event id from the routine. The audit writer refuses the two payment actions on its TypeScript path.
+- **Mutators.** One call each into the routines, with the revalidated store context and session key. The record checks that `applied` names this transaction's tenant, store, actor and grant, the command's payment id and the path invoice. The reversal checks the same and version 2, then re-judges the sign-in deadline on the database clock (the void's rule). `tenant_mismatch` → the rolled-back precondition; `not_found` → the rolled-back 404; every sealed word → its completion alone. Anything else is a mismatch (503).
+- **Composition.** Five new routes (36 in the tenant entry; store templates 15 → 20; idempotent store commands 5 → 7); the payments read over one new port, `invoicePayments`, with a readiness probe asking 036's read last; the void's mutator calls `m7b_invoice_void_v2`.
+- **Redaction.** `AUDIT_FORBIDDEN_FIELDS` and the safe log's key fragments gain CVV/CVC, track1/2 and PIN block; the outbox's forbidden names, which already refuse `cvv`, `cvc` and `pin`, gain track1/2 and the PIN block. Each with tests ([05](./05-canonical-data-ownership-and-api-db-contracts.md) line 38).
+
+### 12.6 Shop (P1 minimum)
+
+The void client decodes the sealed `409 payments_recorded` as its own result, and the void flow shows, exactly: "This invoice has payments recorded, so it can't be voided. If a payment was recorded by mistake, reverse that payment first." Layout, every other refusal, session invalidation and held-attempt recovery are unchanged. No recording or reversal control, client method or read is added (P2). `src/components/POS.tsx` and every demo POS state are untouched.
+
+### 12.7 Attempts, retries and failures
+
+- Same key, identical bytes → the stored answer replayed under the chain's current checks; same key, other bytes or another target → 422.
+- A new key reusing an attempt on the same invoice → sealed `already_recorded`, also after that payment's reversal and after the 24-hour key retention. The same attempt id on another invoice is a different attempt.
+- The attempt rule stops one attempt being recorded twice. It does not verify funds and does not detect two separately asserted receipts.
+- Timeout, connection loss or an ambiguous COMMIT → 503, outcome unknown; cleanup is not proof of rollback; no automatic resend. The server binds a key to the principal, not the session; P2's held attempt must become unsendable on a sign-out or session replacement, as the void's does.
+
+### 12.8 Planned evidence (every row PLANNED — NOT RUN at adoption)
+
+| ID | What it proves | Layers |
+|---|---|---|
+| PAY-01 | Full, partial and mixed-method arithmetic, Total 0, the 2^53 − 1 bound, input refusals | routine, HTTP, unit |
+| PAY-02 | Tenant and store isolation; edited grants; session and standing changes; the reversal's sign-in after a wait | routine, HTTP |
+| PAY-03 | Scoped foreign keys, append-only guards (normal and replica mode), permanent attempt uniqueness, one reversal per payment | routine |
+| PAY-04 | Replay, 422, the sealed 409s and their precedence, an attempt retried after a reversal and after key expiry | HTTP, unit |
+| PAY-05 | Concurrent recordings never exceed the Total; record, reverse and void races obey the header lock | routine, HTTP |
+| PAY-06 | REPEATABLE READ and SERIALIZABLE are refused | routine |
+| PAY-07 | Direct calls enforce scope, amount, lifecycle, attempt and the reversal's sign-in, and write exactly one audit record | routine |
+| PAY-08 | A failed or silently dropped audit insert commits no money record; one HTTP success writes one audit record and its completion atomically | routine, HTTP |
+| PAY-09 | No other kind can skip its audit; their audit behaviour is unchanged | unit, HTTP |
+| PAY-10 | No outbox row is written | routine, HTTP |
+| PAY-11 | The read is one consistent snapshot, keeps history, pages correctly and exposes no staff id | routine, HTTP |
+| PAY-12 | The void's `payments_recorded`, its old routine revoked, the shop decoder and message; the issued wire contracts unchanged | routine, HTTP, client, section |
+| PAY-13 | 036's prerequisites, exact grants, anchor, empty rollback restoring 035's grant, and the data-preserving down refusal | migration, preflight |
+| PAY-14 | The card-data keys are refused by the audit CHECK and writer, and redacted by the safe log and outbox guards | unit, routine |
+| PAY-15 | Every existing suite, pin and CI step still passes | all |
+
+Evidence rules: disposable PostgreSQL and the real tenant entry; races use separate connections and deterministic lock barriers; refusals may keep their established lease and audit bookkeeping but never the refused money effect; failed, skipped and resource-limited runs are recorded, never rewritten by a later green run.
+
+### 12.9 Carried, and not claimed
+
+- **Register (P1 must amend, all stay OPEN).** DA-118 (widened by the two payment routines in audited form, and by the replacement void unaudited), DA-119 (direct level sets change who can record and reverse), DA-132 (the payments read joins the direct-read class), DA-183 and DA-184 (§3 notes), DA-186 (payments and amounts due decided; refunds, credit notes and the rest open) and DA-187 (D-PAY-9's interim default). DA-36, DA-114, DA-93 and DA-94 are unchanged.
+- **Not claimed.** Shop recording or reversal controls (P2); M7b completion; PCI validation or any SAQ; any jurisdiction's rules; statutory retention; event delivery; deadlock freedom; a managed migration; deployment; production readiness. All 37 gates stay OPEN.

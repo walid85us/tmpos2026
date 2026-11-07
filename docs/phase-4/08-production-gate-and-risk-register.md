@@ -1210,6 +1210,8 @@ What migration 014 and `server/persistence/postgresRateLimiter.ts` do in operati
 - **Rows it bears on, unchanged.** DA-186 stays undecided until the owner returns the pack's §11. DA-187 is unchanged: the pack proposes only an interim default and names the missing inputs F-5 and F-2. DA-36, DA-114, DA-118, DA-119 and DA-132 stay OPEN. The pack records that PAYMENTS-P1 would widen DA-118 (in an audited form under D-PAY-8 A; not at all under a D-PAY-8 B that covers 036), DA-119 and DA-132, with the register amendments it must then make. G-PCI stays OPEN.
 - **Not claimed.** Payment recording exists; any policy is adopted; PCI compliance; production readiness.
 
+**M7B-PAYMENTS-P1 adoption (recorded 2026-11-07) keeps every gate `OPEN`.** The owner adopted [15](./15-m7b-invoice-payment-recording-decision-pack.md) D-PAY-1 to D-PAY-10 and amendments A1, A2 and A3 on 2026-11-07 ([10](./10-architecture-decision-records.md) ADR-52); A4 is not adopted and not needed under D-PAY-8 A. [15](./15-m7b-invoice-payment-recording-decision-pack.md) §12 is the P1 contract. At this record nothing of it is committed, run or deployed; DA-118, DA-119, DA-132, DA-183, DA-184, DA-186 and DA-187 are amended with the stage's final documentation, and DA-36, DA-114, DA-93 and DA-94 are unchanged. G-PCI stays OPEN, and all 37 gates stay OPEN.
+
 **The gate total and severity mix is unchanged (37 / 21 BLOCKER / 14 HIGH / 2 MED).** The QA-INTERACTIVE-P1 documentation change (C), the QA-INTERACTIVE-P1-R1 documentation changes (D, E), QA-HANDOFF-CLOSE-P1 (the lockfile change F1 and its record) and QA-CI-REPAIR-P1 (the lockfile change `3abe19d` and this record) change no gate's status, and every gate stays OPEN.
 
 - **M0 carry-forward gates still open:** G-EMU, G-HIST, G-4USER.
