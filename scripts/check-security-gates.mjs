@@ -3,6 +3,10 @@
 // Validates docs/phase-4/m2-security-gate-manifest.json and reconciles scanner evidence:
 //   • SEMGREP_RESULTS=path  → SEMGREP-evidence entries are reconciled against a Semgrep
 //     results JSON so the manifest can never hide a new/relocated/stale Semgrep finding.
+//     A semgrep entry carrying expectedFindings is EXACT (owner-approved, M7B-PAYMENTS-P1;
+//     limited to SEMGREP_EXACT_RULES in test files): its rule+file+line multiset must equal
+//     the results in that file, bound to the reviewed whole-file blob OID; a result in an
+//     exact-covered rule+file never falls back to a path-substring entry.
 //   • GITLEAKS_CURRENT=path / GITLEAKS_HISTORY=path → the gitleaks entries' EXACT
 //     expectedFindings inventory (rule+path+line) is reconciled finding-by-finding against
 //     a live gitleaks report — no directory waiver; a new finding (new line, new rule, or
@@ -110,6 +114,100 @@ export function reconcileGitleaks(expectedCurrent, { current = null, history = n
   return problems;
 }
 
+// ---- semgrep reconciliation, incl. exact fixture inventories (pure; unit-tested) ----
+// Widening either bound below is a new owner decision, not a manifest edit.
+export const SEMGREP_EXACT_RULES = new Set(['tmpos-raw-cardholder-data-field']);
+const SEMGREP_EXACT_FILE = /^(?:server|src)\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.test\.(?:ts|tsx|mjs)$/;
+const sgRule = (r) => String(r.check_id || '').split('.').pop();
+// CI scans the checkout mounted at /src (ci.yml "Semgrep SAST repository scan").
+export const semgrepRepoPath = (p) => String(p || '').replace(/^\/src\//, '');
+const isExact = (f) => f.evidenceType === 'semgrep' && f.expectedFindings !== undefined;
+const fileKey = (rule, file) => JSON.stringify([rule, file]);
+// A real calendar day in YYYY-MM-DD (a round-trip rejects 2027-02-30 and 2027-13-01), so it compares safely as text.
+const isCalendarDate = (s) => {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+};
+
+export function checkSemgrepExactEntries(entries, today) {
+  const problems = [];
+  const bad = new Set();
+  const seen = new Map();
+  for (const f of entries.filter(isExact)) {
+    const tag = f.id || '<no-id>';
+    const p = [];
+    if (!SEMGREP_EXACT_RULES.has(f.rule)) p.push(`${tag}: exact semgrep inventory is limited to rule(s) ${[...SEMGREP_EXACT_RULES].join(', ')}`);
+    if (typeof f.path !== 'string' || !SEMGREP_EXACT_FILE.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '.')) p.push(`${tag}: exact semgrep path must be one canonical test file under server/ or src/`);
+    if (String(f.status) !== 'open') p.push(`${tag}: exact semgrep exception must be open (remove it instead of resolving it)`);
+    if (!isCalendarDate(f.expiry)) p.push(`${tag}: exact semgrep exception expiry must be a real YYYY-MM-DD calendar date`);
+    else if (f.expiry < today) p.push(`${tag}: exact semgrep exception expired (${f.expiry} < ${today})`);
+    if (!['critical', 'high'].includes(String(f.severity).toLowerCase())) p.push(`${tag}: exact semgrep entry covers ERROR results and must be critical/high`);
+    if (f.blocker !== true) p.push(`${tag}: exact semgrep entry must be blocker: true`);
+    if (typeof f.ownerApproval !== 'string' || !f.ownerApproval.trim()) p.push(`${tag}: exact semgrep entry requires an ownerApproval evidence note`);
+    const ef = f.expectedFindings;
+    if (!Array.isArray(ef) || ef.length === 0) p.push(`${tag}: exact semgrep expectedFindings must be a non-empty inventory`);
+    else {
+      if (f.expectedFindingCount !== ef.length) p.push(`${tag}: expectedFindingCount (${f.expectedFindingCount}) != expectedFindings.length (${ef.length})`);
+      if (ef.some((e) => e?.rule !== f.rule || e?.file !== f.path || !Number.isInteger(e?.line) || e.line < 1)) p.push(`${tag}: each expectedFindings entry must be { rule: entry.rule, file: entry.path, line: positive integer }`);
+    }
+    const cf = f.containingFiles;
+    if (!Array.isArray(cf) || cf.length !== 1 || cf[0]?.file !== f.path || !/^[0-9a-f]{40}$/.test(cf[0]?.blobOid || '')) p.push(`${tag}: exact semgrep entry needs containingFiles = [{ file: entry.path, blobOid: 40 hex }]`);
+    const k = fileKey(f.rule, f.path);
+    if (seen.has(k)) { p.push(`${tag}: ambiguous — another exact semgrep entry (${seen.get(k).id}) covers the same rule and file`); bad.add(seen.get(k)); }
+    else seen.set(k, f);
+    if (p.length) bad.add(f);
+    problems.push(...p);
+  }
+  return { problems, valid: entries.filter((f) => isExact(f) && !bad.has(f)) };
+}
+
+export function reconcileSemgrep(entries, results, { currentOids = {}, today } = {}) {
+  const problems = [];
+  const sgEntries = entries.filter((f) => f.evidenceType === 'semgrep');
+  const loose = sgEntries.filter((f) => !isExact(f));
+  // Every exact-declared rule+file is claimed, valid or not, so its results never reach a loose entry.
+  const claimed = new Set(sgEntries.filter(isExact).map((f) => fileKey(f.rule, f.path)));
+  const isClaimed = (r) => claimed.has(fileKey(sgRule(r), semgrepRepoPath(r.path)));
+  const want = new Map();
+  for (const f of checkSemgrepExactEntries(sgEntries, today).valid) {
+    const got = currentOids[f.path];
+    if (got !== f.containingFiles[0].blobOid) {
+      problems.push(`${f.id}: ${f.path} CHANGED since the reviewed blob (expected ${f.containingFiles[0].blobOid}, got ${got ?? 'unreadable'})`);
+      continue; // a changed file's inventory consumes nothing
+    }
+    for (const e of f.expectedFindings) { const k = JSON.stringify([e.rule, e.file, e.line]); want.set(k, (want.get(k) || 0) + 1); }
+  }
+  const ruleMatches = (r, f) => r.check_id?.split('.').pop() === f.rule || r.check_id?.endsWith(f.rule);
+  const coveringEntry = (r) => loose.find((f) => ruleMatches(r, f) && (r.path || '').includes(f.path));
+  for (const r of results) {
+    const sev = (r.extra?.severity || '').toUpperCase();
+    if (sev !== 'ERROR') continue;
+    if (isClaimed(r)) {
+      const k = JSON.stringify([sgRule(r), semgrepRepoPath(r.path), r.start?.line]);
+      if ((want.get(k) || 0) > 0) want.set(k, want.get(k) - 1);
+      else problems.push(`NEW/relocated unbaselined semgrep finding: ${r.check_id} @ ${r.path}:${r.start?.line} (not in the exact inventory)`);
+      continue;
+    }
+    const ce = coveringEntry(r);
+    if (!ce) { problems.push(`NEW/relocated unbaselined semgrep finding: ${r.check_id} @ ${r.path}:${r.start?.line}`); continue; }
+    // An ERROR-severity scanner result must map to a critical/high manifest entry —
+    // block mislabelling a real High as Low to dodge the blocker invariant.
+    const csev = String(ce.severity || '').toLowerCase();
+    if (csev !== 'critical' && csev !== 'high') problems.push(`${ce.id}: ERROR-severity semgrep result mapped to a '${ce.severity}' manifest entry — an ERROR finding must be baselined critical/high`);
+  }
+  for (const [k, n] of want) if (n > 0) { const [rule, file, line] = JSON.parse(k); problems.push(`semgrep exact inventory: ${n} expected finding(s) missing (stale/moved): ${rule} ${file}:${line}`); }
+  for (const f of loose) {
+    const detected = results.some((r) => !isClaimed(r) && ruleMatches(r, f) && (r.path || '').includes(f.path));
+    if (String(f.status).toLowerCase() === 'resolved') {
+      if (detected) problems.push(`${f.id}: marked resolved but semgrep still detects it`);
+    } else if (!detected) {
+      problems.push(`${f.id}: open semgrep finding no longer detected (stale) — code changed; update the manifest`);
+    }
+  }
+  return problems;
+}
+
 // ---- main -----------------------------------------------------------------
 export function runGates() {
   const problems = [];
@@ -156,6 +254,7 @@ export function runGates() {
     if ((sev === 'critical' || sev === 'high') && f.blocker !== true) problems.push(`${tag}: ${sev} finding must be "blocker": true`);
     if (String(f.status).toLowerCase() === 'resolved' && !f.removalEvidence) problems.push(`${tag}: status=resolved requires 'removalEvidence'`);
   }
+  problems.push(...checkSemgrepExactEntries(findings, today).problems);
 
   // Semgrep reconciliation — SEMGREP-evidence entries only (manual_static/dependency_audit/
   // gitleaks/runtime_test entries can NEVER satisfy a Semgrep result).
@@ -164,27 +263,9 @@ export function runGates() {
     let sr;
     try { sr = JSON.parse(readFileSync(resultsPath, 'utf8')); } catch (e) { console.error(`[security-gates] cannot read SEMGREP_RESULTS: ${e.message}`); process.exit(1); }
     const results = Array.isArray(sr.results) ? sr.results : [];
-    const sgEntries = findings.filter((f) => f.evidenceType === 'semgrep');
-    const ruleMatches = (r, f) => r.check_id?.split('.').pop() === f.rule || r.check_id?.endsWith(f.rule);
-    const coveringEntry = (r) => sgEntries.find((f) => ruleMatches(r, f) && (r.path || '').includes(f.path));
-    for (const r of results) {
-      const sev = (r.extra?.severity || '').toUpperCase();
-      if (sev !== 'ERROR') continue;
-      const ce = coveringEntry(r);
-      if (!ce) { problems.push(`NEW/relocated unbaselined semgrep finding: ${r.check_id} @ ${r.path}:${r.start?.line}`); continue; }
-      // An ERROR-severity scanner result must map to a critical/high manifest entry —
-      // block mislabelling a real High as Low to dodge the blocker invariant.
-      const csev = String(ce.severity || '').toLowerCase();
-      if (csev !== 'critical' && csev !== 'high') problems.push(`${ce.id}: ERROR-severity semgrep result mapped to a '${ce.severity}' manifest entry — an ERROR finding must be baselined critical/high`);
-    }
-    for (const f of sgEntries) {
-      const detected = results.some((r) => ruleMatches(r, f) && (r.path || '').includes(f.path));
-      if (String(f.status).toLowerCase() === 'resolved') {
-        if (detected) problems.push(`${f.id}: marked resolved but semgrep still detects it`);
-      } else if (!detected) {
-        problems.push(`${f.id}: open semgrep finding no longer detected (stale) — code changed; update the manifest`);
-      }
-    }
+    const currentOids = {};
+    for (const f of findings.filter(isExact)) { try { currentOids[f.path] = gitBlobOid(f.path); } catch { /* unreadable → reconcile flags it */ } }
+    problems.push(...reconcileSemgrep(findings, results, { currentOids, today }));
   } else {
     console.log('[security-gates] note: SEMGREP_RESULTS not provided — semgrep reconciliation skipped (CI supplies scanner results).');
   }

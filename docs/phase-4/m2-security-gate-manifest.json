@@ -225,6 +225,90 @@
       "removalCriterion": "Remove when the fixtures no longer match the jwt rule (for example, restructured into a non-JWT placeholder) or the tests are deleted. A real token introduced at either location changes the containing-file OID and fails the gate.",
       "expiry": "2027-06-30",
       "status": "open"
+    },
+    {
+      "id": "TMPOS-CHD-TESTINPUT-PAYMENT-BODY",
+      "evidenceType": "semgrep",
+      "scanner": "semgrep",
+      "rule": "tmpos-raw-cardholder-data-field",
+      "path": "server/runtime/invoicePayments.test.ts",
+      "fingerprint": "semgrep-exact:tmpos-raw-cardholder-data-field:server/runtime/invoicePayments.test.ts:499x1",
+      "severity": "high",
+      "blocker": true,
+      "gate": "G-PCI",
+      "milestone": "M7b",
+      "expectedFindingCount": 1,
+      "expectedFindings": [
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/runtime/invoicePayments.test.ts",
+          "line": 499
+        }
+      ],
+      "containingFiles": [
+        {
+          "file": "server/runtime/invoicePayments.test.ts",
+          "blobOid": "51f742c5db91644163b2416335c18659bdd7f874"
+        }
+      ],
+      "ownerApproval": "Owner-approved 2026-11-07 in Claude Code session 9a614741-ba2d-401d-9de9-6f8921e35ae8 (\"M7B-PAYMENTS-P1 — APPROVED SEMGREP FIX\"): exactly rule tmpos-raw-cardholder-data-field at server/runtime/invoicePayments.test.ts:499 x1 and server/safe-log.test.ts:9 x3, :16 x1, :17 x1; two full-path high blocker entries; expiry 2027-03-31; the rule, its scan scope and the fixtures unchanged.",
+      "rationale": "Synthetic negative test input (M7B-PAYMENTS-P1): a record-payment body carrying a fake card security code key must be refused 400 command_request_invalid. Test code only; the value is fake; nothing is stored, sent or logged. Baselined high/blocker because the scanner classes the rule ERROR, not because test code carries card data.",
+      "compensatingControl": "Migration 036's audit CHECK refuses the cvv/cvc/track1/track2/pinBlock metadata keys; the payment planner's strict body schema refuses unknown keys (400 command_request_invalid); the safe log redacts card-data keys case-insensitively (SLG-01). The rule, its src/ + server/ scan scope and every other Semgrep result are enforced unchanged.",
+      "removalCriterion": "Remove when the rule gains a reviewed test-fixture allowance or these tests stop needing literal card-data keys. Any added, missing or moved match, or any edit to the bound file, fails the gate until this entry is re-reviewed.",
+      "expiry": "2027-03-31",
+      "status": "open"
+    },
+    {
+      "id": "TMPOS-CHD-TESTINPUT-SAFE-LOG",
+      "evidenceType": "semgrep",
+      "scanner": "semgrep",
+      "rule": "tmpos-raw-cardholder-data-field",
+      "path": "server/safe-log.test.ts",
+      "fingerprint": "semgrep-exact:tmpos-raw-cardholder-data-field:server/safe-log.test.ts:9x3,16x1,17x1",
+      "severity": "high",
+      "blocker": true,
+      "gate": "G-PCI",
+      "milestone": "M7b",
+      "expectedFindingCount": 5,
+      "expectedFindings": [
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/safe-log.test.ts",
+          "line": 9
+        },
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/safe-log.test.ts",
+          "line": 9
+        },
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/safe-log.test.ts",
+          "line": 9
+        },
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/safe-log.test.ts",
+          "line": 16
+        },
+        {
+          "rule": "tmpos-raw-cardholder-data-field",
+          "file": "server/safe-log.test.ts",
+          "line": 17
+        }
+      ],
+      "containingFiles": [
+        {
+          "file": "server/safe-log.test.ts",
+          "blobOid": "857e26626f109398e6c4106e7c1af16da531c55d"
+        }
+      ],
+      "ownerApproval": "Owner-approved 2026-11-07 in Claude Code session 9a614741-ba2d-401d-9de9-6f8921e35ae8 (\"M7B-PAYMENTS-P1 — APPROVED SEMGREP FIX\"): exactly rule tmpos-raw-cardholder-data-field at server/runtime/invoicePayments.test.ts:499 x1 and server/safe-log.test.ts:9 x3, :16 x1, :17 x1; two full-path high blocker entries; expiry 2027-03-31; the rule, its scan scope and the fixtures unchanged.",
+      "rationale": "Synthetic redaction test (M7B-PAYMENTS-P1, SLG-01): line 9 (three keys) and line 16 are fake inputs the safe log must redact; line 17 is the expected redacted output object. Test code only; values are fake. Baselined high/blocker because the scanner classes the rule ERROR, not because test code carries card data.",
+      "compensatingControl": "Migration 036's audit CHECK refuses the cvv/cvc/track1/track2/pinBlock metadata keys; the payment planner's strict body schema refuses unknown keys (400 command_request_invalid); the safe log redacts card-data keys case-insensitively (SLG-01). The rule, its src/ + server/ scan scope and every other Semgrep result are enforced unchanged.",
+      "removalCriterion": "Remove when the rule gains a reviewed test-fixture allowance or these tests stop needing literal card-data keys. Any added, missing or moved match, or any edit to the bound file, fails the gate until this entry is re-reviewed.",
+      "expiry": "2027-03-31",
+      "status": "open"
     }
   ]
 }
