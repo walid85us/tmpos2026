@@ -88,6 +88,12 @@ const UP_034 = readFileSync(`${MIG_DIR}/034_m7b_invoice_issue.up.sql`, 'utf8');
 const UP_035 = readFileSync(`${MIG_DIR}/035_m7b_invoice_void.up.sql`, 'utf8');
 /** M7B-PAYMENTS-P1: 036 sits above 035 and is applied with it. */
 const UP_036 = readFileSync(`${MIG_DIR}/036_m7b_invoice_payment.up.sql`, 'utf8');
+/** M7B-PAYMENTS-P2: 037 (payment registration, in 036's schema) sits above 036: it rolls back before it and is re-applied after it. */
+const DOWN_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.down.sql`, 'utf8');
+const UP_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.up.sql`, 'utf8');
+const has037 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`)[0].present;
+const down036 = async (sql) => { if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
+const up036 = async (sql) => { await sql.unsafe(UP_036).simple(); if (!(await has037(sql))) await sql.unsafe(UP_037).simple(); };
 /** 018's section 8 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_018 = UP_018.slice(UP_018.lastIndexOf('do $$'));
 const CREATE_011 = 'tmpos_session.m5_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint)';
@@ -1131,7 +1137,7 @@ test('M7M-09b: 017 rolled back beneath 018 leaves the read raising for a live se
     await tx.unsafe(UP_031).simple();
     await tx.unsafe(UP_032).simple();
     await tx.unsafe(UP_033).simple();
-    await tx.unsafe(UP_034).simple(); await tx.unsafe(UP_035).simple(); await tx.unsafe(UP_036).simple();
+    await tx.unsafe(UP_034).simple(); await tx.unsafe(UP_035).simple(); await up036(tx);
     await tx.unsafe(`grant execute on function ${PAGE_017} to tmpos_app`);
     const { createPostgresStartupPreflight } = await import('../../server/persistence/postgresStartupPreflight.ts');
     const preflightOn = (db) => createPostgresStartupPreflight({ client: { transaction: (_signal, _bounds, fn) => fn(db) } });
@@ -1346,7 +1352,7 @@ test('M7M-02b: the real startup preflight accepts the login after 018, and refus
     assert.deepEqual(await runtimePreflight(), { runtimeLogin: [], migrationLedger: [] },
       'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018 (and, since P3-R1, 019 and 020; since P4, 021 and 022; since P6, 023; since P7, 024; since P8, 025; since M5-INVOICES-AUTH-P1, 026; since M7B-INVOICES-P1, 027 and 028; since M7B-INVOICES-P2, 029; since M7B-INVOICES-P2-R1, 030; since M7B-INVOICES-P1-R3, 031; since M7B-INVOICES-P1-R4, 032; since M7B-INVOICES-DISCARD-P1, 033; since M7B-INVOICES-ISSUE-P1, 034)');
   } finally {
-    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 035, 034, 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
+    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 035, 034, 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
   }
   assert.ok(preflightAt017 !== null, 'M7M-09 captured the 017-era answer');
   // 018 rolled back: both categories. The codes name categories, not grants; which grants moved (011's create and 017's

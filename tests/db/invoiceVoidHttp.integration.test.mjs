@@ -82,7 +82,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -332,7 +332,7 @@ async function teardown() {
             'tmpos_invoice_void.issued_invoice_void'::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         voids: 0, void_audits: 0, settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0,
-        customers: 0, anchors: 0, latest: '036',
+        customers: 0, anchors: 0, latest: '037',
         triggers: ['trg_invoice_draft_immutable:A', 'trg_invoice_draft_line_terminal:A', 'trg_invoice_draft_terminal:A', 'trg_issued_invoice_commit_check:A',
           'trg_issued_invoice_guard:A', 'trg_issued_invoice_line_guard:A', 'trg_issued_invoice_line_truncate:A', 'trg_issued_invoice_truncate:A',
           'trg_issued_invoice_void_guard:A', 'trg_issued_invoice_void_truncate:A',
@@ -500,6 +500,7 @@ await setupStep(async () => {
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   await owner.unsafe('drop schema if exists ivh_proof cascade');
   await owner.unsafe('create schema ivh_proof');
   await owner.unsafe('revoke all on schema ivh_proof from public');
@@ -2142,7 +2143,7 @@ test('IVH-12 (VOID-15, D-VOID-1, D-VOID-6): after a void the issue is unchanged 
 // IVH-13: logs and containment (last)
 // ===========================================================================
 
-test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a reason code (as a value), a reason label, the audit sentence or code, a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 36 routes, the void\'s eligibility then its command right after the issued detail', () => {
+test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a reason code (as a value), a reason label, the audit sentence or code, a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 40 routes, the void\'s eligibility then its command right after the issued detail', () => {
   const forbidden = [...SECRETS, ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e), IDEMPOTENCY_KEY.toString(e)])];
   // The distinctive codes as substrings too; 'duplicate' and 'other' are common words, checked as whole values below.
   const reasonTexts = ['invoice_void_', 'Issued invoice voided', ...REASONS.map(([, label]) => label),
@@ -2205,9 +2206,9 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
     assert.deepEqual(reasonSentences.filter((v) => reasonScan.includes(v)), [], 'nor a void audit sentence');
     assert.equal(KEYED_REASON.test(reasonScan), false, 'nor a keyed void reason');
   }
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 36, 'exactly the 36 shipping routes (M7B-PAYMENTS-P1 adds five)');
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 40, 'exactly the 40 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four)');
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path}`);
-  assert.equal(new Set(served).size, 36, 'no route twice');
+  assert.equal(new Set(served).size, 40, 'no route twice');
   const detail = served.indexOf('GET /api/v1/stores/{storeId}/invoices/{id}');
   assert.ok(detail >= 0, 'the issued detail is served');
   assert.deepEqual(served.slice(detail + 1, detail + 3), ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/void'],

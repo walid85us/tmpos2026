@@ -242,6 +242,12 @@ export interface ReadInventory<P> {
   readonly probe: (client: SupervisedPgClient, signal: AbortSignal) => Promise<boolean>;
   /** The selected role's durable edits (M7A-CUSTOMERS-P3-R1): the authorizer's read and the revalidator's. */
   readonly roleLevels: RoleLevelReads;
+  /**
+   * M7B-PAYMENTS-P2: whether the owner-installed payment proof key is present (037's key probe; never its bytes), over the root's
+   * kernel. Declared by the tenant inventory alone, so the administrative closure never reaches it; an inventory declaring none
+   * answers 'absent' (fail closed). Asked by the tenant entry at startup only.
+   */
+  readonly paymentProofKey?: (client: SupervisedPgClient, signal: AbortSignal) => Promise<'present' | 'absent'>;
 }
 
 /** What the tenant composition hands its entry: the tenant boundary's durable adapters, the served routes and probes. */
@@ -259,6 +265,8 @@ export interface ReadTransactions {
   /** Whether the login can call 018's mint, which every login needs: true only for its answer to all-null arguments. */
   readonly mintProbe: (signal: AbortSignal) => Promise<boolean>;
   readonly readsProbe: (signal: AbortSignal) => Promise<boolean>;
+  /** M7B-PAYMENTS-P2: the payment proof key's presence (ReadInventory.paymentProofKey), for the tenant entry's startup alone. */
+  readonly paymentProofKey: (signal: AbortSignal) => Promise<'present' | 'absent'>;
   /** The selected role's durable edits over the kernel, for the tenant route authorizer (M7A-CUSTOMERS-P3-R1). */
   readonly roleLevels: TenantRoleLevelsRead;
   /** Ends the kernel: transactions in flight get RETIRED_POOL_GRACE_S, then every pool is closed. */
@@ -357,6 +365,8 @@ export function composeReadTransactions<P>(
       issuerKey: (signal: AbortSignal) => probeIssuerKey(kernel, key, signal),
       mintProbe: (signal: AbortSignal) => probeSessionMint(kernel, signal),
       readsProbe: (signal: AbortSignal) => inventory.probe(kernel, signal),
+      paymentProofKey: async (signal: AbortSignal): Promise<'present' | 'absent'> =>
+        (inventory.paymentProofKey === undefined ? 'absent' : inventory.paymentProofKey(kernel, signal)),
       roleLevels: inventory.roleLevels.read(kernel),
       close: () => kernel.end(),
       ...(store === null ? {} : {

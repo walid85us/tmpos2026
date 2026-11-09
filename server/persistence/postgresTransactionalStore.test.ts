@@ -995,14 +995,17 @@ test('M7B-INVOICES-P2 (design §2): precondition_failed is admitted from the dra
 test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1, M7B-INVOICES-VOID-P1 (design §2): the update kinds the store admits precondition_failed from and app.ts\'s 409 mapping\'s kinds are one closed set — exactly the draft edit\'s, the draft discard\'s, the invoice issue\'s and the invoice void\'s contract kinds; a drift in any of them fails here', () => {
   // The issue's contract (invoiceIssuing.ts INVOICE_ISSUE_CONTRACT, kind store.invoice.issue) and the void's (invoiceVoid.ts
   // INVOICE_VOID_CONTRACT, kind store.invoice.void) are pinned by their kinds here.
-  // M7B-PAYMENTS-P1: and the payment reversal's (invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT).
-  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse'];
+  // M7B-PAYMENTS-P1: and the payment reversal's (invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT); M7B-PAYMENTS-P2: and the registration
+  // settlement's (INVOICE_PAYMENT_SETTLE_CONTRACT).
+  const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse',
+    'store.invoice_payment.settle'];
   assert.deepEqual([...PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'the store\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'app.ts\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS], [...PRECONDITION_UPDATE_KINDS], 'the two copies, in one order');
-  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse'], 'the contracts\', as the audit action ids migrations 029, 033, 034, 035 and 036 document');
+  assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse',
+    'store.invoice_payment.settle'], 'the contracts\', as the audit action ids migrations 029, 033, 034, 035, 036 and 037 document');
   assert.ok(Object.isFrozen(PRECONDITION_UPDATE_KINDS) && Object.isFrozen(APP_PRECONDITION_UPDATE_KINDS), 'frozen');
-  for (const kind of ['store.invoice_draft.create', 'store.invoice_draft.reprice', 'tenant.customer.update', 'store.invoice_payment.record', '']) {
+  for (const kind of ['store.invoice_draft.create', 'store.invoice_draft.reprice', 'tenant.customer.update', 'store.invoice_payment.record', 'store.invoice_payment.register', '']) {
     assert.equal(PRECONDITION_UPDATE_KINDS.includes(kind) || APP_PRECONDITION_UPDATE_KINDS.includes(kind), false, `closed: ${kind}`);
   }
 });
@@ -1296,11 +1299,12 @@ test('M7B-INVOICES-ISSUE-P1: not_found is admitted from the settings write\'s cr
 });
 
 test('M7B-INVOICES-ISSUE-P1: the create kinds the store admits not_found from and app.ts\'s 404 mapping\'s kinds are one closed set — exactly the settings write\'s', () => {
-  // M7B-PAYMENTS-P1: and the payment record's (its path invoice).
-  assert.deepEqual([...NOT_FOUND_CREATE_KINDS], ['tenant.issuing_settings.update', 'store.invoice_payment.record'], 'the store\'s');
+  // M7B-PAYMENTS-P1: and the payment record's (its path invoice); M7B-PAYMENTS-P2: and the payment registration's (its path invoice).
+  assert.deepEqual([...NOT_FOUND_CREATE_KINDS], ['tenant.issuing_settings.update', 'store.invoice_payment.record', 'store.invoice_payment.register'], 'the store\'s');
   assert.deepEqual([...APP_NOT_FOUND_CREATE_KINDS], [...NOT_FOUND_CREATE_KINDS], 'app.ts\'s');
   assert.ok(Object.isFrozen(NOT_FOUND_CREATE_KINDS) && Object.isFrozen(APP_NOT_FOUND_CREATE_KINDS), 'frozen');
-  for (const kind of ['store.invoice_draft.create', 'tenant.customer.create', 'tenant.role_levels.update', 'store.invoice.issue', 'store.invoice_payment.reverse', '']) {
+  for (const kind of ['store.invoice_draft.create', 'tenant.customer.create', 'tenant.role_levels.update', 'store.invoice.issue', 'store.invoice_payment.reverse',
+    'store.invoice_payment.settle', '']) {
     assert.equal(NOT_FOUND_CREATE_KINDS.includes(kind) || APP_NOT_FOUND_CREATE_KINDS.includes(kind), false, `closed: ${kind}`);
   }
 });
@@ -1508,8 +1512,8 @@ function payVoiding(): TransactionCommand {
 
 const decided = (client: { texts: string[] }): string[] => client.texts.filter((t) => t === 'commit' || t === 'rollback');
 
-test('M7B-PAYMENTS-P1 (I2): ROUTINE_AUDITED_KINDS is exactly the two payment kinds, frozen; the mutator table admits routineAudited exactly for them (at store scope, no typed audit subject) and the payment opt-ins only in their own mode — every other declaration refuses to build', () => {
-  assert.deepEqual([...ROUTINE_AUDITED_KINDS], ['store.invoice_payment.record', 'store.invoice_payment.reverse']);
+test('M7B-PAYMENTS-P1 (I2), M7B-PAYMENTS-P2: ROUTINE_AUDITED_KINDS is exactly the four payment kinds (record, reversal, registration, settlement), frozen; the mutator table admits routineAudited exactly for them (at store scope, no typed audit subject) and the payment opt-ins only in their own mode — every other declaration refuses to build', () => {
+  assert.deepEqual([...ROUTINE_AUDITED_KINDS], ['store.invoice_payment.record', 'store.invoice_payment.reverse', 'store.invoice_payment.register', 'store.invoice_payment.settle']);
   assert.ok(Object.isFrozen(ROUTINE_AUDITED_KINDS), 'frozen');
   const client = untouched().client;
   assert.doesNotThrow(() => tenantStore(client, [recordMutator('applied'), reverseMutator('applied')]), 'the two payment mutators');
@@ -1529,6 +1533,9 @@ test('M7B-PAYMENTS-P1 (I2): ROUTINE_AUDITED_KINDS is exactly the two payment kin
     ['void refusals on a create', recordMutator('applied', { paymentRefusals: 'void' })],
     ['void refusals beside the issuing pair', voidMutator('applied', { paymentRefusals: 'void', issuingRefusals: true })],
     ['a third word', recordMutator('applied', { paymentRefusals: 'both' })],
+    // M7B-PAYMENTS-P2: the registration and the settlement are routine-audited too, so either without the declaration refuses.
+    ['the registration without routineAudited', recordMutator('applied', { kind: 'store.invoice_payment.register', routineAudited: undefined })],
+    ['the settlement without routineAudited', Object.freeze({ kind: 'store.invoice_payment.settle', mode: 'update', aggregateType: 'invoice_payment_registration', contextScope: 'store', apply: async () => 'applied' })],
   ] as const) {
     assert.throws(() => tenantStore(client, [mutator as AggregateMutator]), TypeError, label);
   }

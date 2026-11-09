@@ -340,7 +340,7 @@ const INVOICE_DRAFT_AGGREGATE = 'invoice_draft';
 /** The aggregate type of an issued invoice (migration 034), the void's target (M7B-INVOICES-VOID-P1). */
 const ISSUED_INVOICE_AGGREGATE = 'issued_invoice';
 /**
- * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly five (M7B-PAYMENTS-P1: + the payment reversal's): the draft edit's
+ * The UPDATE kinds whose mutator may answer 'precondition_failed' — a closed set of exactly six (M7B-PAYMENTS-P1: + the payment reversal's; M7B-PAYMENTS-P2: + the registration settlement's): the draft edit's
  * (M7B-INVOICES-P2), the draft discard's (M7B-INVOICES-DISCARD-P1), the invoice issue's (M7B-INVOICES-ISSUE-P1) and the
  * invoice void's (M7B-INVOICES-VOID-P1), each when its expected tenant is not the store's — rolled back exactly as a
  * create's; any other update answering it is the fault (commit, step 2a'). Literals: the store imports no route module; its
@@ -350,9 +350,11 @@ export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze([
   'store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void',
   // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment reversal's expectedTenant.
   'store.invoice_payment.reverse',
+  // M7B-PAYMENTS-P2 (PRQ-1): the registration settlement's expectedTenant.
+  'store.invoice_payment.settle',
 ]);
 /**
- * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly two (M7B-PAYMENTS-P1: + the payment record's): the
+ * The CREATE kinds whose mutator may answer 'not_found' (M7B-INVOICES-ISSUE-P1) — a closed set of exactly three (M7B-PAYMENTS-P1: + the payment record's; M7B-PAYMENTS-P2: + the payment registration's): the
  * issuing-settings write, whose path store is missing, another tenant's or not writable — rolled back exactly as an update's
  * not_found; any other create answering it is the fault. Literals; its test pins this set equal to app.ts's.
  */
@@ -360,13 +362,17 @@ export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze([
   'tenant.issuing_settings.update',
   // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment record, whose path invoice may be missing, another store's or another tenant's.
   'store.invoice_payment.record',
+  // M7B-PAYMENTS-P2 (PRQ-1): the payment registration, whose path invoice may be missing, another store's or another tenant's.
+  'store.invoice_payment.register',
 ]);
 /**
  * The kinds whose routine writes their audit record itself (M7B-PAYMENTS-P1, doc 15 §12.5 I2, D-PAY-8): a CLOSED literal list
- * of exactly the payment record and the payment reversal. A mutator declares `routineAudited: true` exactly when its kind is
+ * of exactly the payment record and the payment reversal, and (M7B-PAYMENTS-P2, migration 037) the payment registration and
+ * its settlement. A mutator declares `routineAudited: true` exactly when its kind is
  * here, or the store refuses to build; for these kinds alone commit() writes no audit record of its own.
  */
-export const ROUTINE_AUDITED_KINDS: readonly string[] = Object.freeze(['store.invoice_payment.record', 'store.invoice_payment.reverse']);
+export const ROUTINE_AUDITED_KINDS: readonly string[] = Object.freeze(['store.invoice_payment.record', 'store.invoice_payment.reverse',
+  'store.invoice_payment.register', 'store.invoice_payment.settle']);
 /** The context scopes each root's store admits (M7B-INVOICES-P1): a mutator's declared scope must be one of its root's. */
 const ADMITTED_SCOPES: Readonly<Record<'platform' | 'tenant', readonly CommandContextScope[]>> = Object.freeze({
   platform: Object.freeze(['platform'] as const), tenant: Object.freeze(['tenant', 'store'] as const),

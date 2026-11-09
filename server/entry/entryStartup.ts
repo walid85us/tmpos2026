@@ -49,6 +49,7 @@ export type StartupFailure =
   | 'tenant_issuer_key_absent'
   | 'tenant_issuer_key_mismatch'
   | 'tenant_issuer_key_probe_malformed'
+  | 'tenant_payment_proof_key_absent'
   | 'dependency_unready'
   | 'rate_limit_key_mismatch'
   | 'rate_limit_store_read_only'

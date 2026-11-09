@@ -255,7 +255,7 @@ test.after(async () => {
     // A failed migration case may have left 036 (or 035) rolled back: the executor applies it again.
     await step(async () => {
       if (!(await ledgerHas('036'))) {
-        const report = await trustedApply();
+        const report = await trustedApply('036');
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
     });
@@ -425,7 +425,7 @@ const diffKeys = (a, b) => Object.keys({ ...a, ...b }).filter((k) => JSON.string
 
 const [S035, PAYMENTS_AT_SETUP, applyReport, S036] = await setupStep(async () => {
   const at035 = await catalogOf();
-  const report = await trustedApply();
+  const report = await trustedApply('036'); // through 036 only: 037 (M7B-PAYMENTS-P2) revokes the v1 record this suite proves; rollBackAbove restores it
   return [at035, await globalPayments(), report, await catalogOf()];
 });
 
@@ -732,7 +732,7 @@ test('IPR-01 (PAY-13): 001-036 applied by the trusted executor — 036 alone ove
   assert.deepEqual(ledger.map((x) => x.version), Array.from({ length: 36 }, (_, i) => String(i + 1).padStart(3, '0')));
   assert.ok(ledger.every((x) => x.dirty === false && x.finished), 'every row clean and finished');
   assert.equal(ledger[35].checksum, SHA_UP_036, '036\'s checksum is its up bytes');
-  assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is the startup preflight\'s pinned chain');
+  assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.slice(0, 36).map((m) => [m.version, m.checksum]), 'the ledger is the startup preflight\'s pinned chain through 036');
   assert.deepEqual(diffKeys(S036, await catalogOf()), [], 'the catalog as the apply left it');
   assert.ok('value' in await rolledBack((tx) => tx.unsafe(POSTCONDITION_036).simple()), 'the postcondition holds');
   const R = (m) => `migration 036 refused: ${m}`;
@@ -871,7 +871,7 @@ test('IPR-03 (PAY-13): 035\'s down while 036 is applied fails 2BP01; 036\'s down
     assert.deepEqual([fresh035.outcome, fresh035.applied], ['complete', ['035']], JSON.stringify(fresh035).slice(0, 300));
     assert.deepEqual(diffKeys(afterDown, await catalogOf()), [], 'after 036\'s down: a fresh 035 apply\'s catalog, every section');
   } finally {
-    const r = await trustedApply();
+    const r = await trustedApply('036');
     assert.deepEqual([r.outcome, r.applied], ['complete', ['036']], JSON.stringify(r).slice(0, 300));
   }
   assert.deepEqual(diffKeys(S036, await catalogOf()), [], 're-applied: the first apply\'s catalog');

@@ -248,7 +248,7 @@
       "containingFiles": [
         {
           "file": "server/runtime/invoicePayments.test.ts",
-          "blobOid": "51f742c5db91644163b2416335c18659bdd7f874"
+          "blobOid": "43d2d39ed4e000064bfadb76b224d4f593ffa858"
         }
       ],
       "ownerApproval": "Owner-approved 2026-11-07 in Claude Code session 9a614741-ba2d-401d-9de9-6f8921e35ae8 (\"M7B-PAYMENTS-P1 — APPROVED SEMGREP FIX\"): exactly rule tmpos-raw-cardholder-data-field at server/runtime/invoicePayments.test.ts:499 x1 and server/safe-log.test.ts:9 x3, :16 x1, :17 x1; two full-path high blocker entries; expiry 2027-03-31; the rule, its scan scope and the fixtures unchanged.",

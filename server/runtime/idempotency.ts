@@ -232,10 +232,20 @@ export interface OperationBinding {
    * everywhere else, where every fingerprint stays byte-identical. Never present without a target.
    */
   readonly secondTarget?: string | null;
+  /**
+   * The presenting session's digest (M7B-PAYMENTS-P2, D-R3-A): only on a command route declaring `sessionBinding: 'required'`
+   * (routes.ts: the payment registration and the payment record), the unpadded base64url SHA-256 of the session key — never
+   * the key itself. When present it is appended LAST in its own tagged slot (`session:<digest>`, which no uuid slot can
+   * spell), so a replacement session replaying an old key and body is another fingerprint (422), never the stored answer;
+   * absent or null everywhere else, where every fingerprint stays byte-identical.
+   */
+  readonly session?: string | null;
 }
 
 /** A target slot: absent, null, or one uuid in canonical lowercase text form. */
 const TARGET_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** The session slot's digest: unpadded base64url SHA-256. */
+const SESSION_DIGEST_RE = /^[A-Za-z0-9_-]{43}$/;
 
 export interface OperationIdentity {
   readonly scope: string;
@@ -413,12 +423,17 @@ export function createIdempotencyKeyring(secret: unknown): IdempotencyKeyring {
         && (typeof second !== 'string' || !TARGET_RE.test(second) || target === undefined || target === null)) {
         throw new TypeError('idempotency_binding_invalid');
       }
+      const session = binding.session;
+      if (session !== undefined && session !== null && (typeof session !== 'string' || !SESSION_DIGEST_RE.test(session))) {
+        throw new TypeError('idempotency_binding_invalid');
+      }
       const scope = digest(tag('scope', digest(tag('key', clientKey)), digest(tag('principal', principal.authProvider, principal.authProviderUid))));
       const body = createHash('sha256').update(binding.body).digest('base64url');
       // A literal route builds exactly contract version 2's array; a target is one more element after the body, and the
       // JSON framing keeps an array of one length from ever equalling one of another.
       const fingerprint = digest(tag('fingerprint', scope, binding.method, binding.path, binding.audience, binding.tenant, binding.store, binding.actor, body,
-        ...(target === undefined || target === null ? [] : [target]), ...(second === undefined || second === null ? [] : [second])));
+        ...(target === undefined || target === null ? [] : [target]), ...(second === undefined || second === null ? [] : [second]),
+        ...(session === undefined || session === null ? [] : [`session:${session}`])));
       return Object.freeze({ scope, fingerprint });
     },
     seal(envelope: ReplayEnvelope, operation: OperationIdentity): string {

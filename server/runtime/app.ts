@@ -131,7 +131,7 @@
 // any route but the two probes without the distributed limiter (`rate_limit_required`).
 import express from 'express';
 import type { Express, Request, Response, NextFunction, RequestHandler, ErrorRequestHandler } from 'express';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import http from 'node:http';
 import type { RequestListener } from 'node:http';
 import type { Readable } from 'node:stream';
@@ -516,10 +516,11 @@ const NO_BYTES = Buffer.alloc(0);
 
 /**
  * The UPDATE contracts whose store-rolled-back 'precondition_failed' is the unsealed 409 write_conflict, by kind: a closed
- * set of exactly five (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
+ * set of exactly six (M7B-INVOICES-P2: the draft edit's expectedTenant, invoiceDrafts.ts INVOICE_DRAFT_UPDATE_CONTRACT;
  * M7B-INVOICES-DISCARD-P1: the draft discard's, INVOICE_DRAFT_DISCARD_CONTRACT; M7B-INVOICES-ISSUE-P1: the invoice issue's,
  * invoiceIssuing.ts INVOICE_ISSUE_CONTRACT; M7B-INVOICES-VOID-P1: the invoice void's, invoiceVoid.ts INVOICE_VOID_CONTRACT;
- * M7B-PAYMENTS-P1: the payment reversal's, invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT).
+ * M7B-PAYMENTS-P1: the payment reversal's, invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT; M7B-PAYMENTS-P2: the
+ * registration settlement's, INVOICE_PAYMENT_SETTLE_CONTRACT).
  * Every other update's is the 503. The tenant store admits the answer from the same kinds alone
  * (postgresTransactionalStore.ts). Literals, as app.ts imports no route module; postgresTransactionalStore.test.ts fails if
  * this set or the store's drifts.
@@ -528,13 +529,16 @@ export const PRECONDITION_UPDATE_KINDS: readonly string[] = Object.freeze([
   'store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void',
   // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment reversal's expectedTenant.
   'store.invoice_payment.reverse',
+  // M7B-PAYMENTS-P2 (PRQ-1): the registration settlement's expectedTenant.
+  'store.invoice_payment.settle',
 ]);
 
 /**
  * The CREATE contracts whose store-rolled-back 'not_found' is the unsealed 404 not_found, by kind (M7B-INVOICES-ISSUE-P1): a
- * closed set of exactly two — the issuing-settings write (issuingSettings.ts), a create-mode command whose path names a store
+ * closed set of exactly three — the issuing-settings write (issuingSettings.ts), a create-mode command whose path names a store
  * that may be missing, another tenant's or not writable, and (M7B-PAYMENTS-P1) the payment record (invoicePayments.ts), whose
- * path names an issued invoice that may be missing, another store's or another tenant's — exactly as an update's not_found. Every other create's is the
+ * path names an issued invoice that may be missing, another store's or another tenant's — exactly as an update's not_found — and
+ * (M7B-PAYMENTS-P2) the payment registration, whose path names the same. Every other create's is the
  * 503. The tenant store admits the answer from the same kinds alone (postgresTransactionalStore.ts); its test pins the two
  * sets equal.
  */
@@ -542,6 +546,8 @@ export const NOT_FOUND_CREATE_KINDS: readonly string[] = Object.freeze([
   'tenant.issuing_settings.update',
   // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment record, whose path invoice may be missing, another store's or another tenant's.
   'store.invoice_payment.record',
+  // M7B-PAYMENTS-P2 (PRQ-1): the payment registration, whose path invoice may be missing, another store's or another tenant's.
+  'store.invoice_payment.register',
 ]);
 
 /** X-Forwarded-For as its one line's value, undefined when absent, or every line's value when repeated. */
@@ -883,9 +889,12 @@ export function createApp(deps: AppDeps): Express {
       // The session key of the session that presented this request (a digest, never the cookie), for a session route:
       // a command binds it so its transaction commits only while that very session is live (M5-ADMIN-REVOKE-P1), and
       // (M7A-CUSTOMERS-P3) a tenant command's store also hands it, inside that transaction, to its mutator's session-bound
-      // routine (migration 019), which derives the command's authority from it alone. It goes nowhere else — no log line, no handler, no context — with ONE declared exception: the handler of a route
+      // routine (migration 019), which derives the command's authority from it alone. It goes nowhere else — no log line, no handler, no context — with TWO declared exceptions: the handler of a route
       // declaring `sessionBinding: 'required'` (routes.ts, M7A-CUSTOMERS-P2) receives it as ctx.sessionKey, a SQL
-      // parameter that binds its read to this very session. The request log never includes ctx.
+      // parameter that binds its read to this very session; and (M7B-PAYMENTS-P2, D-R3-A) a COMMAND declaring it (routes.ts
+      // SESSION_BOUND_STORE_COMMANDS: the payment registration and the payment record) binds its SHA-256 digest — never the
+      // key — into the idempotency fingerprint's own tagged slot, so a replacement session replaying an old key is a 422,
+      // never the stored answer. The request log never includes ctx.
       let sessionKey: string | null = null;
       const { policy } = route;
       if (policy.access === 'authenticated') {
@@ -1061,12 +1070,21 @@ export function createApp(deps: AppDeps): Express {
         // trusted context on every idempotent route and the chain refused above without one; should that ever stop
         // holding, refuse rather than bind an empty scope.
         if (context === null) return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
+        // A session-bound command (routes.ts SESSION_BOUND_STORE_COMMANDS) binds its presenting session's digest; one without
+        // a session key is refused rather than fingerprinted unbound.
+        const sessionDigest = 'command' in route && route.sessionBinding === 'required'
+          ? (sessionKey === null ? null : createHash('sha256').update(sessionKey).digest('base64url')) : null;
+        if ('command' in route && route.sessionBinding === 'required' && sessionDigest === null) {
+          return refuse(req, res, 403, 'forbidden', 'authz_context_missing');
+        }
         const operation = store.keyring.operationOf(key.key, principal as VerifiedPrincipal, {
           method: route.method, path: route.path, audience, tenant: context.tenant, store: context.store, actor: context.actor, body: bytes,
           // A templated command's validated target (null elsewhere: a literal route's fingerprint is unchanged).
           target: targetId,
           // M7B-PAYMENTS-P1: the reversal's validated payment id, after the invoice; absent everywhere else.
           ...(paymentId === null ? {} : { secondTarget: paymentId }),
+          // M7B-PAYMENTS-P2 (D-R3-A): a session-bound command's session digest, last, in its own slot; absent everywhere else.
+          ...(sessionDigest === null ? {} : { session: sessionDigest }),
         });
         const lease = randomBytes(32).toString('base64url');
         const acquired = await acquireIdempotency(store, Object.freeze({ ...operation, lease, ...IDEMPOTENCY_POLICY }), deadlineMs);

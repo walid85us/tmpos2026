@@ -37,7 +37,7 @@
 //   IIH-09 races over two entries ordered by an owner's hold of the header.
 //   IIH-10 snapshot independence from a later customer rename and settings write.
 //   IIH-11 the 1 KiB body bound and the media type over real sockets.
-//   IIH-12 no log leaks (run last); the shipping inventory is exactly the 36 routes.
+//   IIH-12 no log leaks (run last); the shipping inventory is exactly the 40 routes.
 //   IIH-13 a change committed on another entry while the issue waits: a rename and a settings write the sealed write_conflict;
 //          a level narrowing and a session revocation the 503, rolled back — each 503 answered before the issue's lock bound
 //          (wall clock from the send, and the release before waitstart + the bound on the database clock), so never a timeout.
@@ -61,7 +61,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -283,7 +283,7 @@ async function teardown() {
             'tmpos_invoice_issue.issued_invoice'::regclass, 'tmpos_invoice_issue.issued_invoice_line'::regclass,
             'tmpos_invoice_issue.store_invoice_counter'::regclass, 'tmpos_invoice_issue.store_issuing_settings'::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
-        settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0, customers: 0, anchors: 0, latest: '036',
+        settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0, customers: 0, anchors: 0, latest: '037',
         triggers: ['trg_invoice_draft_immutable:A', 'trg_invoice_draft_line_terminal:A', 'trg_invoice_draft_terminal:A', 'trg_issued_invoice_commit_check:A',
           'trg_issued_invoice_guard:A', 'trg_issued_invoice_line_guard:A', 'trg_issued_invoice_line_truncate:A', 'trg_issued_invoice_truncate:A',
           'trg_store_invoice_counter_guard:A', 'trg_store_invoice_counter_truncate:A', 'trg_store_issuing_settings_guard:A', 'trg_store_issuing_settings_truncate:A'].join(','),
@@ -416,6 +416,7 @@ await setupStep(async () => {
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   await owner.unsafe('drop schema if exists iih_proof cascade');
   await owner.unsafe('create schema iih_proof');
   await owner.unsafe('revoke all on schema iih_proof from public');
@@ -1861,7 +1862,7 @@ test('IIH-11 (ISS-22): the issue body is bounded at exactly 1 KiB on the real en
 // IIH-12: logs and containment (last)
 // ===========================================================================
 
-test('IIH-12 (ISS-24 server half, AC-12): no log line of any entry carries a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 36 routes, the seven issuing routes among them', () => {
+test('IIH-12 (ISS-24 server half, AC-12): no log line of any entry carries a session key, an Idempotency-Key, a body, seller, customer or line text or an id — nor does the server log of a cluster this file started; the shipping inventory is exactly the 40 routes, the seven issuing routes among them', () => {
   const forbidden = [...SECRETS, ...['hex', 'base64', 'base64url'].flatMap((e) => [RATE_KEY.toString(e), ISSUER_KEY.toString(e), IDEMPOTENCY_KEY.toString(e)])];
   assert.ok(ALL_LOG_LINES.length > 0 && SECRETS.size > 0, 'log lines and secrets were actually captured across the suite');
   for (const l of ALL_LOG_LINES) for (const secret of forbidden) assert.ok(!l.includes(secret), `a log line carries a secret: ${secret.slice(0, 6)}...`);
@@ -1869,7 +1870,7 @@ test('IIH-12 (ISS-24 server half, AC-12): no log line of any entry carries a ses
     const leaked = forbidden.filter((v) => readFileSync(`${cluster.root}/postgres.log`, 'utf8').includes(v));
     assert.deepEqual(leaked.map((v) => v.slice(0, 6)), [], 'the cluster\'s server log carries no secret');
   }
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 36, 'exactly the 36 shipping routes (M7B-PAYMENTS-P1 adds five)');
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 40, 'exactly the 40 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four)');
   const served = new Set(TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path}`));
   for (const route of ['GET /api/v1/issuing-settings/{id}', 'PUT /api/v1/issuing-settings/{id}', 'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-eligibility',
     'GET /api/v1/stores/{storeId}/invoice-drafts/{id}/issue-preview', 'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue',
@@ -1877,6 +1878,8 @@ test('IIH-12 (ISS-24 server half, AC-12): no log line of any entry carries a ses
     'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/void',
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/payments',
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal',
-    'GET /api/v1/stores/{storeId}/invoices/{id}/payments']) assert.ok(served.has(route), `served: ${route}`);
-  assert.equal(served.size, 36, 'no route twice');
+    'GET /api/v1/stores/{storeId}/invoices/{id}/payments',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/payment-registrations', 'GET /api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/payment-settlement', 'GET /api/v1/stores/{storeId}/payment-attempts']) assert.ok(served.has(route), `served: ${route}`);
+  assert.equal(served.size, 40, 'no route twice');
 });

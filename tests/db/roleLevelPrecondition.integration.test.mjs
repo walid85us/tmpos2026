@@ -34,7 +34,7 @@ import tls from 'node:tls';
 import { EventEmitter } from 'node:events';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriver } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -222,6 +222,7 @@ await setupStep(async () => {
   });
   issuerKeyBefore = await issuerKeyRow();
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   await owner.unsafe('drop schema if exists p4w_proof cascade');
   await owner.unsafe('create schema p4w_proof');
   await owner.unsafe('revoke all on schema p4w_proof from public');

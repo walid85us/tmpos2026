@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { appendFileSync, chmodSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from '../../db/localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriver } from '../../db/localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../../server/platform-identity/db.ts';
@@ -228,6 +228,7 @@ async function bringUp(gen) {
     await sql`insert into tmpos_rate_limit.key_fingerprint (singleton, fingerprint) values (true, ${rateLimitKeyFingerprint(rateKey)})`;
   });
   await installTestIssuerKey(owner, issuerKey);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   const { privateKey } = generateKeyPairSync('rsa', {
     modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' },
   });

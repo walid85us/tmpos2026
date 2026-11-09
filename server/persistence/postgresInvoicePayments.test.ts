@@ -8,7 +8,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
-  INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR, createPostgresInvoicePayments, invoicePaymentsAnswerOf, probeInvoicePayments,
+  INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REGISTER_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR, INVOICE_PAYMENT_SETTLE_MUTATOR,
+  createPostgresInvoicePayments, invoicePaymentsAnswerOf, probeInvoicePayments,
 } from './postgresInvoicePayments.js';
 import { INVOICE_DRAFT_READ_BOUNDS } from './postgresInvoiceDrafts.js';
 import { ROUTINE_AUDITED_KINDS, createPostgresTransactionalStore } from './postgresTransactionalStore.js';
@@ -29,6 +30,9 @@ const PAYMENT = randomUUID();
 const ATTEMPT = randomUUID();
 const AUDIT_EVENT = randomUUID();
 const CORRELATION = randomUUID();
+// M7B-PAYMENTS-P2 (record v2): the registration the record names and a synthetic proof (64 hex digits, never a real MAC).
+const REGISTRATION = randomUUID();
+const PROOF = 'cd'.repeat(32);
 const DEADLINE = 1_800_000_000_000;
 const STORE_SCOPE: TrustedScope = Object.freeze({
   actor: ACTOR, securityVersion: 'sv', scope: 'store', tenant: TENANT, store: STORE, membershipId: MEMBERSHIP, roleId: 'manager', limitation: 'none',
@@ -55,14 +59,15 @@ const FRESH = [{ fresh: true }];
 const REC_OUT = ['o_tenant_id', 'o_store_id', 'o_actor_id', 'o_membership_id', 'o_payment_id', 'o_invoice_id', 'o_audit_event_id'];
 const recordMutation = (over: Record<string, unknown> = {}, aggregateId: unknown = PAYMENT, expectedVersion: unknown = null): TransactionMutation => Object.freeze({
   kind: 'store.invoice_payment.record', aggregateType: 'invoice_payment', aggregateId: aggregateId as string, expectedVersion: expectedVersion as null,
-  changes: Object.freeze({ invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', ...over }),
+  changes: Object.freeze({ invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', registrationId: REGISTRATION,
+    registrationProof: PROOF, ...over }),
 });
 const recorded = (over: Record<string, unknown> = {}) => ({
   o_outcome: 'applied', o_tenant_id: TENANT, o_store_id: STORE, o_actor_id: ACTOR, o_membership_id: MEMBERSHIP, o_payment_id: PAYMENT, o_invoice_id: INVOICE,
   o_audit_event_id: AUDIT_EVENT, ...over,
 });
 
-test('IPP-01 the record mutator: a routine-audited store-scope CREATE of an invoice_payment declaring the record refusals; ONE fixed call binding the key, the REVALIDATED store, the invoice, the tenant, the payment, the attempt, the amount as bigint text, the method and the correlation id; applied only with this identity and an audit id; it never asks the clock', async () => {
+test('IPP-01 the record mutator: a routine-audited store-scope CREATE of an invoice_payment declaring the record refusals; ONE fixed call (037\'s record v2, M7B-PAYMENTS-P2) binding the key, the REVALIDATED store, the invoice, the tenant, the payment, the registration, the attempt, the amount as bigint text, the method, the proof and the correlation id; applied only with this identity and an audit id; it never asks the clock', async () => {
   assert.deepEqual([INVOICE_PAYMENT_RECORD_MUTATOR.kind, INVOICE_PAYMENT_RECORD_MUTATOR.mode, INVOICE_PAYMENT_RECORD_MUTATOR.aggregateType, INVOICE_PAYMENT_RECORD_MUTATOR.contextScope,
     INVOICE_PAYMENT_RECORD_MUTATOR.paymentRefusals, INVOICE_PAYMENT_RECORD_MUTATOR.routineAudited, INVOICE_PAYMENT_RECORD_MUTATOR.auditSubjects],
   ['store.invoice_payment.record', 'create', 'invoice_payment', 'store', 'record', true, undefined]);
@@ -70,21 +75,25 @@ test('IPP-01 the record mutator: a routine-audited store-scope CREATE of an invo
     INVOICE_PAYMENT_REVERSE_MUTATOR.paymentRefusals, INVOICE_PAYMENT_REVERSE_MUTATOR.routineAudited, INVOICE_PAYMENT_REVERSE_MUTATOR.auditSubjects],
   ['store.invoice_payment.reverse', 'update', 'invoice_payment', 'store', undefined, true, undefined]);
   assert.ok(Object.isFrozen(INVOICE_PAYMENT_RECORD_MUTATOR) && Object.isFrozen(INVOICE_PAYMENT_REVERSE_MUTATOR));
-  assert.deepEqual([INVOICE_PAYMENT_RECORD_MUTATOR.kind, INVOICE_PAYMENT_REVERSE_MUTATOR.kind], [...ROUTINE_AUDITED_KINDS], 'exactly the routine-audited kinds');
+  // M7B-PAYMENTS-P2: the registration and the settlement joined the routine-audited kinds (postgresInvoicePaymentRegistrations.test.ts).
+  assert.deepEqual([INVOICE_PAYMENT_RECORD_MUTATOR.kind, INVOICE_PAYMENT_REVERSE_MUTATOR.kind, INVOICE_PAYMENT_REGISTER_MUTATOR.kind, INVOICE_PAYMENT_SETTLE_MUTATOR.kind],
+    [...ROUTINE_AUDITED_KINDS], 'exactly the routine-audited kinds');
   // The store builds over both (the mutator table's I2 check).
   const client = { transaction: async () => { throw new Error('unused'); }, end: async () => undefined } as unknown as SupervisedPgClient;
-  assert.doesNotThrow(() => createPostgresTransactionalStore({ client, mutators: [INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR], contextScope: 'tenant', revalidate: async () => true }));
+  assert.doesNotThrow(() => createPostgresTransactionalStore({ client, mutators: [INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR,
+    INVOICE_PAYMENT_REGISTER_MUTATOR, INVOICE_PAYMENT_SETTLE_MUTATOR], contextScope: 'tenant', revalidate: async () => true }));
   const r = recorder([recorded()]);
   assert.equal(await INVOICE_PAYMENT_RECORD_MUTATOR.apply(r.sql, recordMutation(), authority()), 'applied');
   assert.equal(r.texts.length, 1, 'one statement, no clock');
   assert.equal(squash(r.texts[0]), 'select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_payment_id, o_invoice_id, o_audit_event_id '
-    + 'from tmpos_invoice_payment.m7b_invoice_payment_record(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text, ?::uuid)', 'the exact statement');
-  assert.deepEqual(r.values[0], [KEY, STORE, INVOICE, TENANT, PAYMENT, ATTEMPT, '1250', 'cash', CORRELATION]);
+    + 'from tmpos_invoice_payment.m7b_invoice_payment_record_v2(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text, ?::text, ?::uuid)',
+  'the exact statement: 037\'s record v2, never 036\'s nine-argument record');
+  assert.deepEqual(r.values[0], [KEY, STORE, INVOICE, TENANT, PAYMENT, REGISTRATION, ATTEMPT, '1250', 'cash', PROOF, CORRELATION]);
   for (const method of INVOICE_PAYMENT_METHODS) {
     for (const amount of [1, MAX]) {
       const each = recorder([recorded()]);
       assert.equal(await INVOICE_PAYMENT_RECORD_MUTATOR.apply(each.sql, recordMutation({ method, amountCents: amount }), authority()), 'applied');
-      assert.deepEqual([each.values[0][6], each.values[0][7]], [String(amount), method], `${method} ${amount}: exact text`);
+      assert.deepEqual([each.values[0][7], each.values[0][8]], [String(amount), method], `${method} ${amount}: exact text`);
     }
   }
   // Every refusal word: the tenant precondition rolled back, the rest passed through; nothing else names anything.
@@ -125,6 +134,10 @@ test('IPP-03 the record calls nothing without the revalidated store context, its
     ['a bad attempt', recordMutation({ attemptId: null }), authority()], ['amount 0', recordMutation({ amountCents: 0 }), authority()],
     ['an unsafe amount', recordMutation({ amountCents: MAX + 1 }), authority()], ['an amount as text', recordMutation({ amountCents: '1250' }), authority()],
     ['an unknown method', recordMutation({ method: 'card' }), authority()],
+    // M7B-PAYMENTS-P2 (record v2): the registration and the proof exactly as the planner admits them.
+    ['no registration', recordMutation({ registrationId: undefined }), authority()], ['a bad registration', recordMutation({ registrationId: REGISTRATION.toUpperCase() }), authority()],
+    ['no proof', recordMutation({ registrationProof: undefined }), authority()], ['an uppercase proof', recordMutation({ registrationProof: PROOF.toUpperCase() }), authority()],
+    ['a short proof', recordMutation({ registrationProof: PROOF.slice(1) }), authority()], ['a proof as a number', recordMutation({ registrationProof: 7 }), authority()],
   ];
   for (const [label, mutation, auth] of cases) {
     const r = recorder([recorded()]);

@@ -61,7 +61,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -319,6 +319,7 @@ await setupStep(async () => {
   });
   issuerKeyBefore = await issuerKeyRow();
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   await owner.unsafe('drop schema if exists m5irlh_proof cascade');
   await owner.unsafe('create schema m5irlh_proof');
   await owner.unsafe('revoke all on schema m5irlh_proof from public');

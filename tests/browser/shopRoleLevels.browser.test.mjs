@@ -598,7 +598,7 @@ import { tmpdir } from 'node:os';
 import { dirname, extname, join, relative, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriver } from '../db/localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriver } from '../db/localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -727,6 +727,7 @@ async function setupDatabase() {
   const [ik] = await owner`select key from tmpos_mint.issuer_key where singleton`;
   issuerKeyBefore = ik === undefined ? null : Buffer.from(ik.key);
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
 }
 
 const TRIGGER_MODE = Object.freeze({ O: 'enable trigger', D: 'disable trigger', R: 'enable replica trigger', A: 'enable always trigger' });

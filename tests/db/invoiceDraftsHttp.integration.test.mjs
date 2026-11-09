@@ -86,7 +86,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriverVia } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -375,6 +375,7 @@ await setupStep(async () => {
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
   await owner.unsafe('drop schema if exists idh_proof cascade');
   await owner.unsafe('create schema idh_proof');
   await owner.unsafe('revoke all on schema idh_proof from public');

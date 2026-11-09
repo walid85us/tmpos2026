@@ -62,8 +62,17 @@ function removeOwned(dir) {
 /**
  * Start a disposable cluster. Returns the socket DSN plus a `stop()` that gracefully stops the
  * cluster this harness started and removes only the directory it created.
+ *
+ * `durable: true` (M7B-PAYMENTS-P2 PRQ-1) starts the single primary crash-durable instead of fast: fsync,
+ * full_page_writes and the default synchronous_commit on, and initdb syncs its files. A suite that proves a WAL
+ * flush claim needs this; every other suite keeps the fast default. `walSegmentMb` (a power of two, 1-1024) is
+ * initdb's --wal-segsize, for a suite that must prove WAL arithmetic on a non-default segment size.
  */
-export function startDisposablePostgres() {
+export function startDisposablePostgres({ durable = false, walSegmentMb } = {}) {
+  if (walSegmentMb !== undefined && !(Number.isInteger(walSegmentMb) && walSegmentMb >= 1 && walSegmentMb <= 1024
+      && (walSegmentMb & (walSegmentMb - 1)) === 0)) {
+    throw new Error('walSegmentMb must be a power of two between 1 and 1024');
+  }
   const root = mkdtempSync(join(tmpdir(), 'tmpos-s1b-'));
   OWNED_DIRS.add(root);
   const dataDir = join(root, 'data');
@@ -114,7 +123,8 @@ export function startDisposablePostgres() {
       '--auth-local=trust',
       '--auth-host=reject',
       '--encoding=UTF8',
-      '--no-sync',
+      ...(durable ? [] : ['--no-sync']),
+      ...(walSegmentMb === undefined ? [] : [`--wal-segsize=${walSegmentMb}`]),
     ], env);
 
     // Socket-only: no TCP listener at all, so no local port is exposed.
@@ -123,9 +133,9 @@ export function startDisposablePostgres() {
       "# S1b disposable cluster: socket-only, no TCP port.",
       "listen_addresses = ''",
       `unix_socket_directories = '${sockDir}'`,
-      'fsync = off',
-      'full_page_writes = off',
-      'synchronous_commit = off',
+      ...(durable
+        ? ['fsync = on', 'full_page_writes = on', 'synchronous_commit = on']
+        : ['fsync = off', 'full_page_writes = off', 'synchronous_commit = off']),
       'max_connections = 20',
       '',
     ].join('\n'));
@@ -179,6 +189,21 @@ export async function installTestIssuerKey(owner, issuerKey = randomBytes(32)) {
   await owner`insert into tmpos_mint.issuer_key (singleton, key) values (true, ${issuerKey})
     on conflict (singleton) do update set key = excluded.key`;
   return issuerKey;
+}
+
+/**
+ * Installs a synthetic payment proof key (migration 037, M7B-PAYMENTS-P2) as the database OWNER, as installTestIssuerKey
+ * does for 018: a bound parameter, 32 random bytes made in this process, never written anywhere, under the next
+ * generation (037's install trigger refuses any other). The tenant entry refuses to start without one, so every suite
+ * that starts it installs one at setup. A database below 037 has no such table and nothing to install: answers false.
+ */
+export async function installTestPaymentProofKey(owner, key = randomBytes(32)) {
+  const [{ present }] = await owner`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`;
+  if (!present) return false;
+  const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
+  await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${key}, ${g}::bigint)
+    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,15 +311,20 @@ export function suppliedTarget() {
 
 /**
  * The target for one suite: the supplied TM_POS_TEST_DATABASE_URL when present (validated, never
- * repaired), otherwise a fresh cluster this harness starts. There is no third source.
+ * repaired), otherwise a fresh cluster this harness starts. There is no third source. `durable` is passed to
+ * startDisposablePostgres; a supplied target is never reconfigured, so a durable suite checks its settings itself.
  */
-export function resolveDisposableTarget(label) {
+export function resolveDisposableTarget(label, { durable = false, walSegmentMb } = {}) {
   const supplied = suppliedTarget();
-  if (supplied !== undefined) return supplied;
+  if (supplied !== undefined) {
+    // A supplied target is never reconfigured, so a WAL segment size cannot be honoured; refuse rather than run on the wrong size.
+    if (walSegmentMb !== undefined) throw new Error(`${label} REFUSED: walSegmentMb=${String(walSegmentMb).slice(0, 16)} cannot be honoured on a supplied target (${TARGET_VAR}); run this suite with no supplied target so the harness starts its own cluster.`);
+    return supplied;
+  }
   if (!localPostgresAvailable()) {
     throw new Error(`${label} INFRASTRUCTURE BLOCKER: no ${TARGET_VAR} and no local initdb/pg_ctl. Docker and remote databases are not substitutes.`);
   }
-  const cluster = startDisposablePostgres();
+  const cluster = startDisposablePostgres({ durable, walSegmentMb });
   return register({
     source: 'harness', hostKind: 'unix_socket', host: cluster.socketDir, port: 5432, user: BOOTSTRAP_ROLE,
     password: null, database: cluster.database, dsn: cluster.dsn, cluster,

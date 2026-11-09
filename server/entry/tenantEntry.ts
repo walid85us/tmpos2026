@@ -161,6 +161,11 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payments', access: 'session', body: 'none', idempotency: 'none' },
+  // M7B-PAYMENTS-P2: the registration proof, the caller's attempts, the registration and the settlement, in composition order.
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/payment-attempts', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-settlement', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -358,6 +363,17 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     if (keyAnswer === 'absent') return await refuse('tenant_issuer_key_absent');
     if (keyAnswer === 'mismatch') return await refuse('tenant_issuer_key_mismatch');
     if (keyAnswer !== 'match') return await refuse('tenant_issuer_key_probe_malformed');
+
+    // 8b. The payment proof key (M7B-PAYMENTS-P2, migration 037): installed out of band by the owner, never sent or read here —
+    //     only whether it is present. Without it no payment can be registered or recorded, so the entry does not start; a key
+    //     removed after startup fails those closed while the attempts read and the settlement keep serving.
+    let proofKey: string;
+    try {
+      proofKey = await bounded(startup.signal, (signal) => tx.paymentProofKey(signal));
+    } catch {
+      return await refuse('database_unavailable', ['payment_proof_key_unanswered']);
+    }
+    if (proofKey !== 'present') return await refuse('tenant_payment_proof_key_absent');
 
     // 9. The limiter key: registered when the store has none, compared otherwise — before any request can race it.
     let keyStatus: string;

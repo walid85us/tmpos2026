@@ -1100,7 +1100,8 @@ const REVERSAL = '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/re
 const PAYMENT_ID = '5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b';
 const paymentRoutes = () => [
   storeRead({ path: PAYMENT_ELIGIBILITY, policy: SESSION('tenant', STORE_RECORD) }),
-  storeCreate({ path: PAYMENTS, policy: SESSION('tenant', STORE_RECORD), body: { kind: 'json', maxBytes: 1_024, required: true } }),
+  // M7B-PAYMENTS-P2 (D-R3-A): the record is one of the two session-bound store commands, so it declares the binding.
+  storeCreate({ path: PAYMENTS, policy: SESSION('tenant', STORE_RECORD), body: { kind: 'json', maxBytes: 1_024, required: true }, sessionBinding: 'required' }),
   storeRead({ path: REVERSAL_ELIGIBILITY, policy: SESSION('tenant', STORE_REVERSE) }),
   storeCreate({ path: REVERSAL, policy: SESSION('tenant', STORE_REVERSE), body: { kind: 'json', maxBytes: 1_024, required: true }, recentAuth: 'required' }),
   storeRead({ path: PAYMENTS, policy: SESSION('tenant', STORE_VIEW_ISSUED) }),
@@ -1132,6 +1133,50 @@ test('M7B-PAYMENTS-P1: the five new store templates register — the record and 
     assert.notEqual(setupCode([def]), undefined, label);
   }
   assert.equal(setupCode([...paymentRoutes(), ...paymentRoutes()]), 'route_duplicate');
+});
+
+const REGISTRATIONS = '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations';
+const REGISTRATION_PROOF = '/api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof';
+const SETTLEMENT = '/api/v1/stores/{storeId}/invoices/{id}/payment-settlement';
+const ATTEMPTS = '/api/v1/stores/{storeId}/payment-attempts';
+const registrationRoutes = () => [
+  storeCreate({ path: REGISTRATIONS, policy: SESSION('tenant', STORE_RECORD), body: { kind: 'json', maxBytes: 1_024, required: true }, sessionBinding: 'required' }),
+  storeRead({ path: REGISTRATION_PROOF, policy: SESSION('tenant', STORE_RECORD) }),
+  storeCreate({ path: SETTLEMENT, policy: SESSION('tenant', STORE_RECORD), body: { kind: 'json', maxBytes: 1_024, required: true } }),
+  storeRead({ path: ATTEMPTS, policy: SESSION('tenant', STORE_RECORD) }),
+];
+
+test('M7B-PAYMENTS-P2: the four PRQ-1 store templates register — the registration and the settlement as idempotency-required commands, the proof and the attempts as plain GETs; twenty-four store templates, nine of them commands; the registration and the record MUST declare the session binding and no other command may; every other shape stays refused', () => {
+  const all = [...draftRoutes(), ...issueRoutes(), ...voidRoutes(), ...paymentRoutes(), ...registrationRoutes(), list(), detail(), profile(), patch(), settingsRead(), settingsWrite(), directory()];
+  assert.equal(setupCode(all), undefined, 'twenty-four store templates, five tenant templates and the store directory together');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}')).length, 24, 'twenty-four store templates');
+  assert.equal(all.filter((def) => String(def.path).includes('{storeId}') && def.idempotency === 'required').length, 9, 'nine of them commands');
+  const table = defineRoutes(all);
+  const register = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payment-registrations`);
+  assert.ok(register !== undefined && 'command' in register && register.sessionBinding === 'required' && register.recentAuth === 'none', 'the registration: keyed, session-bound');
+  const settle = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payment-settlement`);
+  assert.ok(settle !== undefined && 'command' in settle && settle.sessionBinding === 'none', 'the settlement: keyed, not session-bound');
+  const record = table.lookup('POST', `/api/v1/stores/${STORE}/invoices/${ID}/payments`);
+  assert.ok(record !== undefined && 'command' in record && record.sessionBinding === 'required', 'the record: session-bound');
+  for (const [path, label] of [[`/api/v1/stores/${STORE}/invoices/${ID}/payment-registration-proof`, 'the proof'], [`/api/v1/stores/${STORE}/payment-attempts`, 'the attempts']] as const) {
+    const read = table.lookup('GET', path);
+    assert.ok(read !== undefined && 'handler' in read && read.idempotency === 'none' && read.sessionBinding === 'required', `${label}: a session-bound GET`);
+  }
+  for (const [label, def] of [
+    ['the registration without the binding', storeCreate({ path: REGISTRATIONS, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the record without the binding', storeCreate({ path: PAYMENTS, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the settlement with the binding', storeCreate({ path: SETTLEMENT, policy: SESSION('tenant', STORE_RECORD), sessionBinding: 'required' })],
+    ['the reversal with the binding', storeCreate({ path: REVERSAL, policy: SESSION('tenant', STORE_REVERSE), recentAuth: 'required', sessionBinding: 'required' })],
+    ['the draft save with the binding', storeCreate({ path: '/api/v1/stores/{storeId}/invoice-drafts', policy: SESSION('tenant', STORE_RECORD), sessionBinding: 'required' })],
+    ['the proof as a command', storeCreate({ path: REGISTRATION_PROOF, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the attempts as a command', storeCreate({ path: ATTEMPTS, policy: SESSION('tenant', STORE_RECORD) })],
+    ['the settlement as a GET read', storeRead({ path: SETTLEMENT, policy: SESSION('tenant', STORE_RECORD) })],
+    ['a registration with a payment id segment', storeCreate({ path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations/{paymentId}', policy: SESSION('tenant', STORE_RECORD), sessionBinding: 'required' })],
+  ] as const) {
+    assert.notEqual(setupCode([def]), undefined, label);
+  }
+  assert.equal(setupCode([storeCreate({ path: REGISTRATIONS, policy: SESSION('tenant', STORE_RECORD) })]), 'route_session_binding_invalid');
+  assert.equal(setupCode([...registrationRoutes(), ...registrationRoutes()]), 'route_duplicate');
 });
 
 test('M7B-PAYMENTS-P1: lookup — the reversal resolves only by the rule tried after every other, with both id segments raw; the record and the read share …/payments by method; the eligibilities, the void and the detail are unchanged; nothing shadows', () => {

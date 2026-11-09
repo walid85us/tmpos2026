@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 36 frozen tenant routes', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 40 frozen tenant routes (36 + M7B-PAYMENTS-P2\'s four)', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -251,8 +251,13 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 36 frozen tenant routes', ()
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payments', access: 'session', body: 'none', idempotency: 'none' },
+    // M7B-PAYMENTS-P2: the registration proof, the caller's attempts, the registration and the settlement.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'GET', path: '/api/v1/stores/{storeId}/payment-attempts', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations', access: 'session', body: 'json', idempotency: 'required' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-settlement', access: 'session', body: 'json', idempotency: 'required' },
   ]);
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 36);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 40);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });
@@ -324,7 +329,7 @@ type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
   | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeDirectoryProbe' | 'invoiceDraftPageProbe' | 'invoiceDraftGetProbe'
-  | 'issuingSettingsProbe' | 'issuePreviewProbe' | 'issuedPageProbe' | 'issuedGetProbe' | 'paymentsProbe' | 'storeProbe';
+  | 'issuingSettingsProbe' | 'issuePreviewProbe' | 'issuedPageProbe' | 'issuedGetProbe' | 'paymentsProbe' | 'storeProbe' | 'paymentProofKey';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -357,6 +362,7 @@ function classify(text: string): Kind {
   if (text.includes('m7b_issued_invoice_get')) return 'issuedGetProbe';
   if (text.includes('m7b_invoice_payments_get')) return 'paymentsProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
+  if (text.includes('m7b_payment_proof_key_probe')) return 'paymentProofKey';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
 
@@ -419,6 +425,8 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   paymentsProbe: [denied(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_applied_cents',
     'o_remaining_cents', 'o_payment_status', 'o_payment_id', 'o_attempt_id', 'o_amount_cents', 'o_method', 'o_recorded_at', 'o_reversed_at', 'o_reason_code'])],
   storeProbe: [{ ok: true }],
+  // M7B-PAYMENTS-P2: 037's key-presence probe — a key installed at generation 1 (never its bytes).
+  paymentProofKey: [{ o_present: true, o_generation: '1' }],
 });
 
 /** One call's answer: rows, 'reject' (the statement throws) or 'default' (GOLDEN). */
@@ -556,6 +564,22 @@ test('M7TU-12 the issuer key must answer match: absent, mismatch, invalid and an
   await assertRefused({ issuerKey: [[{ outcome: 'match' }, { outcome: 'match' }]] }, 'database_unavailable', ['issuer_key_unanswered']);
 });
 
+test('M7TU-12b (M7B-PAYMENTS-P2) the payment proof key must be present: absent refuses tenant_payment_proof_key_absent; an unanswered or out-of-shape probe refuses database_unavailable — before the limiter key is touched', async () => {
+  await assertRefused({ paymentProofKey: [[{ o_present: false, o_generation: null }]] }, 'tenant_payment_proof_key_absent', []);
+  for (const entry of ['reject', [], [{ o_present: true, o_generation: null }], [{ o_present: true, o_generation: '0' }], [{ o_present: false, o_generation: '2' }],
+    [{ o_present: 'true', o_generation: '1' }], [{ o_present: true, o_generation: '1' }, { o_present: true, o_generation: '1' }]] as const) {
+    await assertRefused({ paymentProofKey: [entry as Entry] }, 'database_unavailable', ['payment_proof_key_unanswered']);
+  }
+  const fake = fakeClient({ paymentProofKey: [[{ o_present: false, o_generation: null }]] });
+  const { result, stop } = await start({ client: fake.client });
+  try {
+    assert.equal(result.outcome, 'refused');
+    assert.ok(!fake.kinds.includes('rateLimitProbe'), 'the limiter key is never registered or compared after the proof key refuses');
+  } finally {
+    if (result.outcome === 'listening') await stop();
+  }
+});
+
 test('M7TU-13 the limiter key refuses as the administrative entry does', async () => {
   await assertRefused({ rateLimitProbe: [[{ outcome: 'key_mismatch' }]] }, 'rate_limit_key_mismatch', []);
   await assertRefused({ rateLimitProbe: [[{ outcome: 'store_read_only' }]] }, 'rate_limit_store_read_only', []);
@@ -630,10 +654,10 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     assert.equal(binds, 1, 'binds exactly once');
     const steps = fake.kinds.filter((k, i, all) => i === 0 || all[i - 1] !== k);
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
-      'logging', 'issuerKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe', 'customerDetailProbe',
-      'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'issuingSettingsProbe',
+      'logging', 'issuerKey', 'paymentProofKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe',
+      'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'issuingSettingsProbe',
       'issuePreviewProbe', 'issuedPageProbe', 'issuedGetProbe', 'paymentsProbe', 'storeProbe'],
-    'nothing is asked of the issuer key before the ledger and the logging guard, nor of the limiter before the issuer key');
+    'nothing is asked of the issuer key before the ledger and the logging guard, nor of the payment proof key before the issuer key (M7B-PAYMENTS-P2), nor of the limiter before either');
   } finally {
     await stop();
   }
@@ -799,6 +823,13 @@ test('M7TU-17 after listening, readiness is 503 once any one dependency turns ba
       assert.equal(asked.filter((x) => x === k).length, 1, `${k}: once per window`);
     }
     assert.equal(asked.filter((x) => x === 'storeProbe').length, 2, 'the idempotency store and the command port: once each per window');
+    // M7B-PAYMENTS-P2: readiness never asks the payment proof key, so a key removed after startup leaves the service ready (the
+    // attempts read and the settlement keep serving; register, proof and record fail closed in 037 itself).
+    assert.ok(!asked.includes('paymentProofKey'), 'readiness never asks the payment proof key');
+    fake.live.paymentProofKey = [{ o_present: false, o_generation: null }];
+    t.mock.timers.tick(1_000);
+    assert.equal(await ready(), 200, 'the key removed after startup: still ready');
+    delete fake.live.paymentProofKey;
   } finally {
     await stop();
   }

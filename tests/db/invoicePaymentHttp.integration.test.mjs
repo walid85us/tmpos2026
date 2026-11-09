@@ -26,6 +26,15 @@
 //     outbox row ever; the issued list and detail bytes unchanged by any payment;
 //   * the suite ends with no payment, reversal or payment audit record anywhere (036's rollback needs none).
 //
+// M7B-PAYMENTS-P2 (PRQ-1, migration 037) — WHAT CHANGED: 037 revokes the runtime's v1 record, so every record here is record v2
+// THROUGH A REGISTRATION: prepare() registers the attempt (POST …/payment-registrations), reads its proof back (GET
+// …/payment-registration-proof?registration=<id>) and the record's body is exactly { expectedTenant, registrationId, attemptId,
+// amountCents, method, registrationProof }. A recorded or refused registration holds its actor's slot on the invoice, so
+// prepare() first settles the actor's earlier one (POST …/payment-settlement: version 2 once recorded, 1 while open). The
+// record's audit record now names its registration as a second subject. The cluster is durable (the proof routine needs fsync
+// on) and the owner installs a proof key out of band before the entry starts (it refuses without one). Every case keeps its
+// intent; the registration's own refusals, replay isolation and fail-closed paths are proved by the IRH suite.
+//
 // It never touches a managed or remote database. Run: npx tsx scripts/run-db-tests.mjs tests/db/invoicePaymentHttp.integration.test.mjs
 
 import test from 'node:test';
@@ -63,6 +72,9 @@ const ADMIN_ORIGIN = 'https://admin.tmpos.test';
 const RECORD_ACTION = 'store.invoice_payment.record';
 const REVERSE_ACTION = 'store.invoice_payment.reverse';
 const PAYMENT_ACTIONS = [RECORD_ACTION, REVERSE_ACTION];
+/** 037's registration and settlement actions (routine-audited, the registration their subject). */
+const REGISTRATION_ACTIONS = ['store.invoice_payment.register', 'store.invoice_payment.settle'];
+const REG_TABLE = 'tmpos_invoice_payment.invoice_payment_registration';
 const VOID_ACTION = 'store.invoice.void';
 const PAY_TABLE = 'tmpos_invoice_payment.invoice_payment';
 const REV_TABLE = 'tmpos_invoice_payment.invoice_payment_reversal';
@@ -86,7 +98,8 @@ assert.deepEqual([...INVOICE_PAYMENT_REVERSAL_REASON_CODES], ['recorded_in_error
 // cluster lifecycle
 // ---------------------------------------------------------------------------
 
-const TARGET = resolveDisposableTarget('IPH');
+// Durable (M7B-PAYMENTS-P2): 037's proof routine refuses with fsync off, and every record now needs a proof.
+const TARGET = resolveDisposableTarget('IPH', { durable: true });
 const TARGET_DSN = TARGET.dsn;
 const cluster = TARGET.cluster ?? null;
 assertDisposableTestDsn(TARGET_DSN);
@@ -113,6 +126,8 @@ const USED_KEYS = [];
 let rateLimitFingerprintBefore;
 let issuerKeyBefore;
 const RATE_KEY = randomBytes(32);
+/** The payment proof key the owner installs out of band (037: never by a migration); removed again by the teardown. */
+const PROOF_KEY = randomBytes(32);
 const ISSUER_KEY = randomBytes(32);
 const IDEMPOTENCY_KEY = randomBytes(32);
 const KEYRING = createIdempotencyKeyring(IDEMPOTENCY_KEY);
@@ -168,6 +183,11 @@ async function cleanAll() {
       await sql`update public.audit_event set subject_customer_id = null
         where subject_customer_id in (select customer_id from tmpos_customer.customer where tenant_id = any(${TENANTS}::uuid[]))`;
     });
+    // 037's registrations reference payments: they go first, every one of their own guards lifted inside this transaction.
+    const registrationGuards = (await sql`select tgname::text as name from pg_catalog.pg_trigger where tgrelid = ${REG_TABLE}::regclass and not tgisinternal`)
+      .map((r) => [REG_TABLE, r.name]);
+    await withTriggersLifted(sql, registrationGuards,
+      () => sql`delete from tmpos_invoice_payment.invoice_payment_registration where tenant_id = any(${TENANTS}::uuid[])`);
     await withTriggersLifted(sql, PAYMENT_GUARDS, async () => {
       await sql`delete from tmpos_invoice_payment.invoice_payment_reversal where tenant_id = any(${TENANTS}::uuid[])`;
       await sql`delete from tmpos_invoice_payment.invoice_payment where tenant_id = any(${TENANTS}::uuid[])`;
@@ -199,6 +219,7 @@ async function teardown() {
         and (payload ->> 'storeId')::uuid in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`);
     }
     await step(cleanAll);
+    await step(() => owner`delete from tmpos_invoice_payment.payment_proof_key where singleton`);
     if (UIDS.length > 0) {
       await step(async () => {
         for (const row of await owner`select session_key from tmpos_session.session where auth_provider_uid = any(${UIDS}::text[])`) KEYS.add(row.session_key);
@@ -231,6 +252,10 @@ async function teardown() {
         (select count(*) from tmpos_invoice_payment.invoice_payment)::int as payments,
         (select count(*) from tmpos_invoice_payment.invoice_payment_reversal)::int as reversals,
         (select count(*) from public.audit_event where action_id = any(${PAYMENT_ACTIONS}::text[]) or subject_invoice_payment_id is not null)::int as payment_audits,
+        (select count(*) from tmpos_invoice_payment.invoice_payment_registration)::int as registrations,
+        (select count(*) from public.audit_event where action_id = any(${REGISTRATION_ACTIONS}::text[]) or subject_invoice_payment_registration_id is not null)::int as registration_audits,
+        (select count(*) from tmpos_invoice_payment.payment_proof_key)::int as proof_keys,
+        (select pg_catalog.bool_and(g.tgenabled = 'A') from pg_catalog.pg_trigger g where g.tgrelid = ${REG_TABLE}::regclass and not g.tgisinternal) as registration_guards_always,
         (select count(*) from tmpos_invoice_void.issued_invoice_void where tenant_id = any(${TENANTS}::uuid[]))::int as voids,
         (select count(*) from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[]))::int as invoices,
         (select count(*) from tmpos_invoice_draft.invoice_draft where tenant_id = any(${TENANTS}::uuid[]))::int as drafts,
@@ -239,9 +264,10 @@ async function teardown() {
         (select pg_catalog.string_agg(g.tgname::text || ':' || g.tgenabled::text, ',' order by g.tgname) from pg_catalog.pg_trigger g
           where g.tgrelid in (${PAY_TABLE}::regclass, ${REV_TABLE}::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
-        payments: 0, reversals: 0, payment_audits: 0, voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '036',
+        payments: 0, reversals: 0, payment_audits: 0, registrations: 0, registration_audits: 0, proof_keys: 0, registration_guards_always: true,
+        voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '037',
         triggers: ['trg_invoice_payment_guard:A', 'trg_invoice_payment_reversal_guard:A', 'trg_invoice_payment_reversal_truncate:A', 'trg_invoice_payment_truncate:A'].join(','),
-      }, 'no payment, reversal or payment audit record anywhere, nothing of this suite left, and every payment guard ALWAYS again');
+      }, 'no payment, reversal, registration, proof key or payment/registration audit record anywhere, nothing of this suite left, and every payment and registration guard ALWAYS again');
     });
   } finally {
     await step(() => owner.end({ timeout: 5 }));
@@ -281,8 +307,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('034', '035', '036')`;
-  assert.equal(applied, 3, 'migrations 034-036 are applied: the issuing, the void and the payments');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('034', '035', '036', '037')`;
+  assert.equal(applied, 4, 'migrations 034-037 are applied: the issuing, the void, the payments and the registrations');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -297,6 +323,10 @@ await setupStep(async () => {
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
   await installTestIssuerKey(owner, ISSUER_KEY);
+  // The owner's out-of-band proof key install (037), under the next generation: the entry refuses to start without one.
+  const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
+  await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${PROOF_KEY}, ${g}::bigint)
+    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
 });
 
 // ---------------------------------------------------------------------------
@@ -415,7 +445,12 @@ function sellerOf(label) {
 /** The Total a subtotal derives under the 8875 rate (doc 12 §10.8, BigInt). */
 const totalOf = (subtotal) => subtotal + Number((BigInt(subtotal) * 8875n + 50_000n) / 100_000n);
 const subtotalOf = (lines) => lines.reduce((s, l) => s + l.quantity * l.unitPriceCents, 0);
-const recordBody = (tenant, attemptId, amountCents, method = 'cash') => ({ expectedTenant: tenant, attemptId, amountCents, method });
+/** Record v2's body for a registration { registrationId, attemptId, proof } (prepare(), or unregistered() for one no row backs). */
+const recordBody = (tenant, reg, amountCents, method = 'cash') => ({
+  expectedTenant: tenant, registrationId: reg.registrationId, attemptId: reg.attemptId, amountCents, method, registrationProof: reg.proof,
+});
+/** A well-formed registration and proof that name nothing (the planner accepts them; the routine never finds them). */
+const unregistered = (attemptId = randomUUID()) => ({ registrationId: randomUUID(), attemptId, proof: randomBytes(32).toString('hex') });
 const reverseBody = (tenant, reasonCode) => ({ expectedTenant: tenant, reasonCode });
 const voidBody = (tenant, reasonCode) => ({ expectedTenant: tenant, reasonCode });
 
@@ -438,11 +473,15 @@ async function counts(tenants, keys = []) {
     (select count(*) from public.audit_event)::int as aa,
     (select count(*) from tmpos_internal.outbox_event)::int as oo,
     (select count(*) from tmpos_internal.idempotency_record where response is not null)::int as c,
-    (select count(*) from tmpos_internal.idempotency_record where response is null)::int as le`;
-  return { P: r.p, R: r.r, PA: r.pa, RA: r.ra, V: r.v, VA: r.va, O: r.o, K: r.k, AA: r.aa, OO: r.oo, C: r.c, LE: r.le };
+    (select count(*) from tmpos_internal.idempotency_record where response is null)::int as le,
+    (select count(*) from tmpos_invoice_payment.invoice_payment_registration where tenant_id = any(${tenants}::uuid[]))::int as g,
+    (select count(*) from public.audit_event where action_id = any(${REGISTRATION_ACTIONS}::text[]) and tenant_id = any(${tenants}::uuid[]))::int as ga`;
+  return { P: r.p, R: r.r, PA: r.pa, RA: r.ra, V: r.v, VA: r.va, O: r.o, K: r.k, AA: r.aa, OO: r.oo, C: r.c, LE: r.le, G: r.g, GA: r.ga };
 }
 const delta = (after, before) => Object.fromEntries(Object.keys(after).map((k) => [k, after[k] - before[k]]));
-const NOTHING = Object.freeze({ P: 0, R: 0, PA: 0, RA: 0, V: 0, VA: 0, O: 0, K: 0, AA: 0, OO: 0, C: 0, LE: 0 });
+// G / GA (M7B-PAYMENTS-P2): the case's registrations and their register/settle audit records — written only by prepare(),
+// which every case calls BEFORE it takes its `before`, so a record, a refusal or a read moves neither.
+const NOTHING = Object.freeze({ P: 0, R: 0, PA: 0, RA: 0, V: 0, VA: 0, O: 0, K: 0, AA: 0, OO: 0, C: 0, LE: 0, G: 0, GA: 0 });
 const LEASE_ONLY = Object.freeze({ ...NOTHING, LE: 1 });
 const COMPLETION_ONLY = Object.freeze({ ...NOTHING, K: 1, C: 1 });
 /** One applied record: one payment, ONE audit record (036's routine), one completion — no outbox row, nothing else. */
@@ -471,7 +510,7 @@ async function reversalRowOf(payment) {
 }
 /** The audit records naming `payment`, oldest first. */
 const auditOf = async (payment) => (await owner`select action_id, required_permission, actor_internal_user_id, tenant_id, store_id, scope_type, decision,
-  result_status, request_id, subject_issued_invoice_id, subject_store_id from public.audit_event where subject_invoice_payment_id = ${payment}
+  result_status, request_id, subject_issued_invoice_id, subject_store_id, subject_invoice_payment_registration_id from public.audit_event where subject_invoice_payment_id = ${payment}
   order by occurred_at, event_id`).map((r) => ({ ...r }));
 /** Per audit record naming `payment`, every OTHER subject column that is not null (the payment must be the only subject). */
 const otherSubjectsOf = async (payment) => (await owner`select pg_catalog.to_jsonb(a) as j from public.audit_event a
@@ -520,7 +559,15 @@ async function withEntry(fn) {
     save: (s, store, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', drafts(store), body, key, {}),
     issue: (s, store, id, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${drafts(store)}/${id}/issue`, body, key, {}),
     putSettings: (s, store, body, { key = randomUUID() } = {}) => unsafe(s, 'PUT', `/api/v1/issuing-settings/${store}`, body, key, {}),
-    record: (s, store, id, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${invoices(store)}/${id}/payments`, body, key, {}),
+    // A 201 marks the actor's slot on the invoice recorded (prepare() then settles it at version 2).
+    record: async (s, store, id, body, { key = randomUUID() } = {}) => {
+      const reply = await unsafe(s, 'POST', `${invoices(store)}/${id}/payments`, body, key, {});
+      if (reply.status === 201) recordedSlot(s, id, body);
+      return reply;
+    },
+    register: (s, store, id, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${invoices(store)}/${id}/payment-registrations`, body, key, {}),
+    proof: (s, store, id, registration) => ctx.read(s, `${invoices(store)}/${id}/payment-registration-proof?registration=${registration}`),
+    settle: (s, store, id, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${invoices(store)}/${id}/payment-settlement`, body, key, {}),
     reverse: (s, store, id, payment, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${invoices(store)}/${id}/payments/${payment}/reversal`, body, key, {}),
     voidInvoice: (s, store, id, body, { key = randomUUID() } = {}) => unsafe(s, 'POST', `${invoices(store)}/${id}/void`, body, key, {}),
     reason: (reply) => {
@@ -602,6 +649,39 @@ async function issueOne(ctx, s, w, label, lines = [line(`IPH ${label} ${SUFFIX}`
   return { invoice, draft, total: totalOf(subtotalOf(lines)) };
 }
 
+/** Each actor's unsettled registration per invoice (037's slot): { registrationId, attemptId, recorded }. */
+const SLOTS = new Map();
+const slotOf = (s, invoice) => `${s.principal.authProviderUid}|${invoice}`;
+function recordedSlot(s, invoice, body) {
+  const slot = SLOTS.get(slotOf(s, invoice));
+  if (slot !== undefined && slot.registrationId === JSON.parse(typeof body === 'string' ? body : JSON.stringify(body)).registrationId) slot.recorded = true;
+}
+/**
+ * Record v2's precondition (M7B-PAYMENTS-P2): `s`'s actor registers `attemptId` on `invoice` and reads its proof back — after
+ * settling that actor's earlier unsettled registration on the invoice (the slot), version 2 once recorded, 1 while open.
+ * Returns { registrationId, attemptId, proof } for recordBody. Every case calls it before taking its `before`.
+ */
+async function prepare(ctx, s, tenant, store, invoice, attemptId = randomUUID()) {
+  const held = SLOTS.get(slotOf(s, invoice));
+  if (held !== undefined) {
+    const settled = await ctx.settle(s, store, invoice, { expectedTenant: tenant, attemptId: held.attemptId, expectedVersion: held.recorded ? 2 : 1 });
+    assert.equal(settled.status, 200, `the slot's settlement: ${settled.body}`);
+    SLOTS.delete(slotOf(s, invoice));
+  }
+  const registered = await ctx.register(s, store, invoice, { expectedTenant: tenant, attemptId });
+  assert.equal(registered.status, 201, `the registration: ${registered.body}`);
+  const registrationId = JSON.parse(registered.body).registration.id;
+  assert.equal(registered.body, JSON.stringify({ registration: { id: registrationId, invoiceId: invoice, attemptId, state: 'open' } }), 'the registration\'s sealed 201');
+  // ONE proof GET: the port itself commits a not_durable first attempt and asks once more (O1); a 503 here is a failure.
+  const read = await ctx.proof(s, store, invoice, registrationId);
+  assert.equal(read.status, 200, `the proof: ${read.body} ${read.status === 200 ? '' : ctx.reason(read)}`);
+  const { registration, proof } = JSON.parse(read.body);
+  assert.deepEqual(registration, { id: registrationId, invoiceId: invoice, attemptId }, 'the proof names its registration');
+  assert.match(proof, /^[0-9a-f]{64}$/);
+  SLOTS.set(slotOf(s, invoice), { registrationId, attemptId, recorded: false });
+  return { registrationId, attemptId, proof };
+}
+
 /** The record's sealed 201: exactly { "payment": { id, invoiceId, attemptId, amountCents, method } }, no Location; the payment id. */
 function recordedOf(reply, invoice, attemptId, amountCents, method, label, { replayed = false } = {}) {
   assert.equal(reply.status, 201, `${label}: ${reply.body}`);
@@ -680,8 +760,8 @@ async function issuedBytesOf(ctx, s, store, invoice) {
 // IPH-00: the shipping table
 // ===========================================================================
 
-test('IPH-00 (doc 15 §12.5 Composition): the tenant entry ships exactly 36 routes, the five payment routes among them with their body and idempotency', () => {
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 36);
+test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ships exactly 40 routes, the five payment routes and 037\'s four registration routes among them with their body and idempotency', () => {
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 40);
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path} ${r.body} ${r.idempotency}`);
   for (const want of [
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility none none',
@@ -690,6 +770,10 @@ test('IPH-00 (doc 15 §12.5 Composition): the tenant entry ships exactly 36 rout
     'POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal json required',
     'GET /api/v1/stores/{storeId}/invoices/{id}/payments none none',
     'POST /api/v1/stores/{storeId}/invoices/{id}/void json required',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/payment-registrations json required',
+    'GET /api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof none none',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/payment-settlement json required',
+    'GET /api/v1/stores/{storeId}/payment-attempts none none',
   ]) assert.ok(served.includes(want), want);
 });
 
@@ -697,7 +781,7 @@ test('IPH-00 (doc 15 §12.5 Composition): the tenant entry ships exactly 36 rout
 // IPH-01: the record
 // ===========================================================================
 
-test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record — the exact sealed 201 with no Location, one payment naming its actor, ONE audit record written by 036\'s routine (the payment its only subject) and its completion, no outbox row; the same-key replay byte for byte; the same key with other bytes or another invoice the 422; a new key reusing the attempt the sealed already_recorded (before amount_exceeds_remaining), its own replay sealed; the same attempt on another invoice a new payment; amount_exceeds_remaining; mixed methods to recorded_in_full; the read\'s amounts and word over the history; the issued list and detail bytes unchanged', async () => {
+test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record (v2, through a registration) — the exact sealed 201 with no Location, one payment naming its actor, ONE audit record written by 037\'s routine (the payment and its registration its only subjects) and its completion, no outbox row; the same-key replay byte for byte; the same key with other bytes or another invoice the 422; a new key reusing the attempt the sealed already_recorded (before amount_exceeds_remaining), its own replay sealed; the same attempt on another invoice a new payment; amount_exceeds_remaining; mixed methods to recorded_in_full; the read\'s amounts and word over the history; the issued list and detail bytes unchanged', async () => {
   const w = await world('iph01');
   await withEntry(async (ctx) => {
     await ready(ctx, w);
@@ -712,9 +796,10 @@ test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record — the exact 
     });
     // (1) The first payment.
     const A = randomUUID();
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
     const key = randomUUID();
     const keys = [{ key, principal: w.mgr.principal }];
-    const body = JSON.stringify(recordBody(w.T, A, 1000, 'cash'));
+    const body = JSON.stringify(recordBody(w.T, ra, 1000, 'cash'));
     let before = await counts([w.T], keys);
     const first = await ctx.record(s, w.S, x.invoice, body, { key });
     const p1 = recordedOf(first, x.invoice, A, 1000, 'cash', 'the first payment');
@@ -725,51 +810,58 @@ test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record — the exact 
     }, 'the payment as stored, naming its actor');
     const audits = await auditOf(p1);
     assert.equal(audits.length, 1, 'exactly one audit record');
-    assert.deepEqual(await otherSubjectsOf(p1), [[]], 'the payment the record\'s only subject');
+    // 037: the record's audit record names its registration as the second subject, and nothing else.
+    assert.deepEqual(await otherSubjectsOf(p1), [['subject_invoice_payment_registration_id']], 'the payment and its registration the record\'s only subjects');
     assert.deepEqual({ ...audits[0], request_id: undefined }, {
       action_id: RECORD_ACTION, required_permission: 'record_invoice_payments', actor_internal_user_id: w.mgr.id, tenant_id: w.T, store_id: w.S,
       scope_type: 'store', decision: 'allow', result_status: 'succeeded', request_id: undefined, subject_issued_invoice_id: null, subject_store_id: null,
-    }, 'the routine\'s audit record, the payment its only subject');
+      subject_invoice_payment_registration_id: ra.registrationId,
+    }, 'the routine\'s audit record, the payment and its registration its only subjects');
     assert.match(audits[0].request_id, UUID_RE, 'the command\'s correlation id');
     // (2) The same key and bytes: the sealed 201 replayed; other bytes or another invoice: the 422.
     before = await counts([w.T], keys);
     const replay = await ctx.record(s, w.S, x.invoice, body, { key });
     recordedOf(replay, x.invoice, A, 1000, 'cash', 'the same-key replay', { replayed: true });
     assert.equal(replay.body, first.body, 'the recorded bytes');
-    assertRefusal(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, 999, 'cash')), { key }), 422, 'idempotency_key_reused', 'the same key, another amount');
+    assertRefusal(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 999, 'cash')), { key }), 422, 'idempotency_key_reused', 'the same key, another amount');
     assertRefusal(await ctx.record(s, w.S, y.invoice, body, { key }), 422, 'idempotency_key_reused', 'the same key and bytes, another invoice');
     assert.deepEqual(delta(await counts([w.T], keys), before), NOTHING, 'the replay and the 422s wrote nothing');
-    // (3) A new key reusing the attempt: the sealed already_recorded — before the amount (above the remaining here).
+    // (3) A new key reusing the attempt (its recorded registration and proof): the sealed already_recorded — before the amount (above the remaining here).
     for (const [label, amount] of [['the same amount', 1000], ['an amount above the remaining', 2000]]) {
       const again = randomUUID();
       const againKeys = [{ key: again, principal: w.mgr.principal }];
       before = await counts([w.T], againKeys);
-      const reused = await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, amount, 'external_card_terminal')), { key: again });
+      const reused = await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, amount, 'external_card_terminal')), { key: again });
       sealedOf(reused, 'already_recorded', `a new key reusing the attempt, ${label}`);
       assert.deepEqual(delta(await counts([w.T], againKeys), before), COMPLETION_ONLY, `${label}: the sealed refusal's completion alone`);
       before = await counts([w.T], againKeys);
-      sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, amount, 'external_card_terminal')), { key: again }), 'already_recorded', `${label}: its replay`, { replayed: true });
+      sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, amount, 'external_card_terminal')), { key: again }), 'already_recorded', `${label}: its replay`, { replayed: true });
       assert.deepEqual(delta(await counts([w.T], againKeys), before), NOTHING);
     }
-    // (4) The same attempt on another invoice is a different attempt.
+    // (4) The same attempt on another invoice is a different attempt (its own registration there).
+    const ry = await prepare(ctx, s, w.T, w.S, y.invoice, A);
     let k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    const py = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, A, 50, 'cash')), { key: k }), y.invoice, A, 50, 'cash', 'the attempt on another invoice');
+    const py = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, ry, 50, 'cash')), { key: k }), y.invoice, A, 50, 'cash', 'the attempt on another invoice');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), ONE_RECORD);
-    // (5) Above the remaining (1,178): the sealed amount_exceeds_remaining; exactly the remaining: applied, by card.
+    // (5) Above the remaining (1,178): the sealed amount_exceeds_remaining; exactly the remaining: applied, by card. (Each a new
+    //     attempt with its own registration; prepare() confirms or withdraws the one before it.)
+    const r5 = await prepare(ctx, s, w.T, w.S, x.invoice);
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, randomUUID(), 1179)), { key: k }), 'amount_exceeds_remaining', 'one cent above the remaining');
+    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, r5, 1179)), { key: k }), 'amount_exceeds_remaining', 'one cent above the remaining');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), COMPLETION_ONLY);
     const B = randomUUID();
+    const rb = await prepare(ctx, s, w.T, w.S, x.invoice, B);
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    const p2 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, B, 1178, 'external_card_terminal')), { key: k }),
+    const p2 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, rb, 1178, 'external_card_terminal')), { key: k }),
       x.invoice, B, 1178, 'external_card_terminal', 'exactly the remaining, by card');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), ONE_RECORD);
+    const r6 = await prepare(ctx, s, w.T, w.S, x.invoice);
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, randomUUID(), 1)), { key: k }), 'amount_exceeds_remaining', 'one cent on a fully recorded invoice');
+    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, r6, 1)), { key: k }), 'amount_exceeds_remaining', 'one cent on a fully recorded invoice');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), COMPLETION_ONLY);
     // (6) The read: both payments oldest first, the amounts and the word over the complete history.
     const read = paymentsOf(await ctx.payments(s, w.S, x.invoice), 'after the payments');
@@ -795,16 +887,25 @@ test('IPH-02 (PAY-01 input refusals, PAY-02, PAY-04): a body outside the closed 
     await ready(ctx, w);
     const s = await signIn(ctx, w.mgr);
     const x = await issueOne(ctx, s, w, 'iph02');
-    const valid = recordBody(w.T, randomUUID(), 10, 'cash');
+    const valid = recordBody(w.T, unregistered(), 10, 'cash');
+    const { registrationId: rid, registrationProof: rproof } = valid;
     for (const [label, body] of [
       ['an extra key', { ...valid, note: 'x' }],
       ['a card-shaped field', { ...valid, cvv: '123' }],
       ['an actor', { ...valid, actor: w.mgr.id }],
       ['a version', { ...valid, expectedVersion: 1 }],
-      ['no method', { expectedTenant: w.T, attemptId: valid.attemptId, amountCents: 10 }],
+      ['no method', { expectedTenant: w.T, registrationId: rid, attemptId: valid.attemptId, amountCents: 10, registrationProof: rproof }],
+      // M7B-PAYMENTS-P2: record v2 names its registration and proof exactly.
+      ['the v1 body (no registration, no proof)', { expectedTenant: w.T, attemptId: valid.attemptId, amountCents: 10, method: 'cash' }],
+      ['no registration id', { ...valid, registrationId: undefined }],
+      ['no proof', { ...valid, registrationProof: undefined }],
+      ['an upper-case registration id', { ...valid, registrationId: upper(rid) }],
+      ['an upper-case proof', { ...valid, registrationProof: rproof.toUpperCase() }],
+      ['a short proof', { ...valid, registrationProof: rproof.slice(2) }],
+      ['a proof as a number', { ...valid, registrationProof: 7 }],
       ['amount 0', { ...valid, amountCents: 0 }],
       ['a negative amount', { ...valid, amountCents: -1 }],
-      ['2^53', `{"expectedTenant":"${w.T}","attemptId":"${valid.attemptId}","amountCents":9007199254740992,"method":"cash"}`],
+      ['2^53', `{"expectedTenant":"${w.T}","registrationId":"${rid}","attemptId":"${valid.attemptId}","amountCents":9007199254740992,"method":"cash","registrationProof":"${rproof}"}`],
       ['a string amount', { ...valid, amountCents: '10' }],
       ['a fraction', { ...valid, amountCents: 10.5 }],
       ['an unknown method', { ...valid, method: 'card' }],
@@ -822,10 +923,11 @@ test('IPH-02 (PAY-01 input refusals, PAY-02, PAY-04): a body outside the closed 
       assert.equal(ctx.reason(reply), 'command_request_invalid', `${label}: the planner's refusal`);
       assert.deepEqual(delta(await counts([w.T], keys), before), LEASE_ONLY, `${label}: the lease acquired, nothing else`);
     }
-    // 2^53 − 1 is a valid amount: the routine's sealed refusal, not the planner's.
+    // 2^53 − 1 is a valid amount: the routine's sealed refusal, not the planner's (a real registration, so the routine decides).
+    const rmax = await prepare(ctx, s, w.T, w.S, x.invoice);
     let key = randomUUID();
     let before = await counts([w.T], [{ key, principal: w.mgr.principal }]);
-    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, randomUUID(), MAX_SAFE)), { key }), 'amount_exceeds_remaining', '2^53 − 1');
+    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, rmax, MAX_SAFE)), { key }), 'amount_exceeds_remaining', '2^53 − 1');
     assert.deepEqual(delta(await counts([w.T], [{ key, principal: w.mgr.principal }]), before), COMPLETION_ONLY);
     // The targets.
     for (const [label, id, status, reason, written] of [
@@ -844,7 +946,7 @@ test('IPH-02 (PAY-01 input refusals, PAY-02, PAY-04): a body outside the closed 
     for (const [label, tenant, invoice] of [['another tenant', other, x.invoice], ['a tenant that does not exist', randomUUID(), x.invoice], ['another tenant, a missing invoice', other, randomUUID()]]) {
       key = randomUUID();
       before = await counts([w.T], [{ key, principal: w.mgr.principal }]);
-      const reply = await ctx.record(s, w.S, invoice, JSON.stringify(recordBody(tenant, randomUUID(), 10)), { key });
+      const reply = await ctx.record(s, w.S, invoice, JSON.stringify(recordBody(tenant, rmax, 10)), { key });
       assertRefusal(reply, 409, 'write_conflict', label);
       assert.deepEqual(delta(await counts([w.T], [{ key, principal: w.mgr.principal }]), before), LEASE_ONLY, `${label}: rolled back, the lease kept`);
       assert.equal(await leaseOpen(key, w.mgr.principal), true, label);
@@ -876,9 +978,11 @@ test('IPH-03 (PAY-03, PAY-04, PAY-08): the reversal — a sign-in older than 10 
     const y = await issueOne(ctx, s, w, 'iph03 other');
     assert.equal(x.total, 109);
     const A = randomUUID();
-    const p = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, 100))), x.invoice, A, 100, 'cash', 'the payment');
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
+    const p = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 100))), x.invoice, A, 100, 'cash', 'the payment');
     const Q = randomUUID();
-    const q = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, Q, 9))), y.invoice, Q, 9, 'cash', 'the other invoice\'s payment');
+    const rq = await prepare(ctx, s, w.T, w.S, y.invoice, Q);
+    const q = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, rq, 9))), y.invoice, Q, 9, 'cash', 'the other invoice\'s payment');
     // (1) A stale sign-in: the eligibility is action-only (and target-blind); the POST is the step-up before any key.
     const stale = await signIn(ctx, w.mgr, { token: agedToken(w.mgr, RECENT_AUTH_MAX_AGE_MS + 60_000) });
     assert.equal(verdictOf(await ctx.reversalEligibility(stale, w.S, x.invoice), 'the stale session\'s reversal eligibility'), 'allowed');
@@ -907,7 +1011,9 @@ test('IPH-03 (PAY-03, PAY-04, PAY-08): the reversal — a sign-in older than 10 
       [REVERSE_ACTION, 'reverse_invoice_payments', w.mgr.id, w.T, w.S, 'succeeded'],
     ], 'the record\'s and the reversal\'s audit records, the payment their subject');
     assert.notEqual(audits[0].request_id, audits[1].request_id, 'each command its own correlation id');
-    assert.deepEqual(await otherSubjectsOf(p), [[], []], 'the payment each record\'s only subject');
+    // 037: the record's audit record also names its registration; the reversal's names the payment alone.
+    assert.deepEqual(await otherSubjectsOf(p), [['subject_invoice_payment_registration_id'], []], 'the payment each record\'s only subject beside the record\'s registration');
+    assert.deepEqual(audits.map((a) => a.subject_invoice_payment_registration_id), [ra.registrationId, null], 'the record\'s registration');
     // (3) The replay; the stale replay stopped by the step-up first; the same key with another reason or target the 422.
     before = await counts([w.T], keys);
     const replay = await ctx.reverse(s, w.S, x.invoice, p, body, { key });
@@ -961,7 +1067,7 @@ test('IPH-03 (PAY-03, PAY-04, PAY-08): the reversal — a sign-in older than 10 
     // (7) The attempt retried after its reversal is still the sealed already_recorded.
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, 100)), { key: k }), 'already_recorded', 'the attempt retried after its reversal');
+    sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 100)), { key: k }), 'already_recorded', 'the attempt retried after its reversal');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), COMPLETION_ONLY);
     // (8) The read keeps the history: the reversal shown, nothing applied, the remaining restored — and recordable again.
     assert.deepEqual(paymentsOf(await ctx.payments(s, w.S, x.invoice), 'after the reversal'), {
@@ -969,7 +1075,8 @@ test('IPH-03 (PAY-03, PAY-04, PAY-08): the reversal — a sign-in older than 10 
     });
     assert.equal((await wirePaymentOf(p)).reversal.reasonCode, 'wrong_amount');
     const C = randomUUID();
-    const p3 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, C, 109, 'external_card_terminal'))), x.invoice, C, 109, 'external_card_terminal', 'the full Total after the reversal');
+    const rc = await prepare(ctx, s, w.T, w.S, x.invoice, C);
+    const p3 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, rc, 109, 'external_card_terminal'))), x.invoice, C, 109, 'external_card_terminal', 'the full Total after the reversal');
     assert.deepEqual(paymentsOf(await ctx.payments(s, w.S, x.invoice), 'recorded in full again'), {
       invoice: { id: x.invoice, status: 'issued' }, amounts: amounts(109, 109), paymentStatus: 'recorded_in_full',
       payments: [await wirePaymentOf(p), await wirePaymentOf(p3)], nextCursor: null,
@@ -981,7 +1088,7 @@ test('IPH-03 (PAY-03, PAY-04, PAY-08): the reversal — a sign-in older than 10 
 // IPH-04: the void
 // ===========================================================================
 
-test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is the sealed 409 payments_recorded (its completion alone; its replay sealed), still while one of two remains; once both are reversed the void applies under a new key (one void record, the void\'s own audit record, no outbox row) while the earlier key still replays payments_recorded; a voided invoice records nothing — a new attempt the sealed invalid_state (also above the remaining: voided is decided first), a reused attempt the sealed already_recorded (decided before voided); the read answers voided with nothing due and the reversed history; the issued detail and list answers unchanged by the payments and, once voided, differ only by the void\'s own fields', async () => {
+test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is the sealed 409 payments_recorded (its completion alone; its replay sealed), still while one of two remains; once both are reversed the void applies under a new key (one void record, the void\'s own audit record, no outbox row) while the earlier key still replays payments_recorded; a voided invoice records nothing — a new attempt (registered before the void) the sealed invalid_state (also above the remaining: voided is decided first), a reused attempt the sealed already_recorded (decided before voided); the read answers voided with nothing due and the reversed history; the issued detail and list answers unchanged by the payments and, once voided, differ only by the void\'s own fields', async () => {
   const w = await world('iph04');
   await withEntry(async (ctx) => {
     await ready(ctx, w);
@@ -990,8 +1097,10 @@ test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is th
     const issued = await issuedBytesOf(ctx, s, w.S, x.invoice);
     const A = randomUUID();
     const B = randomUUID();
-    const p1 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, A, 50))), x.invoice, A, 50, 'cash', 'the first payment');
-    const p2 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, B, 59, 'external_card_terminal'))), x.invoice, B, 59, 'external_card_terminal', 'the second payment');
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
+    const p1 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 50))), x.invoice, A, 50, 'cash', 'the first payment');
+    const rb = await prepare(ctx, s, w.T, w.S, x.invoice, B);
+    const p2 = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, rb, 59, 'external_card_terminal'))), x.invoice, B, 59, 'external_card_terminal', 'the second payment');
     assert.deepEqual(await issuedBytesOf(ctx, s, w.S, x.invoice), issued, 'the issued reads unchanged by payments');
     const vbody = JSON.stringify(voidBody(w.T, 'duplicate'));
     // (1) The void refused while a payment is unreversed.
@@ -1008,6 +1117,9 @@ test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is th
     sealedOf(await ctx.voidInvoice(s, w.S, x.invoice, vbody, { key: k }), 'payments_recorded', 'the void with one payment left');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), COMPLETION_ONLY);
     reversedOf(await ctx.reverse(s, w.S, x.invoice, p2, JSON.stringify(reverseBody(w.T, 'wrong_method'))), p2, x.invoice, 'the second reversal');
+    // A new attempt registered (open) BEFORE the void: 037 refuses a registration on a voided invoice, so only one opened
+    // before it can ever reach the record afterwards.
+    const rn = await prepare(ctx, s, w.T, w.S, x.invoice);
     // (2) Every payment reversed: the void applies; the first key still replays its sealed refusal.
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
@@ -1017,14 +1129,14 @@ test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is th
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), ONE_VOID, 'one void, its own audit record, no outbox row');
     sealedOf(await ctx.voidInvoice(s, w.S, x.invoice, vbody, { key: vk }), 'payments_recorded', 'the first key\'s replay after the void', { replayed: true });
     // (3) Recording on the voided invoice.
-    for (const [label, attempt, amount, word] of [
-      ['a new attempt', randomUUID(), 1, 'invalid_state'],
-      ['a new attempt above the remaining', randomUUID(), MAX_SAFE, 'invalid_state'],
-      ['a reused attempt', A, 50, 'already_recorded'],
+    for (const [label, reg, amount, word] of [
+      ['a new attempt', rn, 1, 'invalid_state'],
+      ['a new attempt above the remaining', rn, MAX_SAFE, 'invalid_state'],
+      ['a reused attempt', ra, 50, 'already_recorded'],
     ]) {
       k = randomUUID();
       before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-      sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, attempt, amount)), { key: k }), word, `the voided invoice, ${label}`);
+      sealedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, reg, amount)), { key: k }), word, `the voided invoice, ${label}`);
       assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), COMPLETION_ONLY, label);
     }
     sealedOf(await ctx.reverse(s, w.S, x.invoice, p2, JSON.stringify(reverseBody(w.T, 'other'))), 'invalid_state', 'a reversed payment of the voided invoice');
@@ -1075,19 +1187,22 @@ test('IPH-05 (PAY-02, R-K3): isolation — another store\'s, another tenant\'s a
     const i2 = await issueOne(ctx, s, w2, 'iph05 at S2');
     const iX = await issueOne(ctx, sf, wX, 'iph05 at X');
     const a2 = randomUUID();
-    const p2 = recordedOf(await ctx.record(s, S2, i2.invoice, JSON.stringify(recordBody(T, a2, 5))), i2.invoice, a2, 5, 'cash', 'a payment at S2');
+    const r2 = await prepare(ctx, s, T, S2, i2.invoice, a2);
+    const p2 = recordedOf(await ctx.record(s, S2, i2.invoice, JSON.stringify(recordBody(T, r2, 5))), i2.invoice, a2, 5, 'cash', 'a payment at S2');
     const aX = randomUUID();
-    const pX = recordedOf(await ctx.record(sf, X, iX.invoice, JSON.stringify(recordBody(T2, aX, 7))), iX.invoice, aX, 7, 'cash', 'a payment at X');
+    const rX = await prepare(ctx, sf, T2, X, iX.invoice, aX);
+    const pX = recordedOf(await ctx.record(sf, X, iX.invoice, JSON.stringify(recordBody(T2, rX, 7))), iX.invoice, aX, 7, 'cash', 'a payment at X');
     const rows = { [p2]: await paymentRowOf(p2), [pX]: await paymentRowOf(pX) };
     // (1) The record and the reversal at S1: one 404, rolled back, the lease open, nothing written.
     const shapes = [];
     const cases = [
-      ['record: a missing invoice', (key) => ctx.record(s, S1, randomUUID(), JSON.stringify(recordBody(T, randomUUID(), 1)), { key })],
-      ['record: another store\'s invoice', (key) => ctx.record(s, S1, i2.invoice, JSON.stringify(recordBody(T, randomUUID(), 1)), { key })],
-      ['record: another tenant\'s invoice', (key) => ctx.record(s, S1, iX.invoice, JSON.stringify(recordBody(T, randomUUID(), 1)), { key })],
-      // The header's 404 is decided before the attempt: each foreign invoice's OWN recorded attempt never leaks already_recorded.
-      ['record: another store\'s invoice, its own recorded attempt', (key) => ctx.record(s, S1, i2.invoice, JSON.stringify(recordBody(T, a2, 5)), { key })],
-      ['record: another tenant\'s invoice, its own recorded attempt', (key) => ctx.record(s, S1, iX.invoice, JSON.stringify(recordBody(T, aX, 7)), { key })],
+      ['record: a missing invoice', (key) => ctx.record(s, S1, randomUUID(), JSON.stringify(recordBody(T, unregistered(), 1)), { key })],
+      ['record: another store\'s invoice', (key) => ctx.record(s, S1, i2.invoice, JSON.stringify(recordBody(T, unregistered(), 1)), { key })],
+      ['record: another tenant\'s invoice', (key) => ctx.record(s, S1, iX.invoice, JSON.stringify(recordBody(T, unregistered(), 1)), { key })],
+      // The header's 404 is decided before the attempt: each foreign invoice's OWN recorded attempt — sent with its real
+      // registration and proof — never leaks already_recorded.
+      ['record: another store\'s invoice, its own recorded attempt', (key) => ctx.record(s, S1, i2.invoice, JSON.stringify(recordBody(T, r2, 5)), { key })],
+      ['record: another tenant\'s invoice, its own recorded attempt', (key) => ctx.record(s, S1, iX.invoice, JSON.stringify(recordBody(T, rX, 7)), { key })],
       ['reversal: another store\'s invoice and payment', (key) => ctx.reverse(s, S1, i2.invoice, p2, JSON.stringify(reverseBody(T, 'other')), { key })],
       ['reversal: another tenant\'s invoice and payment', (key) => ctx.reverse(s, S1, iX.invoice, pX, JSON.stringify(reverseBody(T, 'other')), { key })],
       ['reversal: another store\'s payment under this store\'s invoice', (key) => ctx.reverse(s, S1, i1.invoice, p2, JSON.stringify(reverseBody(T, 'other')), { key })],
@@ -1116,7 +1231,7 @@ test('IPH-05 (PAY-02, R-K3): isolation — another store\'s, another tenant\'s a
       const key = randomUUID();
       const keys = [{ key, principal: who.principal }];
       const before = await counts([T, T2], keys);
-      assertRefusal(await ctx.record(s, store, invoice, JSON.stringify(recordBody(T, randomUUID(), 1)), { key }), 403, 'forbidden', `${label}: record`);
+      assertRefusal(await ctx.record(s, store, invoice, JSON.stringify(recordBody(T, unregistered(), 1)), { key }), 403, 'forbidden', `${label}: record`);
       assertRefusal(await ctx.reverse(s, store, invoice, pX, JSON.stringify(reverseBody(T, 'other')), { key }), 403, 'forbidden', `${label}: reversal`);
       assertRefusal(await ctx.payments(s, store, invoice), 403, 'forbidden', `${label}: read`);
       assert.equal(verdictOf(await ctx.paymentEligibility(s, store, invoice), `${label}: record eligibility`), 'forbidden');
@@ -1144,7 +1259,8 @@ test('IPH-06 (PAY-11): the read pages 50 payments oldest first by (recorded time
     const x = await issueOne(ctx, s, w, 'iph06');
     const y = await issueOne(ctx, s, w, 'iph06 other');
     const aY = randomUUID();
-    const pY = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, aY, 1))), y.invoice, aY, 1, 'cash', 'the other invoice\'s payment');
+    const rY = await prepare(ctx, s, w.T, w.S, y.invoice, aY);
+    const pY = recordedOf(await ctx.record(s, w.S, y.invoice, JSON.stringify(recordBody(w.T, rY, 1))), y.invoice, aY, 1, 'cash', 'the other invoice\'s payment');
     const N = INVOICE_PAYMENTS_PAGE_SIZE + 2;
     const ids = [];
     const keys = [];
@@ -1154,10 +1270,13 @@ test('IPH-06 (PAY-11): the read pages 50 payments oldest first by (recorded time
       keys.push({ key, principal: w.mgr.principal });
       const attempt = randomUUID();
       const method = INVOICE_PAYMENT_METHODS[i % 2];
-      ids.push(recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, attempt, 1, method)), { key }), x.invoice, attempt, 1, method, `payment ${i + 1}`));
+      const reg = await prepare(ctx, s, w.T, w.S, x.invoice, attempt);
+      ids.push(recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, reg, 1, method)), { key }), x.invoice, attempt, 1, method, `payment ${i + 1}`));
     }
     const after = await counts([w.T]);
-    assert.deepEqual({ P: after.P - before.P, PA: after.PA - before.PA, O: after.O - before.O, OO: after.OO - before.OO }, { P: N, PA: N, O: 0, OO: 0 }, 'N payments, N audit records, no outbox row');
+    // 037: N registrations, N register audit records and N − 1 settle (confirm) audit records between them.
+    assert.deepEqual({ P: after.P - before.P, PA: after.PA - before.PA, O: after.O - before.O, OO: after.OO - before.OO, G: after.G - before.G, GA: after.GA - before.GA },
+      { P: N, PA: N, O: 0, OO: 0, G: N, GA: 2 * N - 1 }, 'N payments, N audit records, no outbox row; N registrations and their register and settle records');
     reversedOf(await ctx.reverse(s, w.S, x.invoice, ids[0], JSON.stringify(reverseBody(w.T, 'duplicate'))), ids[0], x.invoice, 'the first payment reversed');
     // (1) Two pages.
     before = await counts([w.T]);
@@ -1218,7 +1337,8 @@ test('IPH-06 (PAY-11): the read pages 50 payments oldest first by (recorded time
 // IPH-07: the Total
 // ===========================================================================
 
-const RECORD_CALL = 'tmpos_invoice_payment.m7b_invoice_payment_record(';
+// M7B-PAYMENTS-P2: the runtime's record is 037's v2.
+const RECORD_CALL = 'tmpos_invoice_payment.m7b_invoice_payment_record_v2(';
 const VOID_CALL = 'tmpos_invoice_payment.m7b_invoice_void_v2(';
 const ROLLBACK = Symbol('rollback');
 const quietly = (p) => { p.catch(() => {}); return p; };
@@ -1263,13 +1383,15 @@ test('IPH-07 (PAY-01 Total 0, PAY-05): two recordings that together exceed the T
     const mgr2 = await actor('iph07-mgr2', [storeGrant(w.T, w.S, 'manager')]);
     const s2 = await signIn(ctx, mgr2);
     const senders = [[s, w.mgr], [s2, mgr2]];
+    // Each manager's own registration on the invoice (one slot each), before the barrier.
+    const regs = [await prepare(ctx, s, w.T, w.S, x.invoice), await prepare(ctx, s2, w.T, w.S, x.invoice)];
     const keys = [randomUUID(), randomUUID()];
     const owned = keys.map((key, i) => ({ key, principal: senders[i][1].principal }));
     const before = await counts([w.T], owned);
     const h = await holdHeader(x.invoice);
     let pending = [];
     try {
-      pending = keys.map((key, i) => quietly(ctx.record(senders[i][0], w.S, x.invoice, JSON.stringify(recordBody(w.T, randomUUID(), 60)), { key })));
+      pending = keys.map((key, i) => quietly(ctx.record(senders[i][0], w.S, x.invoice, JSON.stringify(recordBody(w.T, regs[i], 60)), { key })));
       // Both wait: each on the holder, or (the tuple lock's queue) on the other recording; at least one on the holder.
       await engaged(async () => {
         const rows = await waitingIn(RECORD_CALL);
@@ -1289,13 +1411,14 @@ test('IPH-07 (PAY-01 Total 0, PAY-05): two recordings that together exceed the T
     const rk = randomUUID();
     const vk = randomUUID();
     const pair = [{ key: rk, principal: mgr2.principal }, { key: vk, principal: w.mgr.principal }];
-    const b0 = await counts([w.T], pair);
     const A = randomUUID();
+    const ra = await prepare(ctx, s2, w.T, w.S, y.invoice, A);
+    const b0 = await counts([w.T], pair);
     const g = await holdHeader(y.invoice);
     let rec = null;
     let vd = null;
     try {
-      rec = quietly(ctx.record(s2, w.S, y.invoice, JSON.stringify(recordBody(w.T, A, 1)), { key: rk }));
+      rec = quietly(ctx.record(s2, w.S, y.invoice, JSON.stringify(recordBody(w.T, ra, 1)), { key: rk }));
       const [first] = await engaged(async () => {
         const rows = await waitingIn(RECORD_CALL);
         return rows.length === 1 && rows[0].by.includes(g.pid) ? rows : null;
@@ -1315,9 +1438,10 @@ test('IPH-07 (PAY-01 Total 0, PAY-05): two recordings that together exceed the T
     assert.deepEqual(paymentsOf(await ctx.payments(s, w.S, z.invoice), 'a Total of 0'), {
       invoice: { id: z.invoice, status: 'issued' }, amounts: amounts(0, 0), paymentStatus: 'nothing_due', payments: [], nextCursor: null,
     });
+    const rz = await prepare(ctx, s, w.T, w.S, z.invoice);
     const k = randomUUID();
     const b = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
-    sealedOf(await ctx.record(s, w.S, z.invoice, JSON.stringify(recordBody(w.T, randomUUID(), 1)), { key: k }), 'amount_exceeds_remaining', 'one cent on a Total of 0');
+    sealedOf(await ctx.record(s, w.S, z.invoice, JSON.stringify(recordBody(w.T, rz, 1)), { key: k }), 'amount_exceeds_remaining', 'one cent on a Total of 0');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), b), COMPLETION_ONLY);
   });
 });

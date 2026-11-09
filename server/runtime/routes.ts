@@ -74,6 +74,10 @@
 // …/invoices/{id}/payments/{paymentId}/reversal (a seventh — the table's ONE template with a second id segment, matched only
 // after every earlier rule failed, so no existing match moves) and GET …/invoices/{id}/payments — twenty store templates,
 // seven of them commands.
+// M7B-PAYMENTS-P2 (PRQ-1, migration 037) adds four: POST …/invoices/{id}/payment-registrations and POST
+// …/invoices/{id}/payment-settlement (an eighth and a ninth store command, read like the void), GET
+// …/invoices/{id}/payment-registration-proof and GET /api/v1/stores/{storeId}/payment-attempts — twenty-four store templates,
+// nine of them commands. The registration and the record are the two SESSION_BOUND_STORE_COMMANDS (D-R3-A).
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -486,6 +490,11 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-reversal-eligibility`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments${PAYMENT_ID_SEGMENT}/reversal`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
+  // M7B-PAYMENTS-P2 (PRQ-1, migration 037): the registration, its proof, the settlement and the staff member's attempts.
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registrations`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registration-proof`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-settlement`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/payment-attempts`,
 ]);
 /**
  * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit,
@@ -500,6 +509,19 @@ const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   // M7B-PAYMENTS-P1: the payment record and the payment reversal.
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments${PAYMENT_ID_SEGMENT}/reversal`,
+  // M7B-PAYMENTS-P2: the payment registration and the registration's settlement.
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registrations`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-settlement`,
+]);
+/**
+ * The store COMMANDS bound to their presenting session (M7B-PAYMENTS-P2, D-R3-A): a closed set of exactly the payment
+ * registration and the payment record. Each MUST declare `sessionBinding: 'required'`, and no other command may: app.ts then
+ * binds the session's digest into the idempotency fingerprint (idempotency.ts `session`), so a replacement session replaying an
+ * old key is a 422, never the stored answer. The command's handler-less operation still never receives the key itself.
+ */
+const SESSION_BOUND_STORE_COMMANDS: ReadonlySet<string> = new Set([
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registrations`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -659,8 +681,15 @@ function parseRecentAuth(raw: unknown, policy: RoutePolicy): RecentAuthPolicy {
  * is a read resolved under a trusted scope. M7B-INVOICES-P1: the store directory (`directory`, the header's one closed
  * exception) MUST declare it, with no authorization and so no trusted context — its routine derives everything from the key.
  */
-function parseSessionBinding(raw: unknown, policy: RoutePolicy, trustedContext: TrustedContextPolicy, idempotency: IdempotencyPolicy, directory: boolean): SessionBindingPolicy {
+function parseSessionBinding(raw: unknown, policy: RoutePolicy, trustedContext: TrustedContextPolicy, idempotency: IdempotencyPolicy, directory: boolean,
+  sessionBoundCommand: boolean): SessionBindingPolicy {
   const declared = raw === undefined || raw === null ? 'none' : raw;
+  // M7B-PAYMENTS-P2 (D-R3-A): the closed SESSION_BOUND_STORE_COMMANDS must declare it, as idempotent session commands under a
+  // trusted context; nothing else that requires idempotency may.
+  if (sessionBoundCommand) {
+    if (declared === 'required' && policy.access === 'session' && idempotency === 'required' && trustedContext === 'required') return 'required';
+    throw new EnforcementSetupError('route_session_binding_invalid');
+  }
   if (declared === 'none' && !directory) return 'none';
   if (declared === 'required' && policy.access === 'session' && idempotency === 'none'
     && (directory ? trustedContext === 'none' : policy.authorization !== null && trustedContext === 'required')) return 'required';
@@ -715,7 +744,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly twenty declared strings (M7B-PAYMENTS-P1), so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly twenty-four declared strings (M7B-PAYMENTS-P2), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -747,7 +776,8 @@ function parseDefinition(raw: unknown): RouteDefinition {
   }
   const trustedContext = parseTrustedContext(raw.trustedContext, idempotency, policy);
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
-  const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency, isStoreDirectory(method, path, policy));
+  const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency, isStoreDirectory(method, path, policy),
+    SESSION_BOUND_STORE_COMMANDS.has(key) && 'command' in raw);
   const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth, sessionBinding };
   // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {

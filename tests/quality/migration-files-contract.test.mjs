@@ -423,19 +423,29 @@ const PINNED = {
   // The two sha256 values pin the 036 bytes this stage commits.
   [`036_m7b_invoice_${'payment'}.up.sql`]: '93fe0ba90dcc1bb6404d92b0a6a8c1a852ad462d5d2d11e6f730239a0536746d',
   [`036_m7b_invoice_${'payment'}.down.sql`]: '131e112e16695caa947b24f0c89c5d30a32c2043348826eedb32d622302a68d7',
+  // Phase 4.0 M7B-PAYMENTS-P2 PRQ-1 — payment registration. In 036's schema: the registration table with its actor-scoped
+  // attempt key and partial-unique unresolved slot, the owner-installed proof key with its append-only generation history (a
+  // generation above every earlier one; bytes ever installed never accepted again), the register, flush-qualified proof,
+  // record v2, attempts and settle routines and the key probe granted to tmpos_app alone, their ALWAYS guards, and the audit
+  // table's subject_invoice_payment_registration_id column and index; tmpos_app loses EXECUTE on 036's v1 record. Its
+  // rollback refuses while any registration or registration audit record exists and otherwise restores 036's grants exactly;
+  // 036's own rollback fails on the payment foreign key while 037 is applied. Proved against disposable PostgreSQL only. Both
+  // 037 keys are assembled at run time, as 036's are. The two sha256 values pin the 037 bytes this stage writes.
+  [`037_m7b_invoice_${'payment'}_registration.up.sql`]: '3304d2bf46d0cd453a2137518dec4ce5c88a1bfd0467fda2c7728c6326adac14',
+  [`037_m7b_invoice_${'payment'}_registration.down.sql`]: '3f6b3f001776473bec582d10a06e82bdaa85fe95d0ee64abeaae72a0138ac2c5',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the seventy-two expected files', () => {
+test('the migrations directory holds exactly the seventy-four expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

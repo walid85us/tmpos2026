@@ -54,7 +54,7 @@ const UNVERSIONED = `${randomUUID().slice(0, 14)}0${randomUUID().slice(15)}`;
 const scopeAt = (store: string, over: Partial<TrustedScope> = {}): TrustedScope => Object.freeze({
   actor: ACTOR, securityVersion: 'v1', scope: 'store', tenant: TENANT, store, membershipId: MEMBERSHIP, roleId: 'manager', limitation: 'none', ...over,
 });
-const recordBody = (over: Record<string, unknown> = {}) => ({ expectedTenant: TENANT, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', ...over });
+const recordBody = (over: Record<string, unknown> = {}) => ({ expectedTenant: TENANT, registrationId: REGISTRATION, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', registrationProof: PROOF, ...over });
 const reverseBody = (over: Record<string, unknown> = {}) => ({ expectedTenant: TENANT, reasonCode: 'duplicate', ...over });
 const planRecord = (body: unknown, over: Record<string, unknown> = {}) => planInvoicePaymentRecord(Object.freeze({
   audience: 'tenant', body, newAggregateId: NEW_ID, targetId: INVOICE, storeId: STORE, ...over,
@@ -77,7 +77,7 @@ test('IPU-01 (§12.2, §12.3): the two methods and six reasons in their one orde
   assert.deepEqual([INVOICE_PAYMENT_RECORD_CONTRACT.kind, INVOICE_PAYMENT_RECORD_CONTRACT.mode, INVOICE_PAYMENT_RECORD_CONTRACT.aggregateType,
     INVOICE_PAYMENT_RECORD_CONTRACT.contextScope, INVOICE_PAYMENT_RECORD_CONTRACT.events, INVOICE_PAYMENT_RECORD_CONTRACT.paymentRefusals],
   ['store.invoice_payment.record', 'create', 'invoice_payment', 'store', [], 'record']);
-  assert.deepEqual(Object.keys(INVOICE_PAYMENT_RECORD_CONTRACT.changes), ['invoiceId', 'expectedTenant', 'attemptId', 'amountCents', 'method']);
+  assert.deepEqual(Object.keys(INVOICE_PAYMENT_RECORD_CONTRACT.changes), ['invoiceId', 'expectedTenant', 'attemptId', 'amountCents', 'method', 'registrationId', 'registrationProof'], 'record v2 (M7B-PAYMENTS-P2): its registration and proof, last');
   assert.deepEqual(INVOICE_PAYMENT_RECORD_CONTRACT.changes.amountCents, { type: 'integer', min: 1, max: MAX });
   assert.deepEqual([INVOICE_PAYMENT_REVERSE_CONTRACT.kind, INVOICE_PAYMENT_REVERSE_CONTRACT.mode, INVOICE_PAYMENT_REVERSE_CONTRACT.aggregateType,
     INVOICE_PAYMENT_REVERSE_CONTRACT.contextScope, INVOICE_PAYMENT_REVERSE_CONTRACT.events, INVOICE_PAYMENT_REVERSE_CONTRACT.paymentRefusals],
@@ -111,13 +111,13 @@ test('IPU-01 (§12.2, §12.3): the two methods and six reasons in their one orde
 
 // --- 2. the planners ---------------------------------------------------------------------------------------------------------
 
-test('IPU-02 (§12.3): the record plans exactly { expectedTenant, attemptId, amountCents, method } into the runtime\'s new payment of the path\'s invoice — no event, no annex, the sealed 201 built from the plan alone; prepared, it carries the record\'s five slots', () => {
+test('IPU-02 (§12.3; record v2, M7B-PAYMENTS-P2): the record plans exactly { expectedTenant, registrationId, attemptId, amountCents, method, registrationProof } into the runtime\'s new payment of the path\'s invoice — no event, no annex, the sealed 201 built from the plan alone; prepared, it carries the record\'s five slots', () => {
   for (const method of INVOICE_PAYMENT_METHODS) {
     for (const amountCents of [1, 1250, MAX]) {
       const plan = planRecord(recordBody({ method, amountCents })) as CommandPlan;
       assert.notEqual(plan, COMMAND_REQUEST_INVALID);
       assert.deepEqual(plan, {
-        aggregateId: NEW_ID, expectedVersion: null, changes: { invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents, method }, events: [],
+        aggregateId: NEW_ID, expectedVersion: null, changes: { invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents, method, registrationId: REGISTRATION, registrationProof: PROOF }, events: [],
         response: { status: 201, body: { payment: { id: NEW_ID, invoiceId: INVOICE, attemptId: ATTEMPT, amountCents, method } } },
       }, `${method} ${amountCents}`);
       assert.deepEqual(Object.keys((plan.response.body as { payment: object }).payment), ['id', 'invoiceId', 'attemptId', 'amountCents', 'method'], 'its member order');
@@ -139,7 +139,7 @@ test('IPU-03 (§12.3): every other record body or target is COMMAND_REQUEST_INVA
   const bodies: Array<[string, unknown]> = [
     ['no body', undefined], ['null', null], ['an array', [recordBody()]], ['a string', JSON.stringify(recordBody())],
     ['a class instance', Object.assign(new (class Body {})(), recordBody())],
-    ...['expectedTenant', 'attemptId', 'amountCents', 'method'].map((k): [string, unknown] => [`no ${k}`, Object.fromEntries(Object.entries(recordBody()).filter(([key]) => key !== k))]),
+    ...['expectedTenant', 'registrationId', 'attemptId', 'amountCents', 'method', 'registrationProof'].map((k): [string, unknown] => [`no ${k}`, Object.fromEntries(Object.entries(recordBody()).filter(([key]) => key !== k))]),
     ...['expectedVersion', 'actor', 'recordedAt', 'reference', 'cardNumber', 'cvv', 'tendered', 'change', 'invoiceId', 'paymentId'].map((k): [string, unknown] => [`an extra ${k}`, recordBody({ [k]: 1 })]),
     ['an uppercase tenant', recordBody({ expectedTenant: TENANT.toUpperCase() })], ['a tenant that is no uuid', recordBody({ expectedTenant: 'tenant' })],
     ['an uppercase attempt', recordBody({ attemptId: ATTEMPT.toUpperCase() })], ['a null attempt', recordBody({ attemptId: null })],
@@ -181,7 +181,7 @@ test('IPU-04 (§12.3): the reversal plans exactly { expectedTenant, reasonCode }
   }
 });
 
-test('IPU-05 (§12.3): the reversal\'s fingerprint appends the invoice and then the payment — another payment, another invoice or the two swapped is another fingerprint; a null second target is absent; a second target without a first, or malformed, is refused; the record\'s is the target-only one', () => {
+test('IPU-05 (§12.3): the reversal\'s fingerprint appends the invoice and then the payment — another payment, another invoice or the two swapped is another fingerprint; a null second target is absent; a second target without a first, or malformed, is refused; the reversal binds no session (the record adds its session slot, D-R3-A: invoicePaymentRegistrations.test.ts IRU-01)', () => {
   const keyring = createIdempotencyKeyring(TEST_IDEMPOTENCY_KEY);
   const key = randomUUID();
   const binding = { method: 'POST', path: INVOICE_PAYMENT_REVERSE_PATH, audience: 'tenant', tenant: TENANT, store: STORE, actor: ACTOR, body: Buffer.from('{}') } as const;
@@ -491,7 +491,7 @@ test('IPU-09 (§12.3, §12.7): the record over the chain — the sealed 201 and 
     }
     const c = h.commits[0];
     assert.deepEqual([c.mutation.kind, c.mutation.aggregateType, c.mutation.expectedVersion, c.mutation.changes],
-      ['store.invoice_payment.record', 'invoice_payment', null, { invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents: 1250, method: 'cash' }]);
+      ['store.invoice_payment.record', 'invoice_payment', null, { invoiceId: INVOICE, expectedTenant: TENANT, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', registrationId: REGISTRATION, registrationProof: PROOF }]);
     assert.deepEqual([c.context?.store, c.audit.action, c.audit.permission, c.audit.reasonCode, c.audit.reason, c.events.length, c.authNotAfter],
       [STORE, 'store.invoice_payment.record', 'record_invoice_payments', null, null, 0, null]);
     assert.deepEqual(h.requirements.at(-1), INVOICE_PAYMENT_RECORD_REQUIREMENT);
@@ -569,3 +569,8 @@ test('IPU-10 (§12.3): the reversal over the chain — a sign-in older than 10 m
     assert.equal(h.records.size, records, 'no key reserved for a malformed target');
   });
 });
+
+// M7B-PAYMENTS-P2 (record v2): the registration the record names and a synthetic 64-hex proof (never a real MAC). Defined last —
+// every use runs inside a test body, after this module has evaluated — so the owner-approved fixture line stays at :499.
+const REGISTRATION = randomUUID();
+const PROOF = 'ab'.repeat(32);

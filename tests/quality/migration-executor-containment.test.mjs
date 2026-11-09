@@ -669,6 +669,15 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // through migrationsThrough.mjs; it imports the same executor as before.
     'tests/db/invoicePaymentRoutine.integration.test.mjs',
     'tests/db/invoicePaymentHttp.integration.test.mjs',
+    // M7B-PAYMENTS-P2 PRQ-1: the payment registration routine suite (migration 037) stands up every migration in the
+    // directory on the harness's DURABLE disposable cluster, rolls 037 back through its down file (and finds 036's down
+    // failing while 037 is applied), and re-applies it — through the SAME trusted executor and assertDisposableTestDsn.
+    // Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    'tests/db/invoicePaymentRegistrationRoutine.integration.test.mjs',
+    // M7B-PAYMENTS-P2 PRQ-1: the payment registration HTTP suite stands up every migration in the directory (037 included) on
+    // the harness's DURABLE disposable cluster through the SAME trusted executor and assertDisposableTestDsn, then drives the
+    // composed tenant entry. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    'tests/db/invoicePaymentRegistrationHttp.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second

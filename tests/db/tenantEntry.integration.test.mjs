@@ -113,6 +113,8 @@
 // the void v2 and the payments read, in its own schema; the tenant entry serves five routes more (the payment and reversal
 // eligibility GETs, the record and reversal POSTs and the payments read: thirty-six): M7TE-01 pins thirty-six routes, the ledger is
 // 001-036, so M7TE-10 judges 036 as the newest row and its fake next row is '037'.
+// M7B-PAYMENTS-P2 UPDATE (payment registration, migration 037): four routes more (forty), the ledger is 001-037, so M7TE-10 judges 037 as the
+// newest row and its fake next row is '038'; the entry refuses to start without the owner-installed payment proof key (M7TE-12b's unit twin).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -126,7 +128,7 @@ import { spawnSync } from 'node:child_process';
 import tls from 'node:tls';
 import { generateKeyPairSync, randomBytes, randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { installTestIssuerKey, resolveDisposableTarget, testClient, testDriverVia, childEnv } from './localPostgres.harness.mjs';
+import { installTestIssuerKey, installTestPaymentProofKey, resolveDisposableTarget, testClient, testDriverVia, childEnv } from './localPostgres.harness.mjs';
 import { assertDisposableTestDsn, createPostgresExecutor, runTrustedApply } from '../../server/platform-identity/migrationExecutor.ts';
 import { createNodeFsPort } from '../../server/platform-identity/migrationEngine.ts';
 import { runtimeClientOptions } from '../../server/platform-identity/db.ts';
@@ -412,6 +414,7 @@ await setupStep(async () => {
   await registerFingerprint(RATE_KEY);
   issuerKeyBefore = await issuerKeyRow();
   await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestPaymentProofKey(owner); // 037: the tenant entry refuses to start without a payment proof key
 });
 
 // ---------------------------------------------------------------------------
@@ -896,7 +899,7 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     // (M7B-INVOICES-DISCARD-P1); the issuing settings' read and write, the draft's issue eligibility, preview and issue, and the issued
     // list and read are seven more routes (M7B-INVOICES-ISSUE-P1); the invoice void's eligibility GET (bodiless) and its POST (a sixth
     // body-bearing, idempotent route) are two more (M7B-INVOICES-VOID-P1); the payment eligibility, reversal eligibility and payments
-    // reads (bodiless) and the payment record and reversal POSTs (body-bearing, idempotent) are five more (M7B-PAYMENTS-P1): thirty-six routes.
+    // reads (bodiless) and the payment record and reversal POSTs (body-bearing, idempotent) are five more (M7B-PAYMENTS-P1); the payment registration and settlement POSTs (body-bearing, idempotent) and the registration proof and attempts GETs (bodiless) are four more (M7B-PAYMENTS-P2): forty routes.
     assert.deepEqual(canonical(ctx.result.routes), [
       // The seven M7B-INVOICES-ISSUE-P1 rows, the two M7B-INVOICES-VOID-P1 rows and the five M7B-PAYMENTS-P1 rows sit in canonical() sort order (the comparison sorts both sides, so the order here is not a shipping-order claim).
       'GET /api/v1/customers session none none',
@@ -917,9 +920,11 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'GET /api/v1/stores/{storeId}/invoices session none none',
       'GET /api/v1/stores/{storeId}/invoices/{id} session none none',
       'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility session none none',
+      'GET /api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof session none none',
       'GET /api/v1/stores/{storeId}/invoices/{id}/payment-reversal-eligibility session none none',
       'GET /api/v1/stores/{storeId}/invoices/{id}/payments session none none',
       'GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility session none none',
+      'GET /api/v1/stores/{storeId}/payment-attempts session none none',
       'GET /health public none none',
       'GET /readiness public none none',
       'PATCH /api/v1/customers/{id} session json required',
@@ -930,6 +935,8 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
       'POST /api/v1/stores/{storeId}/invoice-drafts session json required',
       'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/discard session json required',
       'POST /api/v1/stores/{storeId}/invoice-drafts/{id}/issue session json required',
+      'POST /api/v1/stores/{storeId}/invoices/{id}/payment-registrations session json required',
+      'POST /api/v1/stores/{storeId}/invoices/{id}/payment-settlement session json required',
       'POST /api/v1/stores/{storeId}/invoices/{id}/payments session json required',
       'POST /api/v1/stores/{storeId}/invoices/{id}/payments/{paymentId}/reversal session json required',
       'POST /api/v1/stores/{storeId}/invoices/{id}/void session json required',
@@ -1235,32 +1242,32 @@ test('M7TE-09: any setting that would log a bound parameter refuses startup data
   await withEntry({}, async (ctx) => assert.equal(ctx.result.outcome, 'listening', 'reset: it starts'));
 });
 
-test('M7TE-10: a migration ledger that is not exactly 001-036 refuses startup migration_state_invalid', async () => {
+test('M7TE-10: a migration ledger that is not exactly 001-037 refuses startup migration_state_invalid', async () => {
   // M7A-CUSTOMERS-P4: the newest required migration was 022 (the detail read); M7A-CUSTOMERS-P6 made it 023 (the contact
   // records), M7A-CUSTOMERS-P7 024 (customer edits), M7A-CUSTOMERS-P8 025 (the name search), M5-INVOICES-AUTH-P1 026 (the Invoices level)
   // and M7B-INVOICES-P1 027 (store discovery) and 028 (invoice drafts), M7B-INVOICES-P2 029 (the draft edit) and
   // M7B-INVOICES-P2-R1 030 (the Invoices authority guard) and M7B-INVOICES-P1-R3 031 (the guarded draft save) and
   // M7B-INVOICES-P1-R4 032 (the Customers authority of the guarded draft save), M7B-INVOICES-DISCARD-P1 033 (the draft
   // discard), M7B-INVOICES-ISSUE-P1 034 (invoice issuing), M7B-INVOICES-VOID-P1 035 (invoice void) and M7B-PAYMENTS-P1 036 (payment
-  // recording), so the fake "next migration" row is '037' — the restore below never removes the real 036 row it re-inserts.
+  // recording) and M7B-PAYMENTS-P2 037 (payment registration), so the fake "next migration" row is '038' — the restore below never removes the real 037 row it re-inserts.
   const [row] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '036'`;
-  assert.ok(row !== undefined, '036 is recorded');
+    from public.schema_migrations where version = '037'`;
+  assert.ok(row !== undefined, '037 is recorded');
   const restore = () => owner.begin(async (sql) => {
-    await sql`delete from public.schema_migrations where version in ('036', '037')`;
+    await sql`delete from public.schema_migrations where version in ('037', '038')`;
     await sql`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
       values (${row.version}, ${row.checksum}, ${row.dirty}, ${row.started_at}::text::timestamptz, ${row.finished_at}::text::timestamptz)`;
   });
   try {
-    await owner`delete from public.schema_migrations where version = '036'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 035'));
+    await owner`delete from public.schema_migrations where version = '037'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_missing'], 'a database at 036'));
     await restore();
-    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 036').digest('hex')} where version = '036'`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '036 with another checksum'));
+    await owner`update public.schema_migrations set checksum = ${createHash('sha256').update('not 037').digest('hex')} where version = '037'`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_checksum_mismatch'], '037 with another checksum'));
     await restore();
     await owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at)
-      values ('037', ${createHash('sha256').update('037').digest('hex')}, false, now(), now())`;
-    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 037'));
+      values ('038', ${createHash('sha256').update('038').digest('hex')}, false, now(), now())`;
+    await withEntry({}, async (ctx) => assertRefused(ctx, 'migration_state_invalid', ['migration_unknown'], 'an unknown 038'));
     await restore();
     // Not only the newest row is judged: an intermediate migration left dirty refuses as well.
     await owner`update public.schema_migrations set dirty = true where version = '010'`;
@@ -1270,7 +1277,7 @@ test('M7TE-10: a migration ledger that is not exactly 001-036 refuses startup mi
     await restore();
   }
   const [back] = await owner`select version, checksum, dirty, started_at::text as started_at, finished_at::text as finished_at
-    from public.schema_migrations where version = '036'`;
+    from public.schema_migrations where version = '037'`;
   assert.deepEqual({ ...back }, { ...row }, 'the ledger row is restored exactly');
 });
 

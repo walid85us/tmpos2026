@@ -23,10 +23,13 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    # M7B-PAYMENTS-P2 (PRQ-1) — pinned, not ubuntu-latest: ubuntu-latest moved to ubuntu-26.04, which ships PostgreSQL 18
+    # only; the proof-durability step below needs the PostgreSQL 16 binaries ubuntu-24.04 carries.
+    runs-on: ubuntu-24.04
     # M7A-CUSTOMERS-P5 — 30, not 20: the job ran 18m56s at the stage's entry, before the customer directory scenarios
-    # were added to the shop browser step below.
-    timeout-minutes: 30
+    # were added to the shop browser step below. M7B-PAYMENTS-P2 (PRQ-1) — 40, not 30: the last green runs took 23m30s
+    # to 28m14s, and PRQ-1 adds three database suites and two unit suites.
+    timeout-minutes: 40
     # Phase 4.0 M3 S1b — DISPOSABLE PostgreSQL for the migration-executor proof. It is created
     # and destroyed with this job, reachable only on the runner's loopback interface, holds a
     # database named `tmpos_s1b_*`, and authenticates a synthetic bootstrap role through
@@ -555,6 +558,53 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentHttp.integration.test.mjs
+      # M7B-PAYMENTS-P2 (PRQ-1) — migration 037's payment registration as the runtime login (the registration table and its
+      # durable unresolved slot, the owner-installed proof key under a strictly increasing generation, the register, proof,
+      # record v2, attempts and settle routines, the key probe, the revoke of 036's v1 record, the proof refused until the
+      # registration's commit is flushed, and 037's down refused while a registration exists), then registering, proving,
+      # recording and settling over real loopback HTTP on the tenant entry, against the SAME disposable service. The service
+      # is already crash-durable (fsync, full_page_writes and synchronous_commit on, wal_writer_delay 200ms, a 16 MB WAL
+      # segment) and its owner is the superuser the suites need; each suite checks the durability settings itself.
+      # Ordering rule: both suites leave 001-037 applied and NO registration, payment, proof key or registration audit record
+      # (each teardown removes what it wrote and checks none is left), so 037's down, which refuses while a registration exists,
+      # is never blocked for a later step; they run AFTER every step that rolls 037 or an older migration back (right after the
+      # payment steps above, which roll 037 back and restore it themselves) and BEFORE the browser step, which starts the tenant
+      # entry over the same service. The routine suite rolls 037 back and re-applies it itself, so it runs BEFORE the HTTP
+      # suite, which needs 037 applied and installs its own proof key. Synthetic data and keys made at run time only. Same
+      # binding, no new service, no secret, no permission change.
+      - name: Invoice payment registration routines against disposable PostgreSQL (M7B-PAYMENTS-P2)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentRegistrationRoutine.integration.test.mjs
+      - name: Invoice payment registration over HTTP against the tenant entry and disposable PostgreSQL (M7B-PAYMENTS-P2)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentRegistrationHttp.integration.test.mjs
+      # M7B-PAYMENTS-P2 (PRQ-1) — the proof-durability suite: the registration's commit flushed to disk before a proof is issued,
+      # measured with pg_walinspect on one 16 MB-segment cluster and one 64 MB-segment cluster. A WAL segment size is fixed by initdb
+      # and the harness never reconfigures a supplied target (it refuses a segment size on one), so this step names NO
+      # TM_POS_TEST_DATABASE_URL or KIND: the suite starts its own two socket-only, crash-durable clusters in a temp directory
+      # and removes them, and the job's service above is not used. It runs the PostgreSQL 16 binaries ubuntu-24.04 carries
+      # (initdb, pg_ctl and the postgres server it starts, createdb, psql, pg_isready, and the pg_walinspect extension), put first
+      # on PATH for this step only; the step FAILS, never skips, when any of them is missing or is not 16.x, or when the
+      # pg_walinspect control or library file is absent. Synthetic data only. No new service, no secret, no permission change.
+      - name: Payment proof durability on its own disposable PostgreSQL clusters (M7B-PAYMENTS-P2)
+        run: |
+          pgbin=/usr/lib/postgresql/16/bin
+          for b in initdb pg_ctl postgres createdb psql pg_isready; do
+            test -x "$pgbin/$b" || { echo "::error::$pgbin/$b is missing: the runner image does not provide PostgreSQL 16"; exit 1; }
+            case "$("$pgbin/$b" --version)" in
+              *"(PostgreSQL) 16."*) ;;
+              *) echo "::error::$pgbin/$b is not PostgreSQL 16.x"; exit 1 ;;
+            esac
+          done
+          for f in /usr/share/postgresql/16/extension/pg_walinspect.control /usr/lib/postgresql/16/lib/pg_walinspect.so; do
+            test -f "$f" || { echo "::error::$f is missing: pg_walinspect is not installed for PostgreSQL 16"; exit 1; }
+          done
+          export PATH="$pgbin:$PATH"
+          node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/paymentProofDurability.integration.test.mjs
       # M7A-CUSTOMERS-P3-R2 — the shop's built-in Customers levels end to end in a real browser: a production build of the
       # shop SPA in the runner's Chrome, signed in through a synthetic identity provider, reading its users doc from the
       # Firestore emulator under the repository's rules (demo- project, no secrets), and talking same-origin to the real
