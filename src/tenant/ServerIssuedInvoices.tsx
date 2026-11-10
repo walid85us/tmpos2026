@@ -2561,7 +2561,8 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
           <section aria-labelledby="issued-payments-title" data-testid="issued-payments" className="space-y-3">
             <h3 ref={payHeading} id="issued-payments-title" tabIndex={-1} className="text-base font-black text-primary">{PAYMENTS_TEXT.title}</h3>
             {pay.page !== null && (
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+              // Stacked below sm: beside its label the largest amount overflows a 320 px dialog (SIS-09, CI run 42911307850).
+              <dl className="grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
                 <dt className={labelClass}>Payment status</dt>
                 <dd data-testid="issued-payments-status" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_PAYMENT_STATUSES[pay.page.paymentStatus]}</dd>
                 <dt className={labelClass}>Amount due</dt>

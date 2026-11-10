@@ -9162,7 +9162,8 @@ async function voidAudits(tenant) {
 const voidViewOf = (page) => page.evaluate(`({
   at: document.querySelector('time[data-testid="issued-view-voided-at"]')?.getAttribute('datetime') ?? null,
   time: ${q('issued-view-voided-at')}?.textContent.trim() ?? null, reason: ${q('issued-view-void-reason')}?.textContent.trim() ?? null,
-  labels: [...(${q('issued-view')}?.querySelectorAll('dt') ?? [])].map((dt) => dt.textContent.trim()),
+  // P2A: the Payments section's own terms are pinned by SII-153; these are the invoice's.
+  labels: [...(${q('issued-view')}?.querySelectorAll('dt') ?? [])].filter((dt) => dt.closest('[data-testid="issued-payments"]') === null).map((dt) => dt.textContent.trim()),
 })`);
 /** A UTC <time>'s date and clock, each in lines (it may wrap at its spaces only). */
 const timeLinesOf = (page, id) => page.evaluate(`(() => {
