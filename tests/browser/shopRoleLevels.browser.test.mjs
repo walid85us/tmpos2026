@@ -8069,8 +8069,14 @@ const NOT_SAID = /\b(paid|unpaid|due|balance|payment|deposit|receivable|void|pri
 const isVoidRoute = (r) => /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/void(?:-eligibility)?$/.test(r.path);
 const isVoidEligibility = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/void-eligibility`;
 const isVoidPost = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/void`;
-/** An issued read that is no void route: a list page or one invoice's detail. */
-const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r);
+// M7B-PAYMENTS-P2A (decision D4): the Issued section's dialog also reads payments page one ONCE per open, after its detail
+// answered — GET …/invoices/{id}/payments, under the same matcher. The pins below count it apart: still ONE detail GET and
+// ONE eligibility GET per open, plus exactly ONE payments GET.
+/** The payments read of any store: GET …/invoices/{id}/payments (any query). */
+const isPaymentsRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payments$/.test(r.path);
+const isPaymentsOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payments`;
+/** An issued read that is no void route and no payments read: a list page or one invoice's detail. */
+const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r) && !isPaymentsRead(r);
 /** The shop's own void trigger (ServerIssuedInvoices.tsx VOID_TEXT.open). */
 const VOID_OPEN = 'Void invoice…';
 /**
@@ -8082,6 +8088,8 @@ const unvoided = (text) => text.split(VOID_OPEN).join('').split(VOID_OPEN.toUppe
 /** Wait until `page`'s void eligibility read of invoice `id` (sent from `from` on) is answered, then every request and two frames. */
 async function eligibilityAnswered(page, store, id, from) {
   await page.waitFor(() => sentBy(page, isVoidEligibility(store, id), from).some((r) => r.status !== null), 30_000, `the void eligibility of ${id} answered`);
+  // P2A: every caller opened a dialog whose detail answered, so its ONE payments read follows; it is part of the barrier.
+  await page.waitFor(() => sentBy(page, isPaymentsOf(store, id), from).some((r) => r.status !== null), 30_000, `the payments read of ${id} answered`);
   await quiet(page, from);
   await page.settle();
 }
@@ -8188,7 +8196,9 @@ const issuedViewOf = (page) => page.evaluate(`(() => {
     lines: [...document.querySelectorAll('[data-testid="issued-view-line"]')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent.trim())),
     subtotal: t('issued-view-subtotal'), tax: t('issued-view-tax'), total: t('issued-view-total'), note: t('issued-view-note'),
     shell: { role: v?.getAttribute('role') ?? null, modal: v?.getAttribute('aria-modal') ?? null, name: v === null ? null : document.getElementById(v.getAttribute('aria-labelledby'))?.textContent.trim() ?? null },
-    text: v?.innerText ?? '', buttons: v === null ? [] : [...v.querySelectorAll('button:not([data-testid$="-id-copy"])')].map((b) => b.textContent.trim()), // Copy ID (QA-UI-02): SLH-02
+    // P2A supersession: the text and controls OUTSIDE the Payments section (its own words are doc 15's "recorded" ones).
+    text: (() => { if (v === null) return ''; const p = v.querySelector('[data-testid="issued-payments"]'); if (p === null) return v.innerText; p.style.display = 'none'; const out = v.innerText; p.style.removeProperty('display'); return out; })(),
+    buttons: v === null ? [] : [...v.querySelectorAll('button:not([data-testid$="-id-copy"]):not([data-testid^="issued-payments-"])')].map((b) => b.textContent.trim()), // Copy ID (QA-UI-02): SLH-02
   };
 })()`);
 /** The list area's whole text and its controls. */
@@ -8259,6 +8269,7 @@ scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES 
     assert.deepEqual(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(main.id)}/${row.id} 200`], `invoice ${row.number}: ONE GET of exactly that invoice`);
     assert.deepEqual(sentBy(page, isVoidRoute, from).map((r) => `${readLine(r)} ${r.replied.text}`), [`${issuedPath(main.id)}/${row.id}/void-eligibility 200 {"eligibility":"allowed"}`],
       `invoice ${row.number}: ONE void eligibility GET, allowed for the owner, and no void POST`);
+    assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${row.id}/payments 200`], `invoice ${row.number}: ONE payments GET, page one (D4)`);
     assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
     const { text, buttons, shell, ...content } = view;
     assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
@@ -8379,6 +8390,7 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   // eligibility read, the server's 403 for this level.
   assert.deepEqual(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(main.id)}?limit=20 200`, `${issuedPath(main.id)}/${invoiceId} 200`]);
   assert.deepEqual(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/void-eligibility 403 forbidden`], 'ONE void eligibility read, refused for Invoices View');
+  assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payments 200`], 'P2A D4: ONE payments read for the open, at Invoices View');
 
   // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
   await levelVia(direct, 'manager', 'customers', 'none');
@@ -8617,6 +8629,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     // VOID-P2 supersession of "ONE GET per open": ONE detail GET, and the open's ONE void eligibility GET (allowed: the owner).
     check(same(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(store)}/${invoiceId} 200`]), `${cell}: not ONE GET per open`);
     check(same(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/void-eligibility 200`]), `${cell}: not ONE void eligibility GET per open (and no void POST)`);
+    check(same(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/payments 200`]), `${cell}: not ONE payments GET per open (D4)`);
     check(voidable ? trigger !== null && trigger.inView && trigger.onTop : trigger === null, `${cell}: the Void invoice… trigger ${voidable ? 'is not in view and on top' : 'is offered on a voided invoice'} ${JSON.stringify(trigger)}`);
     check(same(tabs, tabOrder), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
     await alsoOpen(cell, check);
@@ -9249,6 +9262,7 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
   await quiet(page, view);
   await page.settle();
   await assertVoidedDialog('View invoice', view, { eligibility: false });
+  assert.deepEqual(sentBy(page, isPaymentsRead, view).map(readLine), [], 'P2A D4: the drafts card\'s View invoice reads no payments');
   await page.click(by('issued-view-close'));
   await page.waitFor(`!${q('issued-view')}`, 10_000, 'View invoice: closed');
   await page.waitFor(async () => (await focusOf(page)) === 'drafts-issue-view', 5_000, 'focus back on View invoice');

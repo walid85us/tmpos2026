@@ -73,15 +73,20 @@
 //     that shows the invoice's state now, never which request caused it. A token change, a sign-out or another user
 //     detaches it for good. A 403 step_up_required on a first send (nothing ran) offers an explicit sign-in that keeps the
 //     dialog, re-reads the invoice and its eligibility and asks for a NEW press; nothing signs in or sends on its own.
+//   - Payments (M7B-PAYMENTS-P2A, doc 15 §3 D-PAY-1 and §12.3; decision D4): only this section's dialog shows a read-only
+//     "Payments" section — page one read ONCE per open after the detail answered an invoice, under the dialog read's own
+//     context and session work; "Load more payments" for the next page; Try again after a failure; once more after this
+//     dialog's void is confirmed. Nothing on focus or timers. The amounts and the word are always the server's, every label
+//     says "recorded"; nothing here records, reverses or proves a payment.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type TenantSessionClient } from './tenantSessionClient';
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
-  INVOICE_VOID_REASONS, VOID_REASON_CODES, invoiceIssuing as issuingClient, isVoidTarget, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText, voidBodyOf,
-  type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
-  type IssuedStatus, type IssuingSettingsFields, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
+  INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_PAYMENT_STATUSES, INVOICE_VOID_REASONS, VOID_REASON_CODES, invoiceIssuing as issuingClient, isVoidTarget, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText, voidBodyOf,
+  type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoicePayment, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
+  type IssuedStatus, type IssuingSettingsFields, type PaymentsPage, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
 } from './invoiceIssuingClient';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
@@ -140,6 +145,21 @@ export const VIEW_TEXT = Object.freeze({
   unavailable: 'This invoice could not be loaded right now. Try again.',
   note: "Recorded when it was issued (snapshot version 1): later changes to the store's issuing settings or to the customer do not change it.",
   waiting: LIST_TEXT.waiting,
+});
+
+/** The issued dialog's Payments section (M7B-PAYMENTS-P2A, doc 15 §3 D-PAY-1): read-only, every word "recorded". */
+export const PAYMENTS_TEXT = Object.freeze({
+  title: 'Payments',
+  note: 'Payments are recorded by staff; the product does not verify them.',
+  loading: 'Loading payments…',
+  empty: 'No payments recorded.',
+  denied: 'You cannot view payments for this invoice at this store.',
+  notFound: 'The payments for this invoice were not found.',
+  unavailable: 'Payments could not be loaded.',
+  changed: 'The payments changed while loading. Close and reopen this invoice to see them.',
+  waiting: LIST_TEXT.waiting,
+  loadMore: 'Load more payments',
+  reversed: 'Reversed',
 });
 
 export const SETTINGS_TEXT = Object.freeze({
@@ -889,6 +909,38 @@ function IssuedSection({
     }
     if (adopt(s.csrf)) return null; // a new generation closed the dialog
     const answer = await issuing.getIssued(storeId, invoiceId, s.csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'ok' || answer.kind === 'not-found') return answer;
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+    if (answer.kind === 'denied') {
+      const verdict = await viewDenialOf(viewId, stale);
+      if (verdict === null) return null;
+      return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
+    }
+    if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
+    return { kind: 'unavailable' };
+  }
+
+  /**
+   * The dialog's payments read (M7B-PAYMENTS-P2A): one page under readView's own context and session work — the check, a
+   * 401 that ends the session, a 403's one fresh check (shared with the open's other reads), a 429's wait (during a wait
+   * nothing is sent). Null when the context that asked is gone.
+   */
+  async function readPayments(viewId: number, storeId: string, invoiceId: string, after: string | null, signal: AbortSignal): Promise<PaymentsReadAnswer | null> {
+    if (waitRef.current) return { kind: 'rate-limited', text: pickerWaitText(waitLeft()) };
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || storeId !== storeRef.current || since !== sessionEndsSoFar()
+      || viewRef.current?.id !== viewId || viewRef.current.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const s = await connect();
+    if (stale()) return null;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') { failSession(failure); return null; }
+      return failure.seconds !== undefined ? { kind: 'rate-limited', text: pickerWaitText(startWait(failure.seconds)) } : { kind: 'unavailable' };
+    }
+    if (adopt(s.csrf)) return null; // a new generation closed the dialog
+    const answer = await issuing.getPayments(storeId, invoiceId, after, s.csrf, signal);
     if (stale()) return null;
     if (answer.kind === 'ok' || answer.kind === 'not-found') return answer;
     if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
@@ -1808,6 +1860,7 @@ function IssuedSection({
           key={view.id} storeId={view.storeId} invoiceId={view.invoiceId} read={(s, i, signal) => readView(view.id, s, i, signal)} waiting={waiting} onClose={closeView} returnFocus={heading}
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
           voiding={view.store === null ? undefined : voidingOf(view, view.store)}
+          payments={{ read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal) }}
         />
       )}
     </section>
@@ -1822,6 +1875,16 @@ export type IssuedReadAnswer =
   | { readonly kind: 'ok'; readonly invoice: IssuedInvoice }
   | { readonly kind: 'not-found' | 'denied' | 'unavailable' }
   | { readonly kind: 'rate-limited'; readonly text: string };
+/** What the owner's payments read answers the dialog (M7B-PAYMENTS-P2A): one page, or why there is none to show. */
+export type PaymentsReadAnswer =
+  | { readonly kind: 'ok'; readonly page: PaymentsPage }
+  | { readonly kind: 'not-found' | 'denied' | 'unavailable' }
+  | { readonly kind: 'rate-limited'; readonly text: string };
+/** The Issued section's payments read for the one dialog it opened: the drafts card's View invoice never has one. */
+export interface IssuedPaymentsCapability {
+  /** ONE page (`after` null: page one) under the owner's session and context; null when that context is gone. */
+  readonly read: (after: string | null, signal: AbortSignal) => Promise<PaymentsReadAnswer | null>;
+}
 
 /** One press of the void confirmation's "Void invoice" (M7B-INVOICES-VOID-P2): what is voided, why, and the confirmation's callbacks. */
 export interface VoidPress {
@@ -1910,6 +1973,12 @@ export interface IssuedInvoiceDialogProps {
   readonly returnFocus: RefObject<HTMLElement | null>;
   /** The void action (M7B-INVOICES-VOID-P2): only the Issued section gives one; without it the dialog is exactly the read-only one. */
   readonly voiding?: IssuedVoidCapability;
+  /**
+   * The payments read (M7B-PAYMENTS-P2A): only the Issued section gives one. Page one once per open, only after the detail
+   * answered an invoice; again only on its Try again, after this dialog's void was confirmed, and "Load more payments" for
+   * the next page. Without it the dialog renders and reads exactly as before.
+   */
+  readonly payments?: IssuedPaymentsCapability;
 }
 
 type ViewState =
@@ -1919,6 +1988,46 @@ const VIEW_LOADING: ViewState = Object.freeze({ phase: 'loading', text: VIEW_TEX
 /** The first render: loading, with its status region in place but still empty — the loading text is then a change to it (announced). */
 const VIEW_OPENING: ViewState = Object.freeze({ phase: 'loading', text: '', invoice: null });
 const UNAVAILABLE_READ: IssuedReadAnswer = Object.freeze({ kind: 'unavailable' });
+
+/**
+ * The Payments section (M7B-PAYMENTS-P2A): `page` the newest held answer (its amounts and word are the whole history's),
+ * `rows` every page joined so far, `next` the cursor Load more sends, `more` a Load more out.
+ */
+interface PaymentsView {
+  readonly phase: 'opening' | 'loading' | 'ready' | 'changed' | 'not-found' | 'denied' | 'unavailable' | 'rate-limited';
+  readonly text: string;
+  readonly page: PaymentsPage | null;
+  readonly rows: readonly InvoicePayment[];
+  readonly next: string | null;
+  readonly more: boolean;
+}
+/** Before page one is asked: the live region in place and empty, so "Loading" is a change to it (announced). */
+const PAYMENTS_OPENING: PaymentsView = Object.freeze({ phase: 'opening', text: '', page: null, rows: [], next: null, more: false });
+const PAYMENTS_LOADING: PaymentsView = Object.freeze({ ...PAYMENTS_OPENING, phase: 'loading', text: PAYMENTS_TEXT.loading });
+const UNAVAILABLE_PAYMENTS: PaymentsReadAnswer = Object.freeze({ kind: 'unavailable' });
+const paymentAfter = (a: InvoicePayment, b: InvoicePayment): boolean => a.recordedAt < b.recordedAt || (a.recordedAt === b.recordedAt && a.id < b.id);
+
+/**
+ * Whether a Load more page continues what is held: the same invoice status, amounts and word; no id again, the order
+ * unbroken across pages; the unreversed amounts of every page so far within the recorded amount, and equal to it on the
+ * last page. Otherwise the history changed between the reads.
+ */
+function paymentsJoin(held: PaymentsView, page: PaymentsPage): boolean {
+  const was = held.page;
+  if (was === null || was.invoice.status !== page.invoice.status || was.paymentStatus !== page.paymentStatus || was.amounts.dueCents !== page.amounts.dueCents
+    || was.amounts.appliedCents !== page.amounts.appliedCents || was.amounts.remainingCents !== page.amounts.remainingCents) return false;
+  const ids = new Set(held.rows.map((p) => p.id));
+  let prev: InvoicePayment | undefined = held.rows[held.rows.length - 1];
+  let active = 0n;
+  for (const p of [...held.rows, ...page.payments]) if (p.reversal === null) active += BigInt(p.amountCents);
+  for (const p of page.payments) {
+    if (ids.has(p.id) || (prev !== undefined && !paymentAfter(prev, p))) return false;
+    ids.add(p.id);
+    prev = p;
+  }
+  const applied = BigInt(page.amounts.appliedCents);
+  return active <= applied && (page.nextCursor !== null || active === applied);
+}
 
 /** The void confirmation over the dialog: which open it is, exactly what it confirms (the review read's invoice), the reason, and where it is. */
 interface VoidConfirm {
@@ -1967,14 +2076,14 @@ const DETAIL_KINDS: ReadonlySet<VoidReadKind> = new Set(['review', 'after', 'loa
  * retries only that GET). A late answer of any of these reads changes nothing once its open, its kind's latest read or
  * its context is gone.
  */
-export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding }: IssuedInvoiceDialogProps) {
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments }: IssuedInvoiceDialogProps) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<ViewState>(VIEW_OPENING);
   const alive = useRef(false);
   const seq = useRef(0);
   const ctl = useRef<AbortController | null>(null);
-  const owner = useRef({ read, current, voiding });
-  useLayoutEffect(() => { owner.current = { read, current, voiding }; });
+  const owner = useRef({ read, current, voiding, payments });
+  useLayoutEffect(() => { owner.current = { read, current, voiding, payments }; });
   // The void action (idle, and nothing of it rendered, without `voiding`).
   // The eligibility answer AND the section generation it was read under (review B1 R3-1b): only an 'allowed' read under
   // the generation that stands now permits the action; an older one counts as not yet known.
@@ -2010,6 +2119,31 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   };
   const takeAway = (): void => { goneRef.current = true; setGoneState(true); };
   const putConfirm = (next: VoidConfirm | null): void => { confirmRef.current = next; setConfirmState(next); };
+  // The Payments section (M7B-PAYMENTS-P2A; nothing of it read or rendered without `payments`). The ref is also the
+  // double-press guard: a Load more is out while `more`.
+  const [pay, setPayState] = useState<PaymentsView>(PAYMENTS_OPENING);
+  const payRef = useRef<PaymentsView>(PAYMENTS_OPENING);
+  const payStarted = useRef(false);
+  const paySeq = useRef(0);
+  const payCtl = useRef<AbortController | null>(null);
+  const payHeading = useRef<HTMLHeadingElement | null>(null);
+  const loadMorePayments = useRef<HTMLButtonElement | null>(null);
+  const payRetry = useRef<HTMLButtonElement | null>(null);
+  const payRefocus = useRef<HTMLElement | null>(null);
+  const putPay = (next: PaymentsView): void => {
+    // Load more (its last page, a change) or Try again (a read starts) going while focused: focus moves to the section's
+    // heading, never to the body.
+    const focused = document.activeElement;
+    if (focused !== null && (focused === loadMorePayments.current || focused === payRetry.current)) payRefocus.current = focused as HTMLElement;
+    payRef.current = next;
+    setPayState(next);
+  };
+  useLayoutEffect(() => {
+    const was = payRefocus.current;
+    if (was === null) return;
+    payRefocus.current = null;
+    if (!was.isConnected) payHeading.current?.focus();
+  });
   /** Change the open confirmation when it is still the one `id` names (a closed or replaced one's continuation changes nothing). */
   const patchConfirm = (id: number, next: Partial<VoidConfirm>): boolean => {
     const c = confirmRef.current;
@@ -2032,6 +2166,39 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     if (answer.kind === 'ok') return setState({ phase: 'ready', text: '', invoice: answer.invoice });
     if (answer.kind === 'rate-limited') return setState({ phase: 'rate-limited', text: answer.text, invoice: null });
     setState({ phase: answer.kind, text: answer.kind === 'not-found' ? VIEW_TEXT.notFound : answer.kind === 'denied' ? VIEW_TEXT.denied : VIEW_TEXT.unavailable, invoice: null });
+  }
+
+  /**
+   * One payments read: page one (`after` null; what was held goes) or the page after the held cursor, joined only when it
+   * continues what is held (paymentsJoin) — otherwise the held rows stay and the change is said, with no read of its own.
+   * Its own sequence and abort: a later read, a close or a context gone drops its answer.
+   */
+  async function loadPayments(after: string | null): Promise<void> {
+    const p = owner.current.payments;
+    if (p === undefined) return;
+    const n = ++paySeq.current;
+    payCtl.current?.abort();
+    const controller = new AbortController();
+    payCtl.current = controller;
+    const held = payRef.current;
+    putPay(after === null ? PAYMENTS_LOADING : { ...held, text: PAYMENTS_TEXT.loading, more: true }); // the rows stay; the region says it reads
+    let answer: PaymentsReadAnswer | null;
+    try { answer = await p.read(after, controller.signal); } catch { answer = UNAVAILABLE_PAYMENTS; }
+    if (!alive.current || n !== paySeq.current) return; // closed, or another payments read took over
+    // Its context is gone (another generation, store or session): a Load more keeps what is held, said as before; page one
+    // is never "Loading" for good. Nothing it read is shown.
+    if ((answer === null || !owner.current.current()) && after !== null) return putPay({ ...held, more: false });
+    if (answer === null || !owner.current.current()) answer = UNAVAILABLE_PAYMENTS;
+    if (answer.kind === 'ok') {
+      const { page } = answer;
+      if (after === null) return putPay({ phase: 'ready', text: page.payments.length === 0 ? PAYMENTS_TEXT.empty : '', page, rows: page.payments, next: page.nextCursor, more: false });
+      if (!paymentsJoin(held, page)) return putPay({ ...held, phase: 'changed', text: PAYMENTS_TEXT.changed, next: null, more: false });
+      return putPay({ phase: 'ready', text: '', page, rows: [...held.rows, ...page.payments], next: page.nextCursor, more: false });
+    }
+    const text = answer.kind === 'rate-limited' ? answer.text : answer.kind === 'not-found' ? PAYMENTS_TEXT.notFound : answer.kind === 'denied' ? PAYMENTS_TEXT.denied : PAYMENTS_TEXT.unavailable;
+    // A Load more that could not be read keeps what is shown (and its cursor); a refusal or a page one shows nothing read before.
+    const keep = after !== null && (answer.kind === 'unavailable' || answer.kind === 'rate-limited');
+    putPay(keep ? { ...held, phase: answer.kind, text, more: false } : { ...PAYMENTS_OPENING, phase: answer.kind, text });
   }
 
   /** One void-side read of kind `kind`; null when a later read of that kind took over, the dialog closed or its context is gone. */
@@ -2066,10 +2233,18 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     return () => {
       alive.current = false;
       ctl.current?.abort();
+      payCtl.current?.abort();
       for (const controller of Object.values(vctl.current)) controller?.abort();
     };
     // One dialog per open: its store and invoice are fixed for its life.
   }, []);
+
+  // Payments page one: ONCE per open, and only once the detail has answered an invoice (never on a refused or failed detail).
+  useEffect(() => {
+    if (state.invoice === null || payStarted.current || owner.current.payments === undefined) return;
+    payStarted.current = true;
+    void loadPayments(null);
+  }, [state.invoice]);
 
   // This invoice's attempt, whichever open pressed it (review B1 F1): the user's held attempt for this store and invoice.
   // `watched`: pressed here or seen out while this dialog was open — only its settling makes the dialog read again or say
@@ -2090,6 +2265,9 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     // Voided now: no confirmation stays open — but the one that pressed a sealed already-void, which says so (F1).
     if (voidedBy(settled) && c !== null && (settled.state === 'voided' || c.key !== settled.key)) putConfirm(null);
     void reread('after'); // its shared sequence drops a review answer still out (F1)
+    // Every settled outcome that re-reads the detail (voided, a sealed already-void, the after-refusals) reads payments page
+    // one again ONCE too (afterFor guards it), so the summary never keeps saying amounts of before.
+    if (payStarted.current) void loadPayments(null);
   }, [afterKey]);
 
   /** The re-read after a void's answer, and its "Load again": a GET only, never another POST. */
@@ -2376,6 +2554,67 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             <InvoiceSnapshot prefix="issued-view" seller={invoice.seller} customerName={invoice.customer.name} lines={invoice.lines} amounts={invoice.amounts} />
             <p data-testid="issued-view-note" className={hintClass}>{VIEW_TEXT.note}</p>
           </div>
+        )}
+        {payments !== undefined && invoice !== null && (
+          // Read-only (M7B-PAYMENTS-P2A): the server's amounts and word over the whole history — never a sum made here — and
+          // the pages read so far, oldest first. Amounts never break; text wraps (320 px).
+          <section aria-labelledby="issued-payments-title" data-testid="issued-payments" className="space-y-3">
+            <h3 ref={payHeading} id="issued-payments-title" tabIndex={-1} className="text-base font-black text-primary">{PAYMENTS_TEXT.title}</h3>
+            {pay.page !== null && (
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+                <dt className={labelClass}>Payment status</dt>
+                <dd data-testid="issued-payments-status" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_PAYMENT_STATUSES[pay.page.paymentStatus]}</dd>
+                <dt className={labelClass}>Amount due</dt>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-due" className="whitespace-nowrap">{formatCents(pay.page.amounts.dueCents)}</span></dd>
+                <dt className={labelClass}>Recorded</dt>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-recorded" className="whitespace-nowrap">{formatCents(pay.page.amounts.appliedCents)}</span></dd>
+                <dt className={labelClass}>Remaining</dt>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-remaining" className="whitespace-nowrap">{formatCents(pay.page.amounts.remainingCents)}</span></dd>
+              </dl>
+            )}
+            <p data-testid="issued-payments-note" className={hintClass}>{PAYMENTS_TEXT.note}</p>
+            <p data-testid="issued-payments-state" data-phase={pay.phase} role={pay.phase === 'denied' ? 'alert' : 'status'} className="text-sm font-bold text-slate-600">{pay.text}</p>
+            {(pay.phase === 'not-found' || pay.phase === 'denied' || pay.phase === 'unavailable' || pay.phase === 'rate-limited') && (
+              <button
+                ref={payRetry} type="button" data-testid="issued-payments-retry" aria-disabled={waiting || pay.more} aria-describedby={waiting ? 'issued-payments-wait' : undefined}
+                aria-label="Try again: load the payments" onClick={() => { if (!waiting && !payRef.current.more) void loadPayments(null); }} className={`${quiet} ${waitable}`}
+              >
+                Try again
+              </button>
+            )}
+            {pay.rows.length > 0 && (
+              <ol data-testid="issued-payments-list" aria-label="Payments recorded for this invoice" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
+                {pay.rows.map((p) => (
+                  <li key={p.id} data-testid="issued-payments-item" data-id={p.id} className="px-4 py-3 text-sm min-w-0 break-words">
+                    <p className="font-bold text-slate-700">
+                      <span data-testid="issued-payments-amount" className="whitespace-nowrap">{formatCents(p.amountCents)}</span>
+                      {' · '}<span data-testid="issued-payments-method">{INVOICE_PAYMENT_METHODS[p.method]}</span>
+                      {p.reversal !== null && <>{' · '}<span data-testid="issued-payments-reversed" className="text-rose-800">{PAYMENTS_TEXT.reversed}</span></>}
+                    </p>
+                    <p className={hintClass}>Recorded at <time data-testid="issued-payments-recorded-at" dateTime={p.recordedAt}>{utcText(p.recordedAt)}</time></p>
+                    {p.reversal !== null && (
+                      <p className={hintClass}>
+                        Reversed at <time data-testid="issued-payments-reversed-at" dateTime={p.reversal.reversedAt}>{utcText(p.reversal.reversedAt)}</time>
+                        {' · '}Reason <span data-testid="issued-payments-reason">{INVOICE_PAYMENT_REVERSAL_REASONS[p.reversal.reasonCode]}</span>
+                      </p>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {pay.next !== null && (
+              // aria-disabled, never disabled: it keeps focus through its own read (a press meanwhile does nothing).
+              <button
+                ref={loadMorePayments} type="button" data-testid="issued-payments-load-more" aria-disabled={waiting || pay.more}
+                aria-describedby={pay.more ? 'issued-payments-busy' : waiting ? 'issued-payments-wait' : undefined}
+                onClick={() => { const held = payRef.current; if (!waiting && !held.more && held.next !== null) void loadPayments(held.next); }} className={`${quiet} ${waitable}`}
+              >
+                {PAYMENTS_TEXT.loadMore}
+              </button>
+            )}
+            {pay.more && <span id="issued-payments-busy" className="sr-only">{PAYMENTS_TEXT.loading}</span>}
+            {waiting && <span id="issued-payments-wait" className="sr-only">{PAYMENTS_TEXT.waiting}</span>}
+          </section>
         )}
       </DialogFrame>
       {voiding !== undefined && showConfirm && confirm !== null && (

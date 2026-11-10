@@ -9,6 +9,9 @@
 // this session may void at that store now — action-only and target-blind: it reads no invoice, so it never proves the
 // invoice exists or is still issued, and it asks for no recent sign-in) and POST …/invoices/{id}/void (the idempotent void
 // on a recent sign-in: exactly `{ expectedTenant, reasonCode }`, no version; a 200 names the invoice and "voided" only).
+// M7B-PAYMENTS-P2A adds ONE read (docs/phase-4/15 §12.3): GET …/invoices/{id}/payments[?after={paymentId}] — the invoice's
+// status, its due/recorded/remaining amounts and status word over the whole history, and one page of at most 50 payments,
+// oldest first. Nothing here records, reverses or proves a payment.
 //
 //   - The server is the authority for everything: who may read, write or issue, which tenant a store belongs to, the
 //     amounts, the number and what was stored. This client reports what the server answered and decides nothing.
@@ -64,6 +67,8 @@ export const issuedInvoicePathOf = (storeId: string, invoiceId: string): string 
 /** The void's two routes, under the issued invoice's own path (server/runtime/invoiceVoid.ts). */
 export const voidEligibilityPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/void-eligibility`;
 export const voidPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/void`;
+/** The payments read (M7B-PAYMENTS-P2A, docs/phase-4/15 §12.3), under the issued invoice's own path (server/runtime/invoicePayments.ts). */
+export const paymentsPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payments`;
 
 export const LEGAL_NAME_MAX_CHARACTERS = 200;
 export const ISSUING_STORE_NAME_MAX_CHARACTERS = 120;
@@ -97,6 +102,31 @@ const isVoidReasonCode = (value: unknown): value is InvoiceVoidReasonCode => typ
  */
 const VOID_TARGET_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const isVoidTarget = (value: unknown): value is string => typeof value === 'string' && VOID_TARGET_RE.test(value);
+/** The payments read's five status words and their shop labels (doc 15 §3 D-PAY-1): each says "recorded", never "paid". */
+export const INVOICE_PAYMENT_STATUSES = Object.freeze({
+  nothing_due: 'Nothing due',
+  no_payment_recorded: 'No payment recorded',
+  recorded_partly: 'Payment recorded in part',
+  recorded_in_full: 'Payment recorded in full',
+  voided: 'Voided',
+} as const);
+export type InvoicePaymentStatus = keyof typeof INVOICE_PAYMENT_STATUSES;
+/** The two methods and their labels (doc 15 §12.2, this order). */
+export const INVOICE_PAYMENT_METHODS = Object.freeze({ cash: 'Cash', external_card_terminal: 'Card on a separate terminal' } as const);
+export type InvoicePaymentMethod = keyof typeof INVOICE_PAYMENT_METHODS;
+/** The six reversal reasons and their labels (doc 15 §12.2, this order). */
+export const INVOICE_PAYMENT_REVERSAL_REASONS = Object.freeze({
+  recorded_in_error: 'Recorded by mistake',
+  wrong_amount: 'Wrong amount',
+  wrong_method: 'Wrong method',
+  wrong_invoice: 'Wrong invoice',
+  duplicate: 'Payment recorded twice',
+  other: 'Other reason',
+} as const);
+export type InvoicePaymentReversalReason = keyof typeof INVOICE_PAYMENT_REVERSAL_REASONS;
+/** The payments read's page: at most 50 (server INVOICE_PAYMENTS_PAGE_SIZE). */
+export const PAYMENTS_PAGE_SIZE = 50;
+const isKeyOf = <T extends object>(map: T, value: unknown): value is keyof T => typeof value === 'string' && Object.prototype.hasOwnProperty.call(map, value);
 /** The lifecycle a read reports: its current state only — never which request made it so. */
 export type IssuedStatus = 'issued' | 'voided';
 const MAX = Number.MAX_SAFE_INTEGER;
@@ -159,6 +189,23 @@ export interface IssuedInvoice {
   readonly lines: readonly InvoiceLine[]; readonly amounts: InvoiceAmounts;
 }
 
+/** One recorded payment as the payments read answers it; `reversal` null while it stands. */
+export interface InvoicePayment {
+  readonly id: string; readonly attemptId: string; readonly amountCents: number; readonly method: InvoicePaymentMethod; readonly recordedAt: string;
+  readonly reversal: { readonly reversedAt: string; readonly reasonCode: InvoicePaymentReversalReason } | null;
+}
+/**
+ * One page of an issued invoice's payments: the amounts and the word cover the WHOLE history (the server's, one snapshot),
+ * the page at most 50 oldest first; `nextCursor` the last payment's id when more exist.
+ */
+export interface PaymentsPage {
+  readonly invoice: { readonly id: string; readonly status: IssuedStatus };
+  readonly amounts: { readonly currency: 'USD'; readonly dueCents: number; readonly appliedCents: number; readonly remainingCents: number };
+  readonly paymentStatus: InvoicePaymentStatus;
+  readonly payments: readonly InvoicePayment[];
+  readonly nextCursor: string | null;
+}
+
 interface RateLimited { readonly kind: 'rate-limited'; readonly retryAfterSeconds: number }
 type ReadRefusal = { readonly kind: 'signed-out' | 'denied' | 'unavailable' } | RateLimited;
 
@@ -184,6 +231,8 @@ export type IssuedPageResult =
 /** The sourceDraft lookup: the one issued invoice of that draft, or null — "none found yet", never proof it was not issued. */
 export type FindIssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedSummary | null } | ReadRefusal;
 export type IssuedResult = { readonly kind: 'ok'; readonly invoice: IssuedInvoice } | { readonly kind: 'not-found' } | ReadRefusal;
+/** One payments page (M7B-PAYMENTS-P2A). A 400 (an unknown cursor included) is `unavailable`: this client sends only decoded cursors. */
+export type PaymentsResult = { readonly kind: 'ok'; readonly page: PaymentsPage } | { readonly kind: 'not-found' } | ReadRefusal;
 /**
  * One void answer (M7B-INVOICES-VOID-P2). `voided`: the exact 200 for the invoice asked — it says nothing of when or why
  * (a read does). Sealed: `already-void` (invalid_state), `version-conflict` (write_conflict), `payments-recorded`
@@ -510,6 +559,63 @@ function invoiceOf(body: unknown, invoiceId: string): IssuedInvoice | null {
   });
 }
 
+const PAYMENT_KEYS: readonly string[] = ['id', 'attemptId', 'amountCents', 'method', 'recordedAt', 'reversal'];
+
+function paymentOf(value: unknown): InvoicePayment | null {
+  if (!isPlain(value) || !hasKeys(value, PAYMENT_KEYS)) return null;
+  const { id, attemptId, amountCents, method, recordedAt, reversal } = value;
+  if (!isCustomerId(id) || !isCustomerId(attemptId) || !isCount(amountCents, 1, MAX) || !isKeyOf(INVOICE_PAYMENT_METHODS, method) || !isDraftCreatedAt(recordedAt)) return null;
+  if (reversal === null) return Object.freeze({ id, attemptId, amountCents, method, recordedAt, reversal: null });
+  // Same fixed-width UTC form on both sides, so the string order is the time order.
+  if (!isPlain(reversal) || !hasKeys(reversal, ['reversedAt', 'reasonCode']) || !isDraftCreatedAt(reversal.reversedAt) || reversal.reversedAt < recordedAt
+    || !isKeyOf(INVOICE_PAYMENT_REVERSAL_REASONS, reversal.reasonCode)) return null;
+  return Object.freeze({ id, attemptId, amountCents, method, recordedAt, reversal: Object.freeze({ reversedAt: reversal.reversedAt, reasonCode: reversal.reasonCode }) });
+}
+
+/** The word the invoice's status, due and applied amounts derive (server statusWordOf, restated). */
+const paymentStatusOf = (status: IssuedStatus, due: number, applied: number): InvoicePaymentStatus =>
+  status === 'voided' ? 'voided' : due === 0 ? 'nothing_due' : applied === 0 ? 'no_payment_recorded' : applied === due ? 'recorded_in_full' : 'recorded_partly';
+
+/**
+ * `{ invoice, amounts, paymentStatus, payments, nextCursor }` exactly, for the invoice asked (server invoicePaymentsOf,
+ * restated): due, applied and remaining their own arithmetic (all 0 when voided), the word the one they derive; at most 50
+ * payments, ids distinct and never `after`, strictly ascending by (recordedAt, id); the page's unreversed sum within
+ * applied (none on a voided invoice) and equal to it when the page is the whole history; a cursor only behind a full page,
+ * naming its last payment. Otherwise null.
+ */
+function paymentsPageOf(body: unknown, invoiceId: string, after: string | null): PaymentsPage | null {
+  if (!isPlain(body) || !hasKeys(body, ['invoice', 'amounts', 'paymentStatus', 'payments', 'nextCursor'])) return null;
+  const { invoice, amounts, paymentStatus, payments, nextCursor } = body;
+  if (!isPlain(invoice) || !hasKeys(invoice, ['id', 'status']) || invoice.id !== invoiceId || (invoice.status !== 'issued' && invoice.status !== 'voided')) return null;
+  const status: IssuedStatus = invoice.status === 'voided' ? 'voided' : 'issued';
+  if (!isPlain(amounts) || !hasKeys(amounts, ['currency', 'dueCents', 'appliedCents', 'remainingCents']) || amounts.currency !== 'USD') return null;
+  const { dueCents, appliedCents, remainingCents } = amounts;
+  if (!isCents(dueCents) || !isCents(appliedCents) || !isCents(remainingCents) || appliedCents > dueCents || remainingCents !== dueCents - appliedCents) return null;
+  if (status === 'voided' && dueCents !== 0) return null; // and so applied and remaining
+  const word = paymentStatusOf(status, dueCents, appliedCents);
+  if (paymentStatus !== word) return null;
+  if (!Array.isArray(payments) || payments.length > PAYMENTS_PAGE_SIZE) return null;
+  const rows: InvoicePayment[] = [];
+  const ids = new Set<string>();
+  let active = 0n;
+  for (const value of payments as unknown[]) {
+    const p = paymentOf(value);
+    const prev = rows[rows.length - 1];
+    if (p === null || ids.has(p.id) || p.id === after || (prev !== undefined && !(prev.recordedAt < p.recordedAt || (prev.recordedAt === p.recordedAt && prev.id < p.id)))) return null;
+    ids.add(p.id);
+    rows.push(p);
+    if (p.reversal === null) active += BigInt(p.amountCents);
+  }
+  const next = rows.length === PAYMENTS_PAGE_SIZE ? rows[rows.length - 1].id : null; // the only cursor this page may carry
+  if (nextCursor !== null && nextCursor !== next) return null;
+  if (active > BigInt(appliedCents) || (status === 'voided' && active !== 0n) || (after === null && nextCursor === null && active !== BigInt(appliedCents))) return null;
+  return Object.freeze({
+    invoice: Object.freeze({ id: invoiceId, status }),
+    amounts: Object.freeze({ currency: 'USD', dueCents, appliedCents, remainingCents }),
+    paymentStatus: word, payments: Object.freeze(rows), nextCursor: nextCursor === null ? null : next,
+  });
+}
+
 /**
  * What a settings body SENT, read from the caller's own string: its expected version and its values; null when it is not
  * one the server's planner takes (unreadable, over 8 KiB, not exactly the seven keys, a non-canonical tenant, a version
@@ -589,6 +695,11 @@ export interface InvoiceIssuingClient {
   findIssued(storeId: string, draftId: string, csrf: string, signal?: AbortSignal): Promise<FindIssuedResult>;
   /** One issued invoice of `storeId`; a malformed id is `not-found` and nothing is sent. Never rejects. */
   getIssued(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<IssuedResult>;
+  /**
+   * One page of an issued invoice's payments (M7B-PAYMENTS-P2A): page one (`after` null) or the page after a `nextCursor`
+   * this client decoded; a malformed store, invoice or `after` id is `unavailable`, nothing sent. Read-only. Never rejects.
+   */
+  getPayments(storeId: string, invoiceId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<PaymentsResult>;
   /**
    * Whether this session may void at `storeId` now — action-only (the invoice id names the route only; nothing about that
    * invoice) and with no recent sign-in asked; a malformed store id or an invoice id that is not `isVoidTarget` is
@@ -825,6 +936,18 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return readRefusal(answer) ?? UNAVAILABLE;
   }
 
+  async function getPayments(storeId: string, invoiceId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<PaymentsResult> {
+    if (!isCustomerId(storeId) || !isCustomerId(invoiceId) || (after !== null && !isCustomerId(after))) return UNAVAILABLE; // nothing is sent
+    const answer = await read(`${paymentsPathOf(storeId, invoiceId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const page = paymentsPageOf(answer.body, invoiceId, after);
+      return page === null ? UNAVAILABLE : Object.freeze({ kind: 'ok', page });
+    }
+    if (answer.status === 404 && shapes(answer).chain('not_found')) return Object.freeze({ kind: 'not-found' }); // missing, another store's or tenant's alike
+    return readRefusal(answer) ?? UNAVAILABLE; // a 400 (an unknown cursor among them) included
+  }
+
   async function voidEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
     if (!isCustomerId(storeId) || !isVoidTarget(invoiceId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
     const answer = await read(voidEligibilityPathOf(storeId, invoiceId), csrf, signal);
@@ -867,7 +990,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, voidEligibility, voidInvoice });
+  return Object.freeze({ getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice });
 }
 
 /** The shop's one issuing client. */

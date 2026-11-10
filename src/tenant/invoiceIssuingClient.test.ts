@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  INVOICE_VOID_REASONS, ISSUE_BODY_MAX_BYTES, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, VOID_REASON_CODES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf,
+  INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_PAYMENT_STATUSES, INVOICE_VOID_REASONS, ISSUE_BODY_MAX_BYTES, PAYMENTS_PAGE_SIZE, paymentsPathOf, ISSUED_PAGE_LIMIT, SETTINGS_BODY_MAX_BYTES, VOID_REASON_CODES, createInvoiceIssuingClient, issueBodyOf, issueEligibilityPathOf, issuePathOf,
   issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf, issuingSettingsBody, issuingSettingsPathOf, normalizePostalAddress, parseRatePercent, rateDigits, rateText,
   isVoidTarget, sameSettingsValues, utcText, voidBodyOf, voidEligibilityPathOf, voidPathOf, type IssuingSettingsFields,
 } from './invoiceIssuingClient';
@@ -20,6 +20,10 @@ import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
 import { invoiceTaxOf, issueAmountsOf } from '../../server/runtime/invoiceIssuing';
 import { INVOICE_VOID_REASON_CODES, INVOICE_VOID_REASON_LABELS } from '../../server/runtime/invoiceVoid';
+import {
+  INVOICE_PAYMENTS_PAGE_SIZE, INVOICE_PAYMENT_METHODS as SERVER_PAYMENT_METHODS, INVOICE_PAYMENT_METHOD_LABELS, INVOICE_PAYMENT_REVERSAL_REASON_CODES, INVOICE_PAYMENT_REVERSAL_REASON_LABELS,
+  INVOICE_PAYMENT_STATUSES as SERVER_PAYMENT_STATUSES,
+} from '../../server/runtime/invoicePayments';
 
 const cp = (code: number): string => String.fromCodePoint(code);
 const unit = (code: number): string => String.fromCharCode(code);
@@ -1085,4 +1089,169 @@ test('IIC-32. M7B-PAYMENTS-P1: the void\'s sealed 409 exactly {"error":"payments
     assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), outcome, name);
     assert.equal(calls.length, 1, name); // one fetch: nothing re-sends on its own
   }
+});
+
+// M7B-PAYMENTS-P2A — the payments read (server/runtime/invoicePayments.ts, doc 15 §12.3): GET …/payments[?after=<id>], the
+// exact 200 its serializer writes, the read's refusals. Read-only: nothing here records, reverses or proves a payment.
+const PAYMENTS_PATH = `/api/v1/stores/${STORE}/invoices/${INVOICE}/payments`;
+const at = (n: number): string => `2026-10-17T09:${String(Math.floor(n / 60) % 60).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}.000001Z`;
+const payment = (n: number, over: Record<string, unknown> = {}) => ({
+  id: uuid(0x9000 + n), attemptId: uuid(0xa000 + n), amountCents: 100, method: 'cash', recordedAt: at(n), reversal: null as unknown, ...over,
+});
+const REVERSAL = { reversedAt: '2026-10-18T10:00:00.000001Z', reasonCode: 'duplicate' };
+/** Issued, Total 2176, 300 recorded: 100 cash, 200 on a card terminal, and a reversed 500. */
+const paymentsBody = (over: Record<string, unknown> = {}) => ({
+  invoice: { id: INVOICE, status: 'issued' },
+  amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300, remainingCents: 1876 },
+  paymentStatus: 'recorded_partly',
+  payments: [payment(1), payment(2, { amountCents: 200, method: 'external_card_terminal' }), payment(3, { amountCents: 500, reversal: REVERSAL })],
+  nextCursor: null,
+  ...over,
+});
+const amountsOf = (dueCents: number, appliedCents: number) => ({ currency: 'USD', dueCents, appliedCents, remainingCents: dueCents - appliedCents });
+/** A full page of 50 payments of 100 cents (ids 1..50), more after it: the cursor is the last id. */
+const fullPage = (applied = 9000, from = 1) => paymentsBody({
+  amounts: amountsOf(10_000, applied), payments: Array.from({ length: 50 }, (_, i) => payment(from + i)), nextCursor: uuid(0x9000 + from + 49),
+});
+
+test('IIC-33. the payments read: ONE GET of …/invoices/{id}/payments with the session token alone (same-origin, credentialed, uncached, never redirected, no referrer); `?after=<id>` only with a cursor; its 200 decoded exactly and frozen; the labels are doc 15\'s and the server\'s, in its order', async () => {
+  assert.equal(paymentsPathOf(STORE, INVOICE), PAYMENTS_PATH);
+  assert.equal(PAYMENTS_PAGE_SIZE, INVOICE_PAYMENTS_PAGE_SIZE);
+  const { calls, client } = scripted(json(200, paymentsBody()), json(200, paymentsBody({ amounts: amountsOf(2176, 300), payments: [payment(4, { amountCents: 300 })] })));
+  const first = await client.getPayments(STORE, INVOICE, null, CSRF);
+  assert.deepEqual(first, { kind: 'ok', page: paymentsBody() });
+  assert.ok(first.kind === 'ok' && Object.isFrozen(first) && Object.isFrozen(first.page) && Object.isFrozen(first.page.amounts) && Object.isFrozen(first.page.invoice)
+    && Object.isFrozen(first.page.payments) && first.page.payments.every((p) => Object.isFrozen(p)) && Object.isFrozen(first.page.payments[2].reversal));
+  const after = uuid(0x9003);
+  assert.equal((await client.getPayments(STORE, INVOICE, after, CSRF)).kind, 'ok'); // a later page: its unreversed sum need only be within applied
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url}`), [`GET ${PAYMENTS_PATH}`, `GET ${PAYMENTS_PATH}?after=${after}`]);
+  for (const call of calls) {
+    assert.equal(call.init.credentials, 'include');
+    assert.equal(call.init.mode, 'same-origin');
+    assert.equal(call.init.cache, 'no-store');
+    assert.equal(call.init.redirect, 'error');
+    assert.equal(call.init.referrerPolicy, 'no-referrer');
+    assert.equal(call.init.body, undefined);
+    assert.deepEqual([...headersOf(call).entries()], [['accept', 'application/json'], ['x-tmpos-session-csrf', CSRF]]);
+    assert.ok(!call.url.includes(CSRF));
+  }
+  assert.deepEqual(INVOICE_PAYMENT_STATUSES, {
+    nothing_due: 'Nothing due', no_payment_recorded: 'No payment recorded', recorded_partly: 'Payment recorded in part', recorded_in_full: 'Payment recorded in full', voided: 'Voided',
+  });
+  assert.deepEqual(Object.keys(INVOICE_PAYMENT_STATUSES).sort(), [...SERVER_PAYMENT_STATUSES].sort());
+  assert.deepEqual(Object.keys(INVOICE_PAYMENT_METHODS), [...SERVER_PAYMENT_METHODS]);
+  assert.deepEqual(Object.entries(INVOICE_PAYMENT_METHODS), Object.entries(INVOICE_PAYMENT_METHOD_LABELS));
+  assert.deepEqual(Object.keys(INVOICE_PAYMENT_REVERSAL_REASONS), [...INVOICE_PAYMENT_REVERSAL_REASON_CODES]);
+  assert.deepEqual(Object.entries(INVOICE_PAYMENT_REVERSAL_REASONS), Object.entries(INVOICE_PAYMENT_REVERSAL_REASON_LABELS));
+  for (const map of [INVOICE_PAYMENT_STATUSES, INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_REVERSAL_REASONS]) assert.ok(Object.isFrozen(map));
+  // An aborted signal sends nothing.
+  const aborted = new AbortController();
+  aborted.abort();
+  const none = scripted();
+  assert.deepEqual(await none.client.getPayments(STORE, INVOICE, null, CSRF, aborted.signal), { kind: 'unavailable' });
+  assert.equal(none.calls.length, 0);
+});
+
+test('IIC-34. a payments 200 counts ONLY exactly as the server writes it: every extra or missing key, another invoice, a wrong word for each of the five, -0, an unsafe or out-of-range integer, a bad method, reason or time, a reversal before its recording, the order, a duplicate, the cursor rules, the voided rules and the sum rule are each unavailable', async () => {
+  const ok = (body: unknown, after: string | null = null) => [body, after, true] as const;
+  const bad = (body: unknown, after: string | null = null) => [body, after, false] as const;
+  const p1 = payment(1);
+  const voided = (over: Record<string, unknown> = {}) => paymentsBody({ invoice: { id: INVOICE, status: 'voided' }, amounts: amountsOf(0, 0), paymentStatus: 'voided', payments: [payment(1, { reversal: REVERSAL })], ...over });
+  const rows: Array<readonly [unknown, string | null, boolean]> = [
+    // The five words, each where it applies, and each other word refused there.
+    ok(paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: 'nothing_due', payments: [] })),
+    ok(paymentsBody({ amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded', payments: [payment(1, { reversal: REVERSAL })] })),
+    ok(paymentsBody()), // recorded_partly
+    ok(paymentsBody({ amounts: amountsOf(300, 300), paymentStatus: 'recorded_in_full' })),
+    ok(voided()), ok(voided({ payments: [] })),
+    ...['no_payment_recorded', 'recorded_partly', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: w, payments: [] }))),
+    ...['nothing_due', 'recorded_partly', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(2176, 0), paymentStatus: w, payments: [] }))),
+    ...['nothing_due', 'no_payment_recorded', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ paymentStatus: w }))),
+    ...['nothing_due', 'no_payment_recorded', 'recorded_partly', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(300, 300), paymentStatus: w }))),
+    ...['nothing_due', 'no_payment_recorded', 'recorded_partly', 'recorded_in_full', 'paid', 'unpaid', 'VOIDED', null].map((w) => bad(voided({ paymentStatus: w }))),
+    // Keys and shapes.
+    bad({ ...paymentsBody(), extra: 1 }), bad((({ nextCursor: _n, ...rest }) => rest)(paymentsBody())), bad([paymentsBody()]), bad(null),
+    bad(paymentsBody({ invoice: { id: INVOICE, status: 'issued', number: 7 } })), bad(paymentsBody({ invoice: { id: INVOICE } })),
+    bad(paymentsBody({ invoice: { id: OTHER_STORE, status: 'issued' } })), bad(paymentsBody({ invoice: { id: INVOICE.toUpperCase(), status: 'issued' } })),
+    bad(paymentsBody({ invoice: { id: INVOICE, status: 'draft' } })),
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), currency: 'EUR' } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), extra: 0 } })),
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300 } })),
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), remainingCents: 1875 } })), // remaining is due − applied
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 200, appliedCents: 300, remainingCents: -100 }, paymentStatus: 'recorded_in_full' })), // applied above due
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), dueCents: 2176.5 } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), dueCents: '2176' } })),
+    bad(paymentsBody({ amounts: amountsOf(MAX + 1, 300) })), ok(paymentsBody({ amounts: amountsOf(MAX, 300) })),
+    bad(voided({ amounts: amountsOf(2176, 0) })), bad(voided({ amounts: amountsOf(100, 100) })), // voided: due, applied and remaining 0
+    bad(voided({ payments: [payment(1)] })), // a voided invoice holds no unreversed payment
+    // Each payment exactly.
+    bad(paymentsBody({ payments: [{ ...p1, extra: 1 }], amounts: amountsOf(2176, 100) })), bad(paymentsBody({ payments: [(({ attemptId: _a, ...rest }) => rest)(p1)], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { id: 'x' })], amounts: amountsOf(2176, 100) })), bad(paymentsBody({ payments: [payment(1, { attemptId: INVOICE.toUpperCase() })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { amountCents: 0 })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })),
+    bad(paymentsBody({ payments: [payment(1, { amountCents: MAX + 1 })], amounts: amountsOf(MAX, MAX), paymentStatus: 'recorded_in_full' })),
+    ok(paymentsBody({ payments: [payment(1, { amountCents: MAX })], amounts: amountsOf(MAX, MAX), paymentStatus: 'recorded_in_full' })),
+    bad(paymentsBody({ payments: [payment(1, { amountCents: 1.5 })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { method: 'card' })], amounts: amountsOf(2176, 100) })), bad(paymentsBody({ payments: [payment(1, { method: 'Cash' })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { method: 'toString' })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { recordedAt: '2026-10-17T09:00:01.000001+00:00' })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { recordedAt: '2026-10-17T09:00:01.000Z' })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { recordedAt: '2026-02-30T09:00:01.000001Z' })], amounts: amountsOf(2176, 100) })),
+    bad(paymentsBody({ payments: [payment(1, { reversal: { ...REVERSAL, reasonCode: 'mistake' } })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })),
+    bad(paymentsBody({ payments: [payment(1, { reversal: { ...REVERSAL, extra: 1 } })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })),
+    bad(paymentsBody({ payments: [payment(1, { reversal: { reasonCode: 'duplicate' } })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })),
+    bad(paymentsBody({ payments: [payment(1, { reversal: { ...REVERSAL, reversedAt: '2026-10-17T09:00:00.999999Z' } })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })), // before its recording
+    ok(paymentsBody({ payments: [payment(1, { reversal: { ...REVERSAL, reversedAt: at(1) } })], amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded' })), // at it
+    bad(paymentsBody({ payments: [payment(1, { reversal: false })], amounts: amountsOf(2176, 100) })),
+    // Order, uniqueness, the cursor.
+    bad(paymentsBody({ payments: [payment(2), payment(1)], amounts: amountsOf(2176, 200) })),
+    bad(paymentsBody({ payments: [payment(1), payment(1)], amounts: amountsOf(2176, 200) })),
+    bad(paymentsBody({ payments: [payment(1), payment(2, { id: uuid(0x9001) })], amounts: amountsOf(2176, 200) })),
+    ok(paymentsBody({ payments: [payment(2, { recordedAt: at(1) }), payment(3, { recordedAt: at(1) })], amounts: amountsOf(2176, 200) })), // same time: by id
+    bad(paymentsBody({ payments: [payment(3, { recordedAt: at(1) }), payment(2, { recordedAt: at(1) })], amounts: amountsOf(2176, 200) })),
+    bad(paymentsBody({ payments: [payment(1)], amounts: amountsOf(2176, 100) }), uuid(0x9001)), // never the cursor's own payment
+    ok(paymentsBody({ payments: [payment(2)], amounts: amountsOf(2176, 300) }), uuid(0x9001)), // a later page: within applied
+    bad(paymentsBody({ payments: [payment(2, { amountCents: 400 })], amounts: amountsOf(2176, 300) }), uuid(0x9001)), // above it
+    ok(fullPage()), bad({ ...fullPage(), nextCursor: uuid(0x9001) }), bad({ ...fullPage(), nextCursor: 'B'.repeat(22) }),
+    bad(paymentsBody({ nextCursor: uuid(0x9003) })), // a cursor behind a page that is not full
+    bad(fullPage(4000)), // the page's unreversed sum (5000) above applied
+    ok(paymentsBody({ ...fullPage(5000), nextCursor: null })), bad(paymentsBody({ ...fullPage(6000), nextCursor: null })), // the whole history: equal
+    bad(paymentsBody({ amounts: amountsOf(10_000, 5100), payments: Array.from({ length: 51 }, (_, i) => payment(i + 1)), nextCursor: null })), // above 50
+  ];
+  for (const [body, after, accepted] of rows) {
+    const name = JSON.stringify(body).slice(0, 400);
+    const { calls, client } = scripted(json(200, body));
+    const got = await client.getPayments(STORE, INVOICE, after, CSRF);
+    assert.equal(got.kind, accepted ? 'ok' : 'unavailable', name);
+    if (accepted) assert.deepEqual(got, { kind: 'ok', page: body }, name);
+    assert.equal(calls.length, 1, name);
+  }
+  // -0 anywhere is not a count (JSON.stringify never writes it).
+  for (const [from, to] of [['"dueCents":0', '"dueCents":-0'], ['"appliedCents":0', '"appliedCents":-0'], ['"remainingCents":0', '"remainingCents":-0']]) {
+    const { client } = scripted(raw(200, paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: 'nothing_due', payments: [] }), from, to));
+    assert.deepEqual(await client.getPayments(STORE, INVOICE, null, CSRF), { kind: 'unavailable' }, to);
+  }
+});
+
+test('IIC-35. a payments refusal counts only by status AND word AND envelope: 404 not_found is not-found, 401 signed-out, 403 denied, 429 its wait; a 400 (an unknown cursor) and everything else unavailable — each ONE fetch; a store, invoice or cursor id outside its grammar sends nothing', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [refused(404, 'not_found'), { kind: 'not-found' }], [sealed(404, 'not_found'), { kind: 'unavailable' }], [refused(404, 'forbidden'), { kind: 'unavailable' }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(401, 'forbidden'), { kind: 'unavailable' }],
+    [refused(403, 'forbidden'), { kind: 'denied' }], [sealed(403, 'forbidden'), { kind: 'unavailable' }], [refused(403, 'step_up_required'), { kind: 'unavailable' }],
+    [refused(429, 'rate_limited', { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [refused(400, 'invalid_request'), { kind: 'unavailable' }], [refused(503, 'service_unavailable'), { kind: 'unavailable' }],
+    [json(201, paymentsBody()), { kind: 'unavailable' }], [new Response(JSON.stringify(paymentsBody()), { status: 200 }), { kind: 'unavailable' }], // no JSON content type
+    [network(), { kind: 'unavailable' }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.getPayments(STORE, INVOICE, uuid(0x9001), CSRF), outcome, name);
+    assert.equal(calls.length, 1, name);
+  }
+  const { calls, client } = scripted();
+  for (const [store, invoice, after] of [
+    ['x', INVOICE, null], [STORE.toUpperCase(), INVOICE, null], [STORE, `${INVOICE}?x=1`, null], [STORE, INVOICE.toUpperCase(), null], [STORE, '', null],
+    [STORE, INVOICE, ''], [STORE, INVOICE, 'B'.repeat(22)], [STORE, INVOICE, `${uuid(0x9001)}&x=1`], [STORE, INVOICE, uuid(0x90ab).toUpperCase()],
+  ] as Array<[string, string, string | null]>) {
+    assert.deepEqual(await client.getPayments(store, invoice, after, CSRF), { kind: 'unavailable' }, `${store} ${invoice} ${after}`);
+  }
+  assert.equal(calls.length, 0);
 });
