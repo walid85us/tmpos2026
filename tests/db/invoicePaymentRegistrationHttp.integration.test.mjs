@@ -77,6 +77,43 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PROOF_RE = /^[0-9a-f]{64}$/;
 const WIRE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 
+// Secret-safe failure output: node:test prints a failing assertion's actual/expected and a thrown error's detail, so proofs,
+// keys and bodies are compared before asserting and only booleans, a status, a sealed error word or a SQLSTATE reach output.
+/** A SQLSTATE: five upper-case letters or digits, at least one a digit (so never a bare word such as a name). */
+const isSqlState = (code) => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && /\d/.test(code);
+/** An error's SQLSTATE once validated; 'none' without one, 'unknown' otherwise — never its message, detail, hint or cause. */
+const safeCode = (e) => (e?.code === undefined || e?.code === null ? 'none' : isSqlState(e.code) ? e.code : 'unknown');
+/** A PostgreSQL error reduced to its SQLSTATE (no message, detail or cause); an error without one passes unchanged only when it
+ * carries no cause, detail, hint or where and is no AggregateError (an assertion's), else only its constructor name. */
+function sealDbError(label, e) {
+  if (isSqlState(e?.code)) return new Error(`${label}: SQLSTATE ${e.code}`);
+  const bare = e instanceof Error && !(e instanceof AggregateError)
+    && e.cause === undefined && e.detail === undefined && e.hint === undefined && e.where === undefined;
+  if (bare) return e;
+  const name = typeof e?.constructor?.name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(e.constructor.name) ? e.constructor.name : 'unknown';
+  return new Error(`${label}: failed (${name})`);
+}
+/** The error word of a sealed { error[, requestId] } body (a short lower-case word, so never a proof or key), else null. */
+function sealedWord(body) {
+  try {
+    const b = JSON.parse(body);
+    const keys = b !== null && typeof b === 'object' ? Object.keys(b) : [];
+    return keys.includes('error') && keys.every((k) => k === 'error' || k === 'requestId') && /^[a-z][a-z_]{0,39}$/.test(b.error) ? b.error : null;
+  } catch {
+    return null;
+  }
+}
+/** A reply as a failure message may show it: the status and the sealed error word — never the raw body. */
+const replyNote = (reply) => { const word = sealedWord(reply.body); return `status ${reply.status}${word === null ? '' : ` ${word}`}`; };
+/** A reply's JSON body; a body that is not JSON fails with its status alone (a JSON.parse error would quote the body). */
+function parseBody(reply, label) {
+  try {
+    return JSON.parse(reply.body);
+  } catch {
+    throw new Error(`${label}: response body is not JSON (${replyNote(reply)})`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // cluster lifecycle
 // ---------------------------------------------------------------------------
@@ -195,7 +232,7 @@ const setWalWriterDelay = async (value) => {
 
 async function teardown() {
   const failures = [];
-  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
+  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(sealDbError('IRH teardown step', err)); } };
   try {
     await step(() => setWalWriterDelay(null));
     if (TENANTS.length > 0) {
@@ -258,7 +295,8 @@ test.after(teardown);
 async function setupStep(fn) {
   try {
     return await fn();
-  } catch (err) {
+  } catch (raw) {
+    const err = sealDbError('IRH setup', raw);
     await teardown().catch((cleanup) => { throw new AggregateError([err, cleanup], 'IRH setup failed, and so did its teardown'); });
     throw err;
   }
@@ -268,7 +306,8 @@ async function setupStep(fn) {
 async function installProofKey(bytes = randomBytes(32)) {
   const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
   await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${bytes}, ${g}::bigint)
-    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`
+    .catch((e) => { throw new Error(`IRH proof key install failed: SQLSTATE ${safeCode(e)}`); });
   PROOF_KEYS.push(Buffer.from(bytes));
   return { key: Buffer.from(bytes), generation: g };
 }
@@ -313,7 +352,7 @@ await setupStep(async () => {
   });
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
-  await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestIssuerKey(owner, ISSUER_KEY).catch((e) => { throw new Error(`IRH issuer key install failed: SQLSTATE ${safeCode(e)}`); });
   assert.equal((await owner`select count(*)::int as n from tmpos_invoice_payment.payment_proof_key`)[0].n, 0, 'no proof key before this suite installs one');
   await installProofKey();
 });
@@ -371,7 +410,7 @@ function send(port, method, path, headers, body, { localAddress } = {}) {
       });
     });
     request.on('error', reject);
-    request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy(new Error(`no reply within ${SEND_TIMEOUT_MS} ms: ${method} ${path}`)));
+    request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy(new Error(`no reply within ${SEND_TIMEOUT_MS} ms: ${method} ${path.split('?')[0]}`)));
     request.end(payload);
   });
 }
@@ -382,17 +421,17 @@ function assertBaseline(reply, label) {
 }
 /** The chain's own unsealed refusal: exactly { error, requestId }, never replayed. */
 function assertRefusal(reply, status, error, label) {
-  assert.equal(reply.status, status, `${label}: ${reply.body}`);
-  const body = JSON.parse(reply.body);
-  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], `${label}: ${reply.body}`);
-  assert.equal(body.error, error, label);
+  assert.equal(reply.status, status, `${label}: ${replyNote(reply)}`);
+  const body = parseBody(reply, label);
+  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], `${label}: ${replyNote(reply)}`);
+  assert.ok(body.error === error, `${label}: refusal word ${sealedWord(reply.body) ?? '(not a sealed word)'}`);
   assert.equal(reply.headers['idempotent-replayed'], undefined, `${label}: never a replay`);
   assertBaseline(reply, label);
 }
 /** A sealed 409: exactly { "error": word } — no requestId. */
 function sealedOf(reply, word, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 409, `${label}: ${reply.body}`);
-  assert.equal(reply.body, JSON.stringify({ error: word }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 409, `${label}: ${replyNote(reply)}`);
+  assert.ok(reply.body === JSON.stringify({ error: word }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
 }
@@ -521,7 +560,7 @@ async function withEntry(fn) {
     return await fn(ctx);
   } catch (err) {
     failed = true;
-    throw err;
+    throw sealDbError('IRH case', err);
   } finally {
     if (codes.length === 0) {
       proc.emit('SIGTERM');
@@ -534,9 +573,9 @@ async function signIn(ctx, who) {
   const reply = await send(ctx.port, 'POST', sessionPaths('tenant').login, {
     host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${who.token}`,
   }, undefined, { localAddress: randomLoopback() });
-  assert.equal(reply.status, 200, `login ${who.label}: ${reply.body}`);
+  assert.equal(reply.status, 200, `login ${who.label}: ${replyNote(reply)}`);
   const cookie = reply.headers['set-cookie'][0].split('; ')[0];
-  const csrf = JSON.parse(reply.body).csrfToken;
+  const csrf = parseBody(reply, `login ${who.label}`).csrfToken;
   const value = cookie.slice(cookie.indexOf('=') + 1);
   const key = createHash('sha256').update(value).digest('base64url');
   KEYS.add(key);
@@ -554,21 +593,21 @@ async function world(ctx, label) {
   const w = { label, T, S, C, boss, mgr, mgr2 };
   w.sb = await signIn(ctx, boss);
   const read = await ctx.settings(w.sb, S);
-  assert.equal(read.status, 200, `settings read: ${read.body}`);
-  const version = JSON.parse(read.body).issuingSettings.version;
+  assert.equal(read.status, 200, `settings read: ${replyNote(read)}`);
+  const version = parseBody(read, 'settings read').issuingSettings.version;
   const put = await ctx.putSettings(w.sb, S, { expectedTenant: T, expectedVersion: version, ...sellerOf(label) });
-  assert.equal(put.status, 200, `settings PUT: ${put.body}`);
+  assert.equal(put.status, 200, `settings PUT: ${replyNote(put)}`);
   w.settingsVersion = version + 1;
   return w;
 }
 /** A draft saved and issued at `w`'s store: the issued invoice id. Total 1,089 cents (1,000 + 8.875% tax). */
 async function issueOne(ctx, s, w, label) {
   const saved = await ctx.save(s, w.S, { expectedTenant: w.T, customerId: w.C, currency: 'USD', lines: [{ description: `IRH ${label} ${SUFFIX}`, quantity: 1, unitPriceCents: 1000 }] });
-  assert.equal(saved.status, 201, `${label}: the seed save: ${saved.body}`);
-  const draft = JSON.parse(saved.body).draft.id;
+  assert.equal(saved.status, 201, `${label}: the seed save: ${replyNote(saved)}`);
+  const draft = parseBody(saved, `${label}: the seed save`).draft.id;
   const issued = await ctx.issue(s, w.S, draft, { expectedTenant: w.T, expectedVersion: 1, expectedSettingsVersion: w.settingsVersion, expectedCustomerVersion: 1 });
-  assert.equal(issued.status, 201, `${label}: the issue: ${issued.body}`);
-  const invoice = JSON.parse(issued.body).invoice.id;
+  assert.equal(issued.status, 201, `${label}: the issue: ${replyNote(issued)}`);
+  const invoice = parseBody(issued, `${label}: the issue`).invoice.id;
   assert.match(invoice, UUID_RE);
   return invoice;
 }
@@ -576,46 +615,46 @@ const TOTAL = 1089;
 
 /** The register's sealed 201: exactly { registration: { id, invoiceId, attemptId, state: 'open' } } — never a proof; the id. */
 function registeredOf(reply, invoice, attemptId, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 201, `${label}: ${reply.body}`);
-  const id = JSON.parse(reply.body)?.registration?.id;
-  assert.match(String(id), UUID_RE, `${label}: the runtime's new registration id`);
-  assert.equal(reply.body, JSON.stringify({ registration: { id, invoiceId: invoice, attemptId, state: 'open' } }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 201, `${label}: ${replyNote(reply)}`);
+  const id = parseBody(reply, label)?.registration?.id;
+  assert.ok(UUID_RE.test(String(id)), `${label}: the runtime's new registration id`);
+  assert.ok(reply.body === JSON.stringify({ registration: { id, invoiceId: invoice, attemptId, state: 'open' } }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
   return id;
 }
 /** The proof GET's 200: exactly { registration: { id, invoiceId, attemptId }, proof } — the proof. */
 function proofOf(reply, registration, invoice, attemptId, label) {
-  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
-  const proof = JSON.parse(reply.body)?.proof;
-  assert.match(String(proof), PROOF_RE, `${label}: 64 lowercase hex digits`);
-  assert.equal(reply.body, JSON.stringify({ registration: { id: registration, invoiceId: invoice, attemptId }, proof }), `${label}: the exact body`);
+  assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
+  const proof = parseBody(reply, label)?.proof;
+  assert.ok(PROOF_RE.test(String(proof)), `${label}: 64 lowercase hex digits (value withheld)`);
+  assert.ok(reply.body === JSON.stringify({ registration: { id: registration, invoiceId: invoice, attemptId }, proof }), `${label}: the exact body (${replyNote(reply)})`);
   assertBaseline(reply, label);
   PROOFS.add(proof);
   return proof;
 }
 /** The record's sealed 201; the payment id. */
 function recordedOf(reply, invoice, attemptId, amountCents, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 201, `${label}: ${reply.body}`);
-  const id = JSON.parse(reply.body)?.payment?.id;
-  assert.match(String(id), UUID_RE, label);
-  assert.equal(reply.body, JSON.stringify({ payment: { id, invoiceId: invoice, attemptId, amountCents, method: 'cash' } }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 201, `${label}: ${replyNote(reply)}`);
+  const id = parseBody(reply, label)?.payment?.id;
+  assert.ok(UUID_RE.test(String(id)), label);
+  assert.ok(reply.body === JSON.stringify({ payment: { id, invoiceId: invoice, attemptId, amountCents, method: 'cash' } }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
   return id;
 }
 function settledOf(reply, invoice, attemptId, state, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
-  assert.equal(reply.body, JSON.stringify({ settlement: { invoiceId: invoice, attemptId, state } }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
+  assert.ok(reply.body === JSON.stringify({ settlement: { invoiceId: invoice, attemptId, state } }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
 }
 /** The caller's attempts at `w`'s store: { invoiceId -> [attempt] } of the 200's exact shape. */
 async function attemptsOf(ctx, s, w, label) {
   const reply = await ctx.attempts(s, w);
-  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
+  assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
   assertBaseline(reply, label);
-  const body = JSON.parse(reply.body);
+  const body = parseBody(reply, label);
   assert.deepEqual(Object.keys(body), ['attempts', 'nextCursor'], label);
   for (const a of body.attempts) {
     assert.deepEqual(Object.keys(a), ['invoiceId', 'invoiceNumber', 'attemptId', 'state', 'version', 'registeredAt', 'settledAt', 'payment'], `${label}: an attempt's keys`);
@@ -673,7 +712,7 @@ test('IRH-01: register → proof GET → record v2 → settle — the sealed ans
     const proof = proofOf(first, registration, invoice, attempt, 'the proof');
     assert.equal(first.headers['referrer-policy'], 'no-referrer', 'the registration id in the URL is never sent on');
     const again = await ctx.proof(s, w, invoice, registration);
-    assert.equal(proofOf(again, registration, invoice, attempt, 'the proof again'), proof, 'B18: the lost answer re-fetched, identical');
+    assert.ok(proofOf(again, registration, invoice, attempt, 'the proof again') === proof, 'B18: the lost answer re-fetched, identical (values withheld)');
     assert.deepEqual(delta(await counts([w.T]), beforeProof), READ_ONLY, 'the proof GET writes nothing');
     assert.ok(!ctx.lines.some((l) => l.includes(registration)), 'the request log never carries the query string');
 
@@ -726,20 +765,22 @@ test('IRH-02 (D-R3-A): the same session replays a register and a record key with
     const first = await ctx.register(s1, w, x, regBytes, regKey);
     const registration = registeredOf(first, x, attempt, 'register');
     const replayed = await ctx.register(s1, w, x, regBytes, regKey);
-    assert.deepEqual([replayed.status, replayed.body, replayed.headers['idempotent-replayed']], [201, first.body, 'true'], 'the same session: the stored answer');
+    assert.ok(replayed.status === 201 && replayed.body === first.body && replayed.headers['idempotent-replayed'] === 'true',
+      `the same session: the stored answer (${replyNote(replayed)}, replayed=${replayed.headers['idempotent-replayed'] === 'true'})`);
     const proof = proofOf(await ctx.proof(s1, w, x, registration), registration, x, attempt, 'proof');
     const recKey = randomUUID();
     const recBytes = JSON.stringify(recordBody(w, registration, attempt, proof));
     const recorded = await ctx.record(s1, w, x, recBytes, recKey);
     const payment = recordedOf(recorded, x, attempt, TOTAL, 'record');
     const recReplay = await ctx.record(s1, w, x, recBytes, recKey);
-    assert.deepEqual([recReplay.status, recReplay.body, recReplay.headers['idempotent-replayed']], [201, recorded.body, 'true'], 'the same session: the original key and bytes replay the stored answer');
+    assert.ok(recReplay.status === 201 && recReplay.body === recorded.body && recReplay.headers['idempotent-replayed'] === 'true',
+      `the same session: the original key and bytes replay the stored answer (${replyNote(recReplay)}, replayed=${recReplay.headers['idempotent-replayed'] === 'true'})`);
     // An open registration of the same staff member on the other invoice, from the first session.
     const open = await registeredWithProof(ctx, s1, w, y, 'open on y');
 
     // A replacement session of the same staff member (a re-authentication).
     const s2 = await signIn(ctx, w.mgr);
-    assert.notEqual(s2.key, s1.key, 'a new session key');
+    assert.ok(s2.key !== s1.key, 'a new session key (values withheld)');
     const before = await counts([w.T]);
     for (const [label, reply] of [['the register key', await ctx.register(s2, w, x, regBytes, regKey)], ['the record key', await ctx.record(s2, w, x, recBytes, recKey)]]) {
       assertRefusal(reply, 422, 'idempotency_key_reused', `the replacement session replaying ${label}`);
@@ -819,7 +860,7 @@ test('IRH-04: PRE-FLUSH — a registration committed with synchronous_commit=off
         const registration = randomUUID();
         const attempt = randomUUID();
         const [reg] = await registrar`select o_outcome from tmpos_invoice_payment.m7b_invoice_payment_register(${s.key}::text, ${w.S}::uuid, ${invoice}::uuid,
-          ${w.T}::uuid, ${registration}::uuid, ${attempt}::uuid, ${randomUUID()}::uuid)`;
+          ${w.T}::uuid, ${registration}::uuid, ${attempt}::uuid, ${randomUUID()}::uuid)`.catch((e) => { throw sealDbError('IRH-04 the direct register', e); });
         assert.equal(reg.o_outcome, 'applied', 'registered directly, committed asynchronously');
         const row = await registrationOf(registration);
         // Unflushed WAL keeps arriving ahead of the flush position while the GET runs (the GET's own rate-limit commit is
@@ -932,8 +973,10 @@ test('IRH-06: a key generation change — the old registration is unsendable ove
     recordedOf(await ctx.record(s, w, x, recordBody(w, fresh.registration, fresh.attempt, fresh.proof)), x, fresh.attempt, TOTAL, 'recorded');
     settledOf(await ctx.settle(s, w, x, { expectedTenant: w.T, attemptId: fresh.attempt, expectedVersion: 2 }), x, fresh.attempt, 'confirmed', 'confirmed');
     assert.equal((await owner`select count(*)::int as n from tmpos_invoice_payment.invoice_payment where invoice_id = ${x}`)[0].n, 1, 'exactly one payment');
-    await assert.rejects(owner`update tmpos_invoice_payment.payment_proof_key set key = ${retired}, generation = generation + 7 where singleton`,
-      (err) => typeof err.code === 'string', 'the retired bytes are never accepted again');
+    const reinstall = await owner`update tmpos_invoice_payment.payment_proof_key set key = ${retired}, generation = generation + 7 where singleton`
+      .then(() => ({ rejected: false }), (err) => ({ rejected: true, coded: typeof err?.code === 'string', code: safeCode(err) }));
+    assert.ok(reinstall.rejected && reinstall.coded,
+      `the retired bytes are never accepted again: ${reinstall.rejected ? `refused with SQLSTATE ${reinstall.code}` : 'accepted'} (error text withheld)`);
     assertRefusal(await ctx.proof(s, w, x, old.registration), 404, 'not_found', 'and the old registration stays unsendable');
   });
 });
@@ -1040,7 +1083,7 @@ async function sessionPageOf(key) {
       pg_catalog.current_setting('block_size')::int as bs,
       coalesce((select pg_catalog.split_part(o, '=', 2)::int from pg_catalog.unnest(c.reloptions) o where o like 'fillfactor=%'), 100) as ff
     from tmpos_session.session s cross join pg_catalog.pg_class c
-   where s.session_key = $1 and c.oid = 'tmpos_session.session'::regclass`, [key]);
+   where s.session_key = $1 and c.oid = 'tmpos_session.session'::regclass`, [key]).catch((e) => { throw sealDbError('IRH the session page', e); });
   const [h] = await owner.unsafe(`select h.lower, h.upper from ${PROBE}.page_header(${PROBE}.get_raw_page('tmpos_session.session', $1::bigint)) h`, [r.blk]);
   const [i] = await owner.unsafe(`select (select i.lp_len from ${PROBE}.heap_page_items(${PROBE}.get_raw_page('tmpos_session.session', $1::bigint)) i where i.lp = $2) as len,
       (select pg_catalog.count(*)::int from ${PROBE}.heap_page_items(${PROBE}.get_raw_page('tmpos_session.session', $1::bigint)) i where i.lp_flags = 0) as unused`, [r.blk, r.lp]);
@@ -1055,7 +1098,8 @@ async function sessionPageOf(key) {
 async function padSessionPage(key) {
   let page = await sessionPageOf(key);
   for (let i = 0; i < 400 && page.free - page.next >= page.minfree; i += 1) {
-    const [{ v }] = await owner`select tmpos_session.m5_session_touch(${key}::text, 'validatedAt', s.validated_at) as v from tmpos_session.session s where s.session_key = ${key}`;
+    const [{ v }] = await owner`select tmpos_session.m5_session_touch(${key}::text, 'validatedAt', s.validated_at) as v from tmpos_session.session s where s.session_key = ${key}`
+      .catch((e) => { throw sealDbError('IRH a padding touch', e); });
     assert.equal(v, 'updated', 'a padding version');
     page = await sessionPageOf(key);
   }
@@ -1204,7 +1248,8 @@ async function observedProof(ctx, s, w, invoice, registration, during = () => {}
   return withSessionTableQuiet(async () => {
     await awaitStandbySnapshot();
     const page = await padSessionPage(s.key);
-    const [{ validated }] = await owner`select x.validated_at::text as validated from tmpos_session.session x where x.session_key = ${s.key}`;
+    const [{ validated }] = await owner`select x.validated_at::text as validated from tmpos_session.session x where x.session_key = ${s.key}`
+      .catch((e) => { throw sealDbError('IRH the session stamp', e); });
     await beforeLock();
     const aligned = await alignInsertPosition();
     let locked;
@@ -1227,7 +1272,7 @@ async function observedProof(ctx, s, w, invoice, registration, during = () => {}
           try {
             // No other read of the row: the next reader of the page must be the GET itself.
             const [{ v, xid }] = await owner`select tmpos_session.m5_session_touch(${s.key}::text, 'validatedAt', ${validated}::bigint) as v,
-                pg_catalog.pg_current_xact_id()::text as xid`;
+                pg_catalog.pg_current_xact_id()::text as xid`.catch((e) => { throw sealDbError('IRH the stall touch', e); });
             const [h] = await owner.unsafe(`select h.lower, h.upper from ${PROBE}.page_header(${PROBE}.get_raw_page('tmpos_session.session', $1::bigint)) h`, [page.blk]);
             return { v, xid, atMs: Math.round(sample.t - t0), after: { free: Math.max(0, h.upper - h.lower - 4), minfree: page.minfree } };
           } finally {
@@ -1428,7 +1473,7 @@ test('IRH-12: REVALIDATION — the session is revoked (committed asynchronously,
         const first = sample.tx.find((x) => x.proof);
         if (first === undefined || sample.t - first.xs < 100) return;
         revoking = lagger.begin(async (tx) => {
-          const [{ v }] = await tx`select tmpos_session.m5_session_revoke(${s.key}::text) as v`;
+          const [{ v }] = await tx`select tmpos_session.m5_session_revoke(${s.key}::text) as v`.catch((e) => { throw sealDbError('IRH-12 the revocation', e); });
           const [{ lsn, at }] = await tx`select pg_catalog.pg_current_wal_insert_lsn()::text as lsn, (extract(epoch from pg_catalog.clock_timestamp()) * 1000)::float8 as at`;
           revoked = { v, lsn: lsnOf(lsn), atMs: Math.round(at - t0), proofTransactionStartMs: Math.round(first.xs - t0) };
         }).then(() => { revoked.committedByMs = Math.round(Date.now() - t0); });

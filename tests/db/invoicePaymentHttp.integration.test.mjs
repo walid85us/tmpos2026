@@ -82,6 +82,44 @@ const VOID_TABLE = 'tmpos_invoice_void.issued_invoice_void';
 const SEND_TIMEOUT_MS = 20_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WIRE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+const PROOF_RE = /^[0-9a-f]{64}$/;
+
+// Secret-safe failure output: node:test prints a failing assertion's actual/expected and a thrown error's detail, so proofs,
+// keys and bodies are compared before asserting and only booleans, a status, a sealed error word or a SQLSTATE reach output.
+/** A SQLSTATE: five upper-case letters or digits, at least one a digit (so never a bare word such as a name). */
+const isSqlState = (code) => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && /\d/.test(code);
+/** An error's SQLSTATE once validated; 'none' without one, 'unknown' otherwise — never its message, detail, hint or cause. */
+const safeCode = (e) => (e?.code === undefined || e?.code === null ? 'none' : isSqlState(e.code) ? e.code : 'unknown');
+/** A PostgreSQL error reduced to its SQLSTATE (no message, detail or cause); an error without one passes unchanged only when it
+ * carries no cause, detail, hint or where and is no AggregateError (an assertion's), else only its constructor name. */
+function sealDbError(label, e) {
+  if (isSqlState(e?.code)) return new Error(`${label}: SQLSTATE ${e.code}`);
+  const bare = e instanceof Error && !(e instanceof AggregateError)
+    && e.cause === undefined && e.detail === undefined && e.hint === undefined && e.where === undefined;
+  if (bare) return e;
+  const name = typeof e?.constructor?.name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(e.constructor.name) ? e.constructor.name : 'unknown';
+  return new Error(`${label}: failed (${name})`);
+}
+/** The error word of a sealed { error[, requestId] } body (a short lower-case word, so never a proof or key), else null. */
+function sealedWord(body) {
+  try {
+    const b = JSON.parse(body);
+    const keys = b !== null && typeof b === 'object' ? Object.keys(b) : [];
+    return keys.includes('error') && keys.every((k) => k === 'error' || k === 'requestId') && /^[a-z][a-z_]{0,39}$/.test(b.error) ? b.error : null;
+  } catch {
+    return null;
+  }
+}
+/** A reply as a failure message may show it: the status and the sealed error word — never the raw body. */
+const replyNote = (reply) => { const word = sealedWord(reply.body); return `status ${reply.status}${word === null ? '' : ` ${word}`}`; };
+/** A reply's JSON body; a body that is not JSON fails with its status alone (a JSON.parse error would quote the body). */
+function parseBody(reply, label) {
+  try {
+    return JSON.parse(reply.body);
+  } catch {
+    throw new Error(`${label}: response body is not JSON (${replyNote(reply)})`);
+  }
+}
 const UTC_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
 /** A canonical lowercase uuid the outbox's aggregate-id shape refuses (version 0): the planner's 400 after the key. */
 const NIL = '00000000-0000-0000-0000-000000000000';
@@ -211,7 +249,7 @@ async function cleanAll() {
 
 async function teardown() {
   const failures = [];
-  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
+  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(sealDbError('IPH teardown step', err)); } };
   try {
     // The events this suite's draft saves enqueued (a payment, a reversal, an issue and a void enqueue none).
     if (TENANTS.length > 0) {
@@ -280,7 +318,8 @@ test.after(teardown);
 async function setupStep(fn) {
   try {
     return await fn();
-  } catch (err) {
+  } catch (raw) {
+    const err = sealDbError('IPH setup', raw);
     await teardown().catch((cleanup) => { throw new AggregateError([err, cleanup], 'IPH setup failed, and so did its teardown'); });
     throw err;
   }
@@ -322,11 +361,12 @@ await setupStep(async () => {
   });
   const issuer = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   issuerKeyBefore = issuer === null ? null : Buffer.from(issuer);
-  await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestIssuerKey(owner, ISSUER_KEY).catch((e) => { throw new Error(`IPH issuer key install failed: SQLSTATE ${safeCode(e)}`); });
   // The owner's out-of-band proof key install (037), under the next generation: the entry refuses to start without one.
   const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
   await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${PROOF_KEY}, ${g}::bigint)
-    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`
+    .catch((e) => { throw new Error(`IPH proof key install failed: SQLSTATE ${safeCode(e)}`); });
 });
 
 // ---------------------------------------------------------------------------
@@ -379,7 +419,7 @@ function send(port, method, path, headers, body, { localAddress } = {}) {
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }));
     });
     request.on('error', reject);
-    request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy(new Error(`no reply within ${SEND_TIMEOUT_MS} ms: ${method} ${path}`)));
+    request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy(new Error(`no reply within ${SEND_TIMEOUT_MS} ms: ${method} ${path.split('?')[0]}`)));
     request.end(payload);
   });
 }
@@ -390,10 +430,10 @@ function assertBaseline(reply, label) {
 }
 /** The chain's own unsealed refusal: exactly { error, requestId }, never replayed. */
 function assertRefusal(reply, status, error, label) {
-  assert.equal(reply.status, status, `${label}: ${reply.body}`);
-  const body = JSON.parse(reply.body);
-  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], `${label}: ${reply.body}`);
-  assert.equal(body.error, error, label);
+  assert.equal(reply.status, status, `${label}: ${replyNote(reply)}`);
+  const body = parseBody(reply, label);
+  assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId'], `${label}: ${replyNote(reply)}`);
+  assert.ok(body.error === error, `${label}: refusal word ${sealedWord(reply.body) ?? '(not a sealed word)'}`);
   assert.equal(reply.headers['idempotent-replayed'], undefined, `${label}: never a replay`);
   assertBaseline(reply, label);
 }
@@ -582,7 +622,7 @@ async function withEntry(fn) {
     return await fn(ctx);
   } catch (err) {
     failed = true;
-    throw err;
+    throw sealDbError('IPH case', err);
   } finally {
     const early = codes.length;
     if (early === 0) {
@@ -600,9 +640,9 @@ async function signIn(ctx, who, { token = who.token } = {}) {
   const reply = await send(ctx.port, 'POST', sessionPaths('tenant').login, {
     host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, authorization: `Bearer ${token}`,
   }, undefined, { localAddress: randomLoopback() });
-  assert.equal(reply.status, 200, `login ${who.label}: ${reply.body}`);
+  assert.equal(reply.status, 200, `login ${who.label}: ${replyNote(reply)}`);
   const cookie = reply.headers['set-cookie'][0].split('; ')[0];
-  const csrf = JSON.parse(reply.body).csrfToken;
+  const csrf = parseBody(reply, `login ${who.label}`).csrfToken;
   KEYS.add(createHash('sha256').update(cookie.slice(cookie.indexOf('=') + 1)).digest('base64url'));
   return { cookie, csrf, principal: who.principal };
 }
@@ -615,10 +655,10 @@ function agedToken(who, ageMs) {
 /** The owner's settings write at the version its read reports; the new version. */
 async function configure(ctx, sb, tenant, store, seller) {
   const read = await ctx.settings(sb, store);
-  assert.equal(read.status, 200, `the owner's settings read: ${read.body}`);
-  const version = JSON.parse(read.body).issuingSettings.version;
+  assert.equal(read.status, 200, `the owner's settings read: ${replyNote(read)}`);
+  const version = parseBody(read, 'the owner\'s settings read').issuingSettings.version;
   const reply = await ctx.putSettings(sb, store, { expectedTenant: tenant, expectedVersion: version, ...seller });
-  assert.equal(reply.status, 200, `the owner's settings PUT: ${reply.body}`);
+  assert.equal(reply.status, 200, `the owner's settings PUT: ${replyNote(reply)}`);
   return version + 1;
 }
 /** One store of a fresh tenant with its owner (tenant grant), a manager and a sales_staff (store grants) and a customer. */
@@ -640,11 +680,11 @@ async function ready(ctx, w) {
 /** A draft saved and issued by `s` at `w`'s store; { invoice, draft, total }. */
 async function issueOne(ctx, s, w, label, lines = [line(`IPH ${label} ${SUFFIX}`, 1, 100)]) {
   const saved = await ctx.save(s, w.S, { expectedTenant: w.T, customerId: w.C, currency: 'USD', lines });
-  assert.equal(saved.status, 201, `${label}: the seed save: ${saved.body}`);
-  const draft = JSON.parse(saved.body).draft.id;
+  assert.equal(saved.status, 201, `${label}: the seed save: ${replyNote(saved)}`);
+  const draft = parseBody(saved, `${label}: the seed save`).draft.id;
   const issued = await ctx.issue(s, w.S, draft, { expectedTenant: w.T, expectedVersion: 1, expectedSettingsVersion: w.settingsVersion, expectedCustomerVersion: 1 });
-  assert.equal(issued.status, 201, `${label}: the issue: ${issued.body}`);
-  const invoice = JSON.parse(issued.body).invoice.id;
+  assert.equal(issued.status, 201, `${label}: the issue: ${replyNote(issued)}`);
+  const invoice = parseBody(issued, `${label}: the issue`).invoice.id;
   assert.match(invoice, UUID_RE);
   return { invoice, draft, total: totalOf(subtotalOf(lines)) };
 }
@@ -665,29 +705,29 @@ async function prepare(ctx, s, tenant, store, invoice, attemptId = randomUUID())
   const held = SLOTS.get(slotOf(s, invoice));
   if (held !== undefined) {
     const settled = await ctx.settle(s, store, invoice, { expectedTenant: tenant, attemptId: held.attemptId, expectedVersion: held.recorded ? 2 : 1 });
-    assert.equal(settled.status, 200, `the slot's settlement: ${settled.body}`);
+    assert.equal(settled.status, 200, `the slot's settlement: ${replyNote(settled)}`);
     SLOTS.delete(slotOf(s, invoice));
   }
   const registered = await ctx.register(s, store, invoice, { expectedTenant: tenant, attemptId });
-  assert.equal(registered.status, 201, `the registration: ${registered.body}`);
-  const registrationId = JSON.parse(registered.body).registration.id;
-  assert.equal(registered.body, JSON.stringify({ registration: { id: registrationId, invoiceId: invoice, attemptId, state: 'open' } }), 'the registration\'s sealed 201');
+  assert.equal(registered.status, 201, `the registration: ${replyNote(registered)}`);
+  const registrationId = parseBody(registered, 'the registration').registration.id;
+  assert.ok(registered.body === JSON.stringify({ registration: { id: registrationId, invoiceId: invoice, attemptId, state: 'open' } }), `the registration's sealed 201 (${replyNote(registered)})`);
   // ONE proof GET: the port itself commits a not_durable first attempt and asks once more (O1); a 503 here is a failure.
   const read = await ctx.proof(s, store, invoice, registrationId);
-  assert.equal(read.status, 200, `the proof: ${read.body} ${read.status === 200 ? '' : ctx.reason(read)}`);
-  const { registration, proof } = JSON.parse(read.body);
+  assert.equal(read.status, 200, `the proof: ${replyNote(read)} ${read.status === 200 ? '' : ctx.reason(read)}`);
+  const { registration, proof } = parseBody(read, 'the proof');
   assert.deepEqual(registration, { id: registrationId, invoiceId: invoice, attemptId }, 'the proof names its registration');
-  assert.match(proof, /^[0-9a-f]{64}$/);
+  assert.ok(typeof proof === 'string' && PROOF_RE.test(proof), 'the proof: 64 lowercase hex digits (value withheld)');
   SLOTS.set(slotOf(s, invoice), { registrationId, attemptId, recorded: false });
   return { registrationId, attemptId, proof };
 }
 
 /** The record's sealed 201: exactly { "payment": { id, invoiceId, attemptId, amountCents, method } }, no Location; the payment id. */
 function recordedOf(reply, invoice, attemptId, amountCents, method, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 201, `${label}: ${reply.body}`);
-  const id = JSON.parse(reply.body)?.payment?.id;
-  assert.match(String(id), UUID_RE, `${label}: the runtime's new payment id`);
-  assert.equal(reply.body, JSON.stringify({ payment: { id, invoiceId: invoice, attemptId, amountCents, method } }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 201, `${label}: ${replyNote(reply)}`);
+  const id = parseBody(reply, label)?.payment?.id;
+  assert.ok(UUID_RE.test(String(id)), `${label}: the runtime's new payment id`);
+  assert.ok(reply.body === JSON.stringify({ payment: { id, invoiceId: invoice, attemptId, amountCents, method } }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers.location, undefined, `${label}: no Location`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
@@ -695,7 +735,7 @@ function recordedOf(reply, invoice, attemptId, amountCents, method, label, { rep
 }
 /** The reversal's sealed 200: exactly { "payment": { id, invoiceId, "status": "reversed" } }, no Location. */
 function reversedOf(reply, payment, invoice, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
+  assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
   assert.equal(reply.body, JSON.stringify({ payment: { id: payment, invoiceId: invoice, status: 'reversed' } }), `${label}: the exact sealed body`);
   assert.equal(reply.headers.location, undefined, `${label}: no Location`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
@@ -703,8 +743,8 @@ function reversedOf(reply, payment, invoice, label, { replayed = false } = {}) {
 }
 /** A sealed 409: exactly { "error": word } — no requestId. */
 function sealedOf(reply, word, label, { replayed = false } = {}) {
-  assert.equal(reply.status, 409, `${label}: ${reply.body}`);
-  assert.equal(reply.body, JSON.stringify({ error: word }), `${label}: the exact sealed body`);
+  assert.equal(reply.status, 409, `${label}: ${replyNote(reply)}`);
+  assert.ok(reply.body === JSON.stringify({ error: word }), `${label}: the exact sealed body (${replyNote(reply)})`);
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
 }
@@ -719,9 +759,9 @@ function verdictOf(reply, label) {
 }
 /** The payments read's 200: exactly { invoice, amounts, paymentStatus, payments, nextCursor }, each member's keys in order. */
 function paymentsOf(reply, label) {
-  assert.equal(reply.status, 200, `${label}: ${reply.body}`);
+  assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
   assertBaseline(reply, label);
-  const body = JSON.parse(reply.body);
+  const body = parseBody(reply, label);
   assert.deepEqual(Object.keys(body), ['invoice', 'amounts', 'paymentStatus', 'payments', 'nextCursor'], `${label}: the five members in order`);
   assert.deepEqual(Object.keys(body.invoice), ['id', 'status'], label);
   assert.deepEqual(Object.keys(body.amounts), ['currency', 'dueCents', 'appliedCents', 'remainingCents'], label);
@@ -749,10 +789,10 @@ async function wirePaymentOf(payment) {
 /** The detail's bytes for `invoice` and the store's WHOLE issued list page as `s` reads them now (the invoice on it). */
 async function issuedBytesOf(ctx, s, store, invoice) {
   const detail = await ctx.invoice(s, store, invoice);
-  assert.equal(detail.status, 200, `the detail: ${detail.body}`);
+  assert.equal(detail.status, 200, `the detail: ${replyNote(detail)}`);
   const list = await ctx.invoices(s, store);
-  assert.equal(list.status, 200, `the list: ${list.body}`);
-  assert.ok(JSON.parse(list.body).invoices.some((i) => i.id === invoice), 'the invoice is on its store\'s list');
+  assert.equal(list.status, 200, `the list: ${replyNote(list)}`);
+  assert.ok(parseBody(list, 'the list').invoices.some((i) => i.id === invoice), 'the invoice is on its store\'s list');
   return { detail: detail.body, list: list.body };
 }
 
@@ -822,7 +862,7 @@ test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record (v2, through a
     before = await counts([w.T], keys);
     const replay = await ctx.record(s, w.S, x.invoice, body, { key });
     recordedOf(replay, x.invoice, A, 1000, 'cash', 'the same-key replay', { replayed: true });
-    assert.equal(replay.body, first.body, 'the recorded bytes');
+    assert.ok(replay.body === first.body, `the recorded bytes (${replyNote(replay)})`);
     assertRefusal(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 999, 'cash')), { key }), 422, 'idempotency_key_reused', 'the same key, another amount');
     assertRefusal(await ctx.record(s, w.S, y.invoice, body, { key }), 422, 'idempotency_key_reused', 'the same key and bytes, another invoice');
     assert.deepEqual(delta(await counts([w.T], keys), before), NOTHING, 'the replay and the 422s wrote nothing');
@@ -1124,7 +1164,7 @@ test('IPH-04 (PAY-12, PAY-09, D-PAY-5): the void — an unreversed payment is th
     k = randomUUID();
     before = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
     const voided = await ctx.voidInvoice(s, w.S, x.invoice, vbody, { key: k });
-    assert.equal(voided.status, 200, voided.body);
+    assert.equal(voided.status, 200, `the void: ${replyNote(voided)}`);
     assert.equal(voided.body, `{"invoice":{"id":"${x.invoice}","status":"voided"}}`, 'the void\'s sealed 200');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), before), ONE_VOID, 'one void, its own audit record, no outbox row');
     sealedOf(await ctx.voidInvoice(s, w.S, x.invoice, vbody, { key: vk }), 'payments_recorded', 'the first key\'s replay after the void', { replayed: true });
@@ -1354,7 +1394,7 @@ async function holdHeader(invoice) {
     taken(pid);
     await gate;
     throw ROLLBACK;
-  }).catch((err) => { if (err !== ROLLBACK) throw err; });
+  }).catch((err) => { if (err !== ROLLBACK) throw sealDbError('IPH the header holder', err); });
   const pid = await Promise.race([held, done.then(() => null)]);
   assert.ok(pid !== null, 'the owner holds the issued header');
   return { pid, release: () => { release(); return done; } };
@@ -1365,7 +1405,7 @@ const waitingIn = async (call) => (await owner`select pid, pg_catalog.pg_blockin
 /** Polls the lock state until `probe` holds; fails fast once any of `pending` answers (each command has a 2 s deadline). */
 async function engaged(probe, pending, what) {
   let answered = null;
-  for (const p of pending) p.then((r) => { answered = `${r.status} ${r.body}`; }, (e) => { answered = String(e); });
+  for (const p of pending) p.then((r) => { answered = replyNote(r); }, (e) => { answered = `rejected (${e?.constructor?.name ?? 'unknown'})`; });
   for (const end = Date.now() + 1_500; Date.now() < end && answered === null; await delay(5)) {
     const value = await probe();
     if (value) return value;
@@ -1400,7 +1440,7 @@ test('IPH-07 (PAY-01 Total 0, PAY-05): two recordings that together exceed the T
       }, pending, 'both recordings waiting behind the owner\'s header lock');
     } finally { await h.release(); await Promise.allSettled(pending); }
     const replies = await Promise.all(pending);
-    assert.deepEqual(replies.map((r) => r.status).sort(), [201, 409], replies.map((r) => r.body).join(' | '));
+    assert.deepEqual(replies.map((r) => r.status).sort(), [201, 409], replies.map(replyNote).join(' | '));
     sealedOf(replies.find((r) => r.status === 409), 'amount_exceeds_remaining', 'the second of two concurrent recordings');
     assert.deepEqual(delta(await counts([w.T], owned), before), { ...NOTHING, P: 1, PA: 1, AA: 1, K: 2, C: 2 }, 'one payment, one audit record, two completions');
     const read = paymentsOf(await ctx.payments(s, w.S, x.invoice), 'after the race');

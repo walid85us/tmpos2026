@@ -87,6 +87,25 @@ const CREATE_FN = 'tmpos_invoice_edit.m7b_invoice_draft_create_v3';
 const ISSUE_FN = 'tmpos_invoice_issue.m7b_invoice_issue';
 const VOID2_FN = `${NS}.m7b_invoice_void_v2`;
 
+// Secret-safe failure output: node:test prints a failing assertion's actual/expected and a thrown error's detail, so proofs,
+// keys and database error text are compared before asserting and only booleans, markers or a validated SQLSTATE reach output.
+/** A SQLSTATE: five upper-case letters or digits, at least one a digit (so never a bare word such as a name). */
+const isSqlState = (code) => typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) && /\d/.test(code);
+/** An error's SQLSTATE once validated; 'none' without one, 'unknown' otherwise — never its message, detail, hint or cause. */
+const safeCode = (e) => (e?.code === undefined || e?.code === null ? 'none' : isSqlState(e.code) ? e.code : 'unknown');
+/** A PostgreSQL error reduced to its SQLSTATE (no message, detail or cause); an error without one passes unchanged only when it
+ * carries no cause, detail, hint or where and is no AggregateError (an assertion's), else only its constructor name. */
+function sealDbError(label, e) {
+  if (isSqlState(e?.code)) return new Error(`${label}: SQLSTATE ${e.code}`);
+  const bare = e instanceof Error && !(e instanceof AggregateError)
+    && e.cause === undefined && e.detail === undefined && e.hint === undefined && e.where === undefined;
+  if (bare) return e;
+  const name = typeof e?.constructor?.name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(e.constructor.name) ? e.constructor.name : 'unknown';
+  return new Error(`${label}: failed (${name})`);
+}
+/** Proof routine rows with a non-null o_proof replaced by '<present>' (null stays null): compared, they never print a proof. */
+const redactProof = (rows) => rows.map((r) => (r.o_proof === null || r.o_proof === undefined ? r : { ...r, o_proof: '<present>' }));
+
 // ---------------------------------------------------------------------------
 // the mint construction and the proof construction, computed here independently
 // ---------------------------------------------------------------------------
@@ -146,7 +165,8 @@ const downCommitted = (file, version) => owner.begin(RC, async (tx) => {
 async function installProofKey(bytes = randomBytes(32)) {
   const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
   await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${bytes}, ${g}::bigint)
-    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`
+    .catch((e) => { throw new Error(`IRR proof key install failed: SQLSTATE ${safeCode(e)}`); });
   PK = { key: bytes, generation: BigInt(g) };
   return PK;
 }
@@ -206,7 +226,7 @@ const setWalWriterDelay = async (value) => {
 let above037;
 test.after(async () => {
   const failures = [];
-  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(err); } };
+  const step = async (fn) => { try { await fn(); } catch (err) { failures.push(sealDbError('IRR teardown step', err)); } };
   try {
     await step(() => setWalWriterDelay(null));
     await step(async () => { if (!(await applied037())) { const r = await trustedApply(); assert.equal(r.outcome, 'complete'); } });
@@ -258,7 +278,7 @@ async function setupStep(fn) {
   } catch (err) {
     for (const c of [runtime, registrar, issuer, owner]) if (c) await c.end({ timeout: 5 }).catch(() => {});
     if (cluster) cluster.stop();
-    throw err;
+    throw sealDbError('IRR setup', err);
   }
 }
 
@@ -288,7 +308,7 @@ const APPLY_REPORT = await setupStep(async () => {
   await registrar`set synchronous_commit = off`;
   issuerKeyBefore = (await owner`select key from tmpos_mint.issuer_key where singleton`)[0]?.key ?? null;
   if (issuerKeyBefore !== null) issuerKeyBefore = Buffer.from(issuerKeyBefore);
-  await installTestIssuerKey(owner, ISSUER_KEY);
+  await installTestIssuerKey(owner, ISSUER_KEY).catch((e) => { throw new Error(`IRR issuer key install failed: SQLSTATE ${safeCode(e)}`); });
   ME = (await owner`select current_user::text as me`)[0].me;
   await installProofKey();
   return report;
@@ -333,7 +353,7 @@ async function mint(who, { lifetime = 8 * HOUR } = {}) {
   const [{ outcome }] = await runtime`select tmpos_mint.m7a_session_create(${key}::text, ${r.audience}::text, ${r.authProvider}::text,
     ${r.authProviderUid}::text, ${r.principalKey}::text, ${r.securityVersion}::text, ${r.authenticatedAt}::bigint,
     ${r.createdAt}::bigint, ${r.lastSeenAt}::bigint, ${r.validatedAt}::bigint, ${expiresAt}::bigint,
-    ${mintProof(ISSUER_KEY, key, r, expiresAt)}::bytea) as outcome`;
+    ${mintProof(ISSUER_KEY, key, r, expiresAt)}::bytea) as outcome`.catch((e) => { throw sealDbError('IRR mint', e); });
   assert.equal(outcome, 'created', `a tenant session for ${who.uid}`);
   return key;
 }
@@ -341,17 +361,17 @@ const LINES = [{ description: 'Screen replacement', quantity: 1, unitPriceCents:
 const TOTAL = 12_999 + 2 * 4_500;
 async function settingsSet(key, store, tenant) {
   const [row] = await runtime.unsafe(`select o_outcome from ${SETTINGS_SET_FN}($1::text, $2::uuid, $3::uuid, $4::bigint, $5::text, $6::text, $7::text, $8::text, $9::text, $10::integer)`,
-    [key, store, tenant, '0', 'IRR Legal Name LLC', 'IRR Store', '1 Main St\nSpringfield', 'TAX-IRR-1', 'exclusive_rate', 8875]);
+    [key, store, tenant, '0', 'IRR Legal Name LLC', 'IRR Store', '1 Main St\nSpringfield', 'TAX-IRR-1', 'exclusive_rate', 8875]).catch((e) => { throw sealDbError('IRR settings', e); });
   assert.equal(row.o_outcome, 'applied', 'the store\'s issuing settings');
 }
 async function issueOne(key, store, tenant, customer) {
   const draft = randomUUID();
   const [c] = await runtime.unsafe(`select o_outcome from ${CREATE_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::text::jsonb, $7::bigint)`,
-    [key, store, draft, tenant, customer, JSON.stringify(LINES), String(TOTAL)]);
+    [key, store, draft, tenant, customer, JSON.stringify(LINES), String(TOTAL)]).catch((e) => { throw sealDbError('IRR draft save', e); });
   assert.equal(c.o_outcome, 'applied', 'the draft saved');
   const invoice = randomUUID();
   const [i] = await runtime.unsafe(`select o_outcome from ${ISSUE_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::bigint, $6::bigint, $7::bigint, $8::uuid)`,
-    [key, store, draft, tenant, '1', '1', '1', invoice]);
+    [key, store, draft, tenant, '1', '1', '1', invoice]).catch((e) => { throw sealDbError('IRR issue', e); });
   assert.equal(i.o_outcome, 'applied', 'the draft issued');
   return invoice;
 }
@@ -424,9 +444,11 @@ const expected = (f, r, pk = PK) => proofFor(pk.key, pk.generation, { registrati
 async function proofOf(f, r, { key = r.key, db = issuer, wait = 1000 } = {}) {
   const rows = await proofCall(key, { store: r.store, invoice: r.invoice, tenant: f.T, registration: r.registration, wait, db });
   assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0], { o_outcome: 'proof', o_tenant_id: f.T, o_store_id: r.store, o_invoice_id: r.invoice, o_registration_id: r.registration,
-    o_attempt_id: r.attempt, o_proof: expected(f, r) }, 'the proof, equal to the independent HMAC');
-  return rows[0].o_proof;
+  const { o_proof: got, ...rest } = rows[0];
+  assert.deepEqual(rest, { o_outcome: 'proof', o_tenant_id: f.T, o_store_id: r.store, o_invoice_id: r.invoice, o_registration_id: r.registration,
+    o_attempt_id: r.attempt }, 'the proof row: outcome proof and its ids');
+  assert.ok(got === expected(f, r), 'the proof, equal to the independent HMAC (values withheld)');
+  return got;
 }
 const recordWith = (f, r, proof, { key = r.key, ...extra } = {}) => recordCall(key, { store: r.store, invoice: r.invoice, tenant: f.T,
   registration: r.registration, attempt: r.attempt, proof, ...extra });
@@ -436,7 +458,8 @@ const rowOf = async (registration) => (await owner`select pg_catalog.to_jsonb(g)
   from tmpos_invoice_payment.invoice_payment_registration g where g.registration_id = ${registration}`).map((x) => ({ ...x }))[0] ?? null;
 /** Every row of the tenant a 037 routine could write (row, xmin, ctid) and the global audit and payment counts. */
 async function writesOf(tenant) {
-  const q = async (rel) => (await owner.unsafe(`select pg_catalog.to_jsonb(r)::text || ' ' || r.xmin::text || ' ' || r.ctid::text as v from ${rel} r where r.tenant_id = $1 order by 1`, [tenant])).map((x) => x.v);
+  // The session digest is left out of the text; xmin and ctid still change with any write to the row.
+  const q = async (rel) => (await owner.unsafe(`select (pg_catalog.to_jsonb(r) - 'session_digest')::text || ' ' || r.xmin::text || ' ' || r.ctid::text as v from ${rel} r where r.tenant_id = $1 order by 1`, [tenant])).map((x) => x.v);
   const [c] = await owner`select (select count(*) from public.audit_event)::int as audits, (select count(*) from tmpos_invoice_payment.invoice_payment)::int as payments,
     (select count(*) from tmpos_invoice_payment.invoice_payment_registration)::int as registrations`;
   return { regs: await q(REG_TABLE), payments: await q(`${NS}.invoice_payment`), audits: await q('public.audit_event'), ...c };
@@ -450,7 +473,7 @@ async function rolledBack(fn, isolation = RC) {
   await assert.rejects(owner.begin(isolation, async (tx) => {
     out = await fn(tx).then((value) => ({ value }), (err) => ({ code: err.code, message: String(err.message) }));
     throw ROLLBACK;
-  }), (err) => err === ROLLBACK);
+  }), (err) => { if (err === ROLLBACK) return true; throw sealDbError('IRR rolledBack', err); });
   return out;
 }
 /** The form a node tree (debug_print_*) gives a constant's bytes: decimal, space-separated. */
@@ -463,7 +486,7 @@ async function fullRefusal(fn) {
   await assert.rejects(owner.begin(RC, async (tx) => {
     out = await fn(tx).then(() => null, (e) => ({ code: e.code, message: String(e.message), detail: e.detail ?? null, hint: e.hint ?? null, where: e.where ?? null }));
     throw ROLLBACK;
-  }), (e) => e === ROLLBACK);
+  }), (e) => { if (e === ROLLBACK) return true; throw sealDbError('IRR fullRefusal', e); });
   return out;
 }
 /** No byte string (hex, \\x-hex or base64) of `secrets` appears anywhere in `value`. */
@@ -502,7 +525,7 @@ test('IRR-01: 001-037 by the trusted executor, the ledger exactly REQUIRED_MIGRA
 test('IRR-02: the down while EMPTY restores 036\'s catalog exactly (v1 record EXECUTE to tmpos_app again, every 037 object gone); 036\'s down while 037 is applied fails 2BP01; the up applies again to the same catalog', async () => {
   const before = await catalogOf();
   const blocked = await rolledBack((tx) => tx.unsafe(DOWN_036).simple());
-  assert.equal(blocked.code, '2BP01', `036's down while 037 is applied: ${JSON.stringify(blocked)}`);
+  assert.equal(safeCode(blocked), '2BP01', '036\'s down while 037 is applied: the SQLSTATE (error text withheld)');
   assert.deepEqual(await grantsOf(RECORD1), EXECUTE_BY(ME), '037 applied: the v1 record is the owner\'s alone');
   await downCommitted(DOWN_037, '037');
   assert.deepEqual(await grantsOf(RECORD1), EXECUTE_BY(ME, 'tmpos_app'), 'rolled back: 036\'s two entries again');
@@ -562,7 +585,7 @@ test('IRR-04: the happy path — register, the proof (an independent HMAC; the s
   assert.deepEqual(await registerCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T }), NO_REG('conflict'));
   assert.deepEqual(await registerCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, attempt: r.attempt }), NO_REG('conflict'));
   const proof = await proofOf(f, r);
-  assert.equal(await proofOf(f, r), proof, 'a lost proof answer: the same proof again, nothing written');
+  assert.ok((await proofOf(f, r)) === proof, 'IRR-04 a lost proof answer: the same proof again, nothing written (values withheld)');
   const payment = randomUUID();
   const before = await writesOf(f.T);
   const rec = await recordWith(f, r, proof, { payment, amount: 5000 });
@@ -580,7 +603,7 @@ test('IRR-04: the happy path — register, the proof (an independent HMAC; the s
   // A replay of the same record: already_recorded, nothing written; the proof is no longer served (not open).
   const mid = await writesOf(f.T);
   assert.deepEqual(await recordWith(f, r, proof, { payment, amount: 5000 }), NO_REC('already_recorded'));
-  assert.deepEqual(await proofCall(r.key, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration }), NO_PRF('not_found'));
+  assert.deepEqual(redactProof(await proofCall(r.key, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration })), NO_PRF('not_found'));
   assert.deepEqual(await writesOf(f.T), mid, 'nothing written by the replay or the proof');
   // The list: recorded, version 2, the payment; never the registration id.
   const list = await attemptsCall(f.kBoss, { store: f.S, tenant: f.T });
@@ -615,9 +638,9 @@ test('IRR-05: the same transaction and a savepoint — the proof is not_found an
   await runtime.begin(RC, async (tx) => {
     r = await registered(f, inv, { db: tx });
     top = (await tx`select pg_catalog.pg_current_xact_id()::text as x`)[0].x;
-    assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, db: tx }), NO_PRF('not_found'), 'same transaction');
+    assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, db: tx })), NO_PRF('not_found'), 'same transaction');
     await tx.savepoint(async (sp) => {
-      assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, db: sp }), NO_PRF('not_found'), 'inside a savepoint');
+      assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, db: sp })), NO_PRF('not_found'), 'inside a savepoint');
       assert.deepEqual(await recordWith(f, r, expected(f, r), { db: sp }), NO_REC('not_found'), 'record inside a savepoint');
     });
     assert.deepEqual(await recordWith(f, r, expected(f, r), { db: tx }), NO_REC('not_found'), 'record in the registering transaction');
@@ -634,8 +657,8 @@ test('IRR-06: a rolled-back registration — proof and record not_found, no row,
   const f = await scene('rollback');
   const inv = f.inv[0];
   let r;
-  await assert.rejects(runtime.begin(RC, async (tx) => { r = await registered(f, inv, { db: tx }); throw ROLLBACK; }), (e) => e === ROLLBACK);
-  assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration }), NO_PRF('not_found'));
+  await assert.rejects(runtime.begin(RC, async (tx) => { r = await registered(f, inv, { db: tx }); throw ROLLBACK; }), (e) => { if (e === ROLLBACK) return true; throw sealDbError('IRR-06 the rolled-back registration', e); });
+  assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration })), NO_PRF('not_found'));
   assert.deepEqual(await recordWith(f, r, expected(f, r)), NO_REC('not_found'));
   assert.equal(await rowOf(r.registration), null);
   const [{ n }] = await owner`select count(*)::int as n from public.audit_event where subject_invoice_payment_registration_id = ${r.registration} or event_id = ${r.event}`;
@@ -649,7 +672,8 @@ test('IRR-07: PRE-FLUSH ISSUANCE REFUSED — the registering connection commits 
   assert.equal((await registrar`select pg_catalog.current_setting('synchronous_commit') as s`)[0].s, 'off');
   for (const wait of [null, -1, 1001]) {
     const err = await errorOf(proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: randomUUID(), wait }));
-    assert.deepEqual({ code: err?.code, message: err?.message }, { code: '22023', message: 'migration 037 proof: an argument is malformed' }, `p_wait_ms ${wait}`);
+    assert.ok(err?.code === '22023' && err?.message === 'migration 037 proof: an argument is malformed',
+      `IRR-07 p_wait_ms ${wait}: expected 22023 with the fixed text, got SQLSTATE ${safeCode(err)} (text withheld)`);
   }
   await setWalWriterDelay('10s');
   let caught = null;
@@ -661,11 +685,11 @@ test('IRR-07: PRE-FLUSH ISSUANCE REFUSED — the registering connection commits 
       const rows = await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration });
       const waited = Date.now() - t0;
       if (rows[0]?.o_outcome === 'not_durable') {
-        assert.deepEqual(rows, NO_PRF('not_durable'), 'the answer: not_durable, every other column NULL');
+        assert.deepEqual(redactProof(rows), NO_PRF('not_durable'), 'the answer: not_durable, every other column NULL');
         assert.ok(waited >= 1000 && waited < 2000, `the answer is bounded by p_wait_ms: ${waited} ms`);
         assert.deepEqual(await rowOf(r.registration), row, 'the answer did not alter the registration');
         const t1 = Date.now();
-        assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, wait: 0 }), NO_PRF('not_durable'),
+        assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration, wait: 0 })), NO_PRF('not_durable'),
           'p_wait_ms 0: the same strict comparison');
         assert.ok(Date.now() - t1 < 500, `p_wait_ms 0 does not wait: ${Date.now() - t1} ms`);
         assert.deepEqual(await rowOf(r.registration), row, 'still unaltered');
@@ -679,7 +703,7 @@ test('IRR-07: PRE-FLUSH ISSUANCE REFUSED — the registering connection commits 
     assert.ok(caught !== null, 'a visible-but-unflushed registration was answered not_durable');
     // An unrelated durable commit (it writes WAL, so its commit is flushed synchronously) flushes past the registration.
     await owner`select pg_catalog.pg_logical_emit_message(true, 'irr-flush', 'x')`;
-    assert.equal(await proofOf(f, caught, { wait: 0 }), await proofOf(f, caught), 'issued at once with p_wait_ms 0, the same proof');
+    assert.ok((await proofOf(f, caught, { wait: 0 })) === (await proofOf(f, caught)), 'IRR-07 issued at once with p_wait_ms 0, the same proof (values withheld)');
   } finally {
     await setWalWriterDelay(null);
   }
@@ -708,8 +732,8 @@ test('IRR-08: mismatched attempt id, registration id, proof, session or actor �
     ['another staff member', () => recordCall(f.kManager, { store: f.S, invoice: i0, tenant: f.T, registration: rA.registration, attempt: rA.attempt, proof: pA })],
   ];
   for (const [label, call] of cases) assert.deepEqual(await call(), NO_REC('not_found'), label);
-  assert.deepEqual(await proofCall(otherBossKey, { store: f.S, invoice: i0, tenant: f.T, registration: rA.registration }), NO_PRF('not_found'), 'proof from a replacement session');
-  assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: i1, tenant: f.T, registration: rA.registration }), NO_PRF('not_found'), 'proof on another invoice');
+  assert.deepEqual(redactProof(await proofCall(otherBossKey, { store: f.S, invoice: i0, tenant: f.T, registration: rA.registration })), NO_PRF('not_found'), 'proof from a replacement session');
+  assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: i1, tenant: f.T, registration: rA.registration })), NO_PRF('not_found'), 'proof on another invoice');
   assert.deepEqual(await writesOf(f.T), before, 'no ledger, registration or audit write by any mismatch');
   assert.equal((await recordWith(f, rA, pA))[0].o_outcome, 'applied');
 });
@@ -724,9 +748,14 @@ test('IRR-09: key missing — register, proof and record raise 55000 writing not
     assert.deepEqual(await probeCall(), [{ o_present: false, o_generation: null }]);
     const before = await writesOf(f.T);
     const regErr = await errorOf(registerCall(f.kBoss, { store: f.S, invoice: i1, tenant: f.T }));
-    assert.deepEqual([regErr?.code, regErr?.message], ['55000', 'migration 037 register: the payment proof key is not installed']);
-    assert.equal((await errorOf(proofCall(f.kBoss, { store: f.S, invoice: i0, tenant: f.T, registration: r.registration })))?.message, 'migration 037 proof: the payment proof key is not installed');
-    assert.equal((await errorOf(recordWith(f, r, proof)))?.message, 'migration 037 record: the payment proof key is not installed');
+    assert.ok(regErr?.code === '55000' && regErr?.message === 'migration 037 register: the payment proof key is not installed',
+      `IRR-09 register without a key: expected 55000 with the fixed text, got SQLSTATE ${safeCode(regErr)} (text withheld)`);
+    const prfErr = await errorOf(proofCall(f.kBoss, { store: f.S, invoice: i0, tenant: f.T, registration: r.registration }));
+    assert.ok(prfErr?.message === 'migration 037 proof: the payment proof key is not installed',
+      `IRR-09 proof without a key: expected the fixed text, got SQLSTATE ${safeCode(prfErr)} (text withheld)`);
+    const recErr = await errorOf(recordWith(f, r, proof));
+    assert.ok(recErr?.message === 'migration 037 record: the payment proof key is not installed',
+      `IRR-09 record without a key: expected the fixed text, got SQLSTATE ${safeCode(recErr)} (text withheld)`);
     assert.deepEqual(await writesOf(f.T), before, 'nothing written');
     assert.deepEqual((await attemptsCall(f.kBoss, { store: f.S, tenant: f.T })).map((x) => [x.o_attempt_id, x.o_state]), [[r.attempt, 'open']], 'the list works');
     assert.equal((await settleCall(f.kBoss, { store: f.S, invoice: i0, tenant: f.T, attempt: r.attempt, version: 1 }))[0].o_outcome, 'applied', 'settle works');
@@ -747,7 +776,7 @@ test('IRR-10: key rotation — the old registration is unsendable (proof and rec
   assert.equal(fresh.generation, old.generation + 1n);
   assert.deepEqual(await probeCall(), [{ o_present: true, o_generation: String(fresh.generation) }]);
   const before = await writesOf(f.T);
-  assert.deepEqual(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration }), NO_PRF('not_found'), 'the old registration is unsendable');
+  assert.deepEqual(redactProof(await proofCall(f.kBoss, { store: f.S, invoice: inv, tenant: f.T, registration: r.registration })), NO_PRF('not_found'), 'the old registration is unsendable');
   assert.deepEqual(await recordWith(f, r, pOld), NO_REC('not_found'), 'the old proof');
   assert.deepEqual(await recordWith(f, r, expected(f, r, { key: fresh.key, generation: old.generation })), NO_REC('not_found'), 'the new key, the old generation');
   assert.deepEqual(await recordWith(f, r, expected(f, r, fresh)), NO_REC('not_found'), 'the new key and generation: the registration is the old one\'s');
@@ -769,17 +798,22 @@ test('IRR-10: key rotation — the old registration is unsendable (proof and rec
     ['a history row removed', (tx) => tx`delete from tmpos_invoice_payment.payment_proof_key_generation where generation = ${String(old.generation)}::bigint`, 'migration 037: an installed payment proof key generation is never changed or removed'],
     ['the history truncated', (tx) => tx`truncate tmpos_invoice_payment.payment_proof_key_generation`, 'migration 037: an installed payment proof key generation is never changed or removed'],
   ];
-  for (const [label, fn, message] of refusals) assert.deepEqual(await rolledBack(fn), { code: '23001', message }, label);
+  for (const [label, fn, message] of refusals) {
+    const out = await rolledBack(fn);
+    assert.ok(out?.code === '23001' && out?.message === message, `IRR-10 ${label}: expected the fixed 23001 refusal, got SQLSTATE ${safeCode(out)} (text withheld)`);
+  }
   // A retired (or the current) key with zero bytes appended is the same HMAC key (018 pads to the 64-byte block): refused.
   const zeros = (n) => Buffer.alloc(n);
   for (const [label, bytes] of [['retired bytes + one zero byte', Buffer.concat([old.key, zeros(1)])],
     ['retired bytes zero-padded to 64', Buffer.concat([old.key, zeros(64 - old.key.length)])],
     ['current bytes + one zero byte', Buffer.concat([fresh.key, zeros(1)])]]) {
-    assert.deepEqual(await rolledBack((tx) => tx`update tmpos_invoice_payment.payment_proof_key set key = ${bytes}, generation = ${String(high + 7n)}::bigint where singleton`),
-      { code: '23001', message: 'migration 037: a payment proof key that was ever installed is never installed again' }, label);
+    const out = await rolledBack((tx) => tx`update tmpos_invoice_payment.payment_proof_key set key = ${bytes}, generation = ${String(high + 7n)}::bigint where singleton`);
+    assert.ok(out?.code === '23001' && out?.message === 'migration 037: a payment proof key that was ever installed is never installed again',
+      `IRR-10 ${label}: expected the fixed 23001 refusal, got SQLSTATE ${safeCode(out)} (text withheld)`);
   }
   const [{ d }] = await owner`select key_digest as d from tmpos_invoice_payment.payment_proof_key_generation where generation = ${String(fresh.generation)}::bigint`;
-  assert.deepEqual(d, createHash('sha256').update(Buffer.concat([fresh.key, zeros(64 - fresh.key.length)])).digest(), 'the history digest is over the zero-padded 64-byte block');
+  const padded = createHash('sha256').update(Buffer.concat([fresh.key, zeros(64 - fresh.key.length)])).digest();
+  assert.ok(Buffer.isBuffer(d) && d.equals(padded), 'IRR-10 the history digest is over the zero-padded 64-byte block (values withheld)');
   // A malformed install raises the shape guard's fixed text before any NOT NULL or CHECK constraint could echo the row (the key).
   const SHAPE = 'migration 037: a payment proof key is the one row, 32 to 64 bytes, under a generation from 1 to 2^53 - 1';
   const b31 = randomBytes(31), b65 = randomBytes(65), b32 = randomBytes(32);
@@ -797,7 +831,8 @@ test('IRR-10: key rotation — the old registration is unsendable (proof and rec
   ];
   for (const [label, fn] of malformed) {
     const err = await fullRefusal(fn);
-    assert.deepEqual([err?.code, err?.message, err?.detail, err?.hint], ['23001', SHAPE, null, null], `${label}: expected the fixed 23001 shape refusal, got SQLSTATE ${err?.code ?? 'none'} (output withheld)`);
+    assert.ok(err?.code === '23001' && err?.message === SHAPE && err?.detail === null && err?.hint === null,
+      `${label}: expected the fixed 23001 shape refusal, got SQLSTATE ${safeCode(err)} (output withheld)`);
     assertNoBytes(err, [b31, b65, b32, fresh.key, old.key], label);
   }
   assert.deepEqual(await probeCall(), [{ o_present: true, o_generation: String(fresh.generation) }], 'the installed key unchanged by every refusal');
@@ -887,7 +922,7 @@ test('IRR-12: secrets — with the caller\'s debug_print_* on, client_min_messag
   // STABLE and never folded into the caller's plan — so the caller's own statement text and trees carry no secret.
   const quietly = async (name, value) => {
     await loud.unsafe(QUIET).simple();
-    await loud`select pg_catalog.set_config(${name}, ${value}, false)`;
+    await loud`select pg_catalog.set_config(${name}, ${value}, false)`.catch((e) => { throw sealDbError('IRR-12', e); });
     await loud.unsafe(LOUD).simple();
   };
   const K = "pg_catalog.current_setting('irr.k')";
@@ -904,20 +939,20 @@ test('IRR-12: secrets — with the caller\'s debug_print_* on, client_min_messag
     const attempt = randomUUID();
     const r = { registration, attempt, key: f.kBoss, who: f.boss, store: f.S, invoice: f.inv[0] };
     const [reg] = await plain(loud.unsafe(`select * from ${NS}.m7b_invoice_payment_register(${K}, $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid)`,
-      [f.S, f.inv[0], f.T, registration, attempt, randomUUID()]));
+      [f.S, f.inv[0], f.T, registration, attempt, randomUUID()])).catch((e) => { throw sealDbError('IRR-12', e); });
     assert.equal(reg.o_outcome, 'applied');
     const [prf] = await plain(loud.unsafe(`select * from ${NS}.m7b_invoice_payment_registration_proof(${K}, $1::uuid, $2::uuid, $3::uuid, $4::uuid, 1000)`,
-      [f.S, f.inv[0], f.T, registration]));
+      [f.S, f.inv[0], f.T, registration])).catch((e) => { throw sealDbError('IRR-12', e); });
     const proof = prf.o_proof;
-    assert.equal(proof, expected(f, r));
+    assert.ok(proof === expected(f, r), 'IRR-12 the traced proof equals the independent HMAC (values withheld)');
     const record = (proofSql, extra = []) => plain(loud.unsafe(`select * from ${NS}.m7b_invoice_payment_record_v2(${K}, $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::bigint, $8::text, ${proofSql}, $9::uuid)`,
       [f.S, f.inv[0], f.T, randomUUID(), registration, attempt, '1000', 'cash', randomUUID(), ...extra]));
     const errors = [];
     errors.push(await errorOf(record('$10::text', ['Z'.repeat(64)])));
     errors.push(await errorOf(record('$10::text', ['a'.repeat(63)])));
-    assert.deepEqual(await record('$10::text', ['0'.repeat(64)]), NO_REC('not_found'));
+    assert.deepEqual(await record('$10::text', ['0'.repeat(64)]).catch((e) => { throw sealDbError('IRR-12', e); }), NO_REC('not_found'));
     await quietly('irr.p', proof);
-    assert.equal((await record("pg_catalog.current_setting('irr.p')"))[0].o_outcome, 'applied');
+    assert.equal((await record("pg_catalog.current_setting('irr.p')").catch((e) => { throw sealDbError('IRR-12', e); }))[0].o_outcome, 'applied');
     await owner`delete from tmpos_invoice_payment.payment_proof_key where singleton`;
     try {
       errors.push(await errorOf(loud.unsafe(`select * from ${NS}.m7b_invoice_payment_register(${K}, $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid)`,
@@ -935,7 +970,8 @@ test('IRR-12: secrets — with the caller\'s debug_print_* on, client_min_messag
     const audits = (await owner`select pg_catalog.to_jsonb(a)::text as t from public.audit_event a where a.tenant_id = ${f.T}`).map((x) => x.t).join('\n');
     const regRows = (await owner`select pg_catalog.to_jsonb(g)::text as t from tmpos_invoice_payment.invoice_payment_registration g where g.tenant_id = ${f.T}`).map((x) => x.t).join('\n');
     const errorText = JSON.stringify(errors);
-    assert.ok(errors.every((e) => e !== null && ['22023', '55000'].includes(e.code)), errorText);
+    assert.ok(errors.every((e) => e !== null && ['22023', '55000'].includes(e.code)),
+      `IRR-12 every captured error is 22023 or 55000, got SQLSTATEs ${errors.map(safeCode).join(',')} (text withheld)`);
     for (const [name, value] of Object.entries(secrets)) {
       assert.ok(!audits.includes(value), `${name} is in no audit row`);
       assert.ok(!errorText.includes(value), `${name} is in no error text`);
@@ -972,7 +1008,7 @@ test('IRR-13: decision order and refusals — refused (a level below Approve), t
   assert.deepEqual(await registerCall(f.kBoss, { store: f.S, invoice: other, tenant: f.T }), NO_REG('not_found'), 'another store\'s invoice');
   assert.deepEqual(await settleCall(f.kBoss, { store: f.S, invoice: other, tenant: f.T, attempt: randomUUID(), version: 1 }), NO_SET('not_found'));
   assert.deepEqual(await settleCall(f.kBoss, { store: f.S, invoice: i0, tenant: f.T, attempt: randomUUID(), version: 1 }), NO_SET('not_found'), 'no registration of this attempt');
-  assert.deepEqual(await proofCall(f.kTech, { store: f.S, invoice: i0, tenant: f.T, registration: randomUUID() }), NO_PRF('denied'));
+  assert.deepEqual(redactProof(await proofCall(f.kTech, { store: f.S, invoice: i0, tenant: f.T, registration: randomUUID() })), NO_PRF('denied'));
   // Another staff member's attempt id registers exactly as a fresh one.
   const m = await registered(f, i0, { who: f.manager, key: f.kManager });
   const b = await registered(f, i0, { attempt: m.attempt });
@@ -984,7 +1020,7 @@ test('IRR-13: decision order and refusals — refused (a level below Approve), t
   const b2 = await registered(f, i0, { attempt: randomUUID() });
   assert.equal(b2.registration.length, 36);
   // A voided invoice takes no registration.
-  const [v] = await runtime.unsafe(`select o_outcome from ${VOID2_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::bigint, $6::text)`, [f.kBoss, f.S, i1, f.T, '1', 'issued_in_error']);
+  const [v] = await runtime.unsafe(`select o_outcome from ${VOID2_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::bigint, $6::text)`, [f.kBoss, f.S, i1, f.T, '1', 'issued_in_error']).catch((e) => { throw sealDbError('IRR void', e); });
   assert.equal(v.o_outcome, 'applied');
   assert.deepEqual(await registerCall(f.kBoss, { store: f.S, invoice: i1, tenant: f.T }), NO_REG('invalid_state'), 'voided');
   for (const [label, call] of [
@@ -1039,7 +1075,7 @@ test('IRR-15: record v2 refusal order — voided before amount, amount before th
   assert.deepEqual(await recordWith(f, o, pO, { amount: String((await totalOf(i1)) + 1n) }), NO_REC('amount_exceeds_remaining'));
   assert.deepEqual(await writesOf(f.T), before, 'nothing written');
   // Voided after the registration: invalid_state, ahead of the amount check.
-  const [v] = await runtime.unsafe(`select o_outcome from ${VOID2_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::bigint, $6::text)`, [f.kBoss, f.S, i1, f.T, '1', 'issued_in_error']);
+  const [v] = await runtime.unsafe(`select o_outcome from ${VOID2_FN}($1::text, $2::uuid, $3::uuid, $4::uuid, $5::bigint, $6::text)`, [f.kBoss, f.S, i1, f.T, '1', 'issued_in_error']).catch((e) => { throw sealDbError('IRR void', e); });
   assert.equal(v.o_outcome, 'applied');
   before = await writesOf(f.T);
   assert.deepEqual(await recordWith(f, o, pO, { amount: String((await totalOf(i1)) + 1n) }), NO_REC('invalid_state'), 'voided, before the amount');
@@ -1071,7 +1107,7 @@ test('IRR-16: the session\'s expiry is checked AFTER the proof key\'s lock wait 
         holding = true;
         await gate;
         throw ROLLBACK;
-      }).catch((e) => { if (e !== ROLLBACK) throw e; });
+      }).catch((e) => { if (e !== ROLLBACK) throw sealDbError('IRR-16 the key-row holder', e); });
       while (!holding) await new Promise((res) => setTimeout(res, 10));
       const pids = await Promise.all([a, b].map(async (c) => (await c`select pg_catalog.pg_backend_pid() as pid`)[0].pid));
       const recording = recordWith(f, r, proof, { db: a });
@@ -1179,7 +1215,7 @@ test('IRR-17: the WAL page boundary through the REAL routines — a registration
         });
         landed = { attempt, registration: reg[0].o_registration_id, after: await insertLsnOf(registrar) };
       } catch (e) {
-        if (e.message !== 'retry') throw e;
+        if (e.message !== 'retry') throw sealDbError('IRR-17 the landing registration', e);
       }
     }
     if (landed === null || landed.after !== target + SHORT_PHD) {
@@ -1193,8 +1229,8 @@ test('IRR-17: the WAL page boundary through the REAL routines — a registration
     try {
       proof = await proofOf(f, r); // the real proof routine; asserts the independent HMAC
     } catch (e) {
-      if ((await insertLsnOf(owner)) === target + SHORT_PHD) throw e; // no unrelated WAL: a real refusal
-      console.log(`IRR-17: round ${round}: unrelated WAL during the proof (${e.message}); retrying`);
+      if ((await insertLsnOf(owner)) === target + SHORT_PHD) throw sealDbError('IRR-17 the proof', e); // no unrelated WAL: a real refusal
+      console.log(`IRR-17: round ${round}: unrelated WAL during the proof (${e instanceof assert.AssertionError ? e.message : `SQLSTATE ${safeCode(e)}`}); retrying`);
       await withdraw(r.attempt);
       continue;
     }
@@ -1229,7 +1265,8 @@ test('IRR-18: the registration guard checks every mandatory column with fixed te
       (registration_id, tenant_id, store_id, invoice_id, registered_by, attempt_id, session_digest, key_generation, registered_xact, registered_at)
       values (${row.registration_id}, ${row.tenant_id}, ${row.store_id}, ${row.invoice_id}, ${row.registered_by}, ${row.attempt_id},
               ${row.session_digest}, ${row.key_generation}::bigint, ${row.registered_xact}::xid8, ${row.registered_at})`);
-    assert.deepEqual([err?.code, err?.message, err?.detail, err?.hint], ['23001', MSG, null, null], `${label}: expected the fixed 23001 refusal, got SQLSTATE ${err?.code ?? 'none'} (output withheld)`);
+    assert.ok(err?.code === '23001' && err?.message === MSG && err?.detail === null && err?.hint === null,
+      `${label}: expected the fixed 23001 refusal, got SQLSTATE ${safeCode(err)} (output withheld)`);
     assertNoBytes(err, [row.session_digest].filter(Boolean), label);
   }
 });
