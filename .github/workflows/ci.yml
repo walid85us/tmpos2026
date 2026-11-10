@@ -586,7 +586,13 @@ jobs:
       # measured with pg_walinspect on one 16 MB-segment cluster and one 64 MB-segment cluster. A WAL segment size is fixed by initdb
       # and the harness never reconfigures a supplied target (it refuses a segment size on one), so this step names NO
       # TM_POS_TEST_DATABASE_URL or KIND: the suite starts its own two socket-only, crash-durable clusters in a temp directory
-      # and removes them, and the job's service above is not used. It runs the PostgreSQL 16 binaries ubuntu-24.04 carries
+      # and removes them, and the job's service above is not used. After the primitive cases it applies migrations 001-037 to both
+      # clusters with the trusted executor, lands 037's REAL register commit on page and segment boundaries under the real proof
+      # routine, and crash-restarts each cluster (pg_ctl -m immediate, same data directory) right after a proof is issued: process-
+      # crash evidence for D-R4-1, the redo pass covering the registration's COMMIT, the registration present afterwards and
+      # the pre-crash proof recording exactly one payment. A
+      # power loss is not exercised; that rests on fsync on and PostgreSQL's flush contract. It runs the PostgreSQL 16 binaries
+      # ubuntu-24.04 carries
       # (initdb, pg_ctl and the postgres server it starts, createdb, psql, pg_isready, and the pg_walinspect extension), put first
       # on PATH for this step only; the step FAILS, never skips, when any of them is missing or is not 16.x, or when the
       # pg_walinspect control or library file is absent. Synthetic data only. No new service, no secret, no permission change.

@@ -16,7 +16,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, appendFileSync, existsSync, realpathSync, lstatSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, appendFileSync, existsSync, realpathSync, lstatSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join, posix } from 'node:path';
 import postgres from 'postgres';
@@ -111,6 +111,37 @@ export function startDisposablePostgres({ durable = false, walSegmentMb } = {}) 
     return { ...lifecycle };
   }
 
+  /**
+   * An abrupt crash of this cluster, then a restart of the SAME data directory (M7B-PAYMENTS-P2 PRQ-1, D-R4-1):
+   * `pg_ctl stop -m immediate` (no shutdown checkpoint, no clean shutdown, nothing written beyond what already was), then
+   * a normal start on the same data directory and log, which runs crash recovery from WAL before it accepts a connection.
+   * Answers `{ log }`: the server-log text written from just before the stop through the restart (its recovery lines), for
+   * the caller to parse; the harness never prints it. A failure throws a fixed message; stop() still tries to stop the
+   * cluster and removes its directory.
+   * Async only to yield before it answers: pg_ctl runs synchronously, so a client in this process has not yet seen its
+   * connections closed by the crash, and a query sent at once would be written to a dead socket (EPIPE).
+   */
+  async function crashRestart() {
+    if (!lifecycle.started || lifecycle.stopped) throw new Error('crashRestart: the cluster is not running');
+    const from = existsSync(logFile) ? statSync(logFile).size : 0;
+    try {
+      run('pg_ctl', ['--pgdata', dataDir, '--timeout', '60', '-w', '-m', 'immediate', 'stop'], env);
+    } catch {
+      throw new Error('crashRestart: the immediate stop failed');
+    }
+    try {
+      run('pg_ctl', ['--pgdata', dataDir, '--log', logFile, '--timeout', '120', '-w', 'start'], env);
+      run('pg_isready', ['-h', sockDir, '-U', BOOTSTRAP_ROLE, '-d', database, '-t', '30'], env);
+    } catch {
+      // Marked stopped only once a stop succeeded: a postmaster still starting must not have its directory removed under it.
+      try { run('pg_ctl', ['--pgdata', dataDir, '--timeout', '30', '-w', '-m', 'immediate', 'stop'], env); lifecycle.stopped = true; } catch { /* stop() retries */ }
+      throw new Error('crashRestart: the cluster did not come back after the immediate stop');
+    }
+    const log = readFileSync(logFile).subarray(from).toString('utf8');
+    await new Promise((resolve) => setTimeout(resolve, 250)); // let every client here process its closed connections
+    return { log };
+  }
+
   try {
     // A synthetic, throwaway bootstrap password. It never reaches a DSN (socket + local trust
     // auth) and it dies with the directory.
@@ -134,7 +165,8 @@ export function startDisposablePostgres({ durable = false, walSegmentMb } = {}) 
       "listen_addresses = ''",
       `unix_socket_directories = '${sockDir}'`,
       ...(durable
-        ? ['fsync = on', 'full_page_writes = on', 'synchronous_commit = on']
+        // lc_messages C: the server log a crash-recovery check parses is English whatever the machine's locale.
+        ? ['fsync = on', 'full_page_writes = on', 'synchronous_commit = on', "lc_messages = 'C'"]
         : ['fsync = off', 'full_page_writes = off', 'synchronous_commit = off']),
       'max_connections = 20',
       '',
@@ -162,6 +194,7 @@ export function startDisposablePostgres({ durable = false, walSegmentMb } = {}) 
     database,
     root,
     stop,
+    crashRestart,
     lifecycle: () => ({ ...lifecycle }),
   };
 }
