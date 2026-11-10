@@ -1122,6 +1122,29 @@ async function withSessionTableQuiet(fn) {
   }
 }
 
+/** Signs `who` in with its session row on a page that padSessionPage can bring to one version above the prune threshold. On a
+ * shared database earlier suites' session rows can leave the free-space map pointing the login's insert at a page already below
+ * that threshold, which no padding can raise. For that one insert the table's fillfactor is 10, so the insert accepts only a page
+ * at least 90% free (an empty or a new one); the reloptions are restored exactly, and the row's page is read back. */
+async function signInWithPageRoom(ctx, who) {
+  const [{ opts, ff }] = await owner`select c.reloptions::text as opts,
+      (select pg_catalog.split_part(o, '=', 2) from pg_catalog.unnest(c.reloptions) o where o like 'fillfactor=%') as ff
+    from pg_catalog.pg_class c where c.oid = 'tmpos_session.session'::regclass`;
+  const restore = ff === null ? 'reset (fillfactor)' : `set (fillfactor = ${Number(ff)})`; // ONE statement: no partial restore
+  let s;
+  try {
+    await owner.unsafe('alter table tmpos_session.session set (fillfactor = 10)');
+    s = await signIn(ctx, who);
+  } finally {
+    await owner.unsafe(`alter table tmpos_session.session ${restore}`);
+    const [{ after }] = await owner`select c.reloptions::text as after from pg_catalog.pg_class c where c.oid = 'tmpos_session.session'::regclass`;
+    assert.equal(after, opts, 'the session table\'s reloptions restored after the sign-in');
+  }
+  const page = await sessionPageOf(s.key);
+  assert.ok(page.free - page.next >= page.minfree, `the session row's page has room to pad: ${JSON.stringify(page)}`);
+  return s;
+}
+
 /** The bgwriter logs a standby snapshot (and requests its flush) at most every 15 s; seeing one opens a window in which no
  * background flush request moves the flush position, so only the cases' own commits do. A case reuses a window seen less than
  * 9 s ago (its GET then ends well inside it); otherwise it waits for the next snapshot, waking a hibernating bgwriter by
@@ -1251,6 +1274,11 @@ async function observedProof(ctx, s, w, invoice, registration, during = () => {}
     const [{ validated }] = await owner`select x.validated_at::text as validated from tmpos_session.session x where x.session_key = ${s.key}`
       .catch((e) => { throw sealDbError('IRH the session stamp', e); });
     await beforeLock();
+    // The row's actual page before the timed GET (read before the WAL position is aligned, so the read cannot use up that
+    // window): still the padded block, still one version above the prune threshold.
+    const ready = await sessionPageOf(s.key);
+    assert.ok(ready.blk === page.blk && ready.free >= ready.minfree && ready.free - ready.next < ready.minfree,
+      `the padded page holds before the GET: ${JSON.stringify({ padded: page, ready })}`);
     const aligned = await alignInsertPosition();
     let locked;
     const isLocked = new Promise((resolve) => { locked = resolve; });
@@ -1352,7 +1380,7 @@ test('IRH-10: SELF-PRUNE — a session touch landing between the GET\'s session 
   await installProbes();
   await withEntry(async (ctx) => {
     const w = await world(ctx, 'irh10');
-    const s = await signIn(ctx, w.mgr);
+    const s = await signInWithPageRoom(ctx, w.mgr);
     const invoice = await issueOne(ctx, s, w, 'irh10');
     const attempt = randomUUID();
     const registration = registeredOf(await ctx.register(s, w, invoice, { expectedTenant: w.T, attemptId: attempt }), invoice, attempt, 'irh10: register');
@@ -1386,7 +1414,7 @@ test('IRH-11: SELF-PRUNE, TARGET UNFLUSHED — the same prune, then an unrelated
   await installProbes();
   await withEntry(async (ctx) => {
     const w = await world(ctx, 'irh11');
-    const s = await signIn(ctx, w.mgr);
+    const s = await signInWithPageRoom(ctx, w.mgr);
     const invoice = await issueOne(ctx, s, w, 'irh11');
     const attempt = randomUUID();
     const registration = registeredOf(await ctx.register(s, w, invoice, { expectedTenant: w.T, attemptId: attempt }), invoice, attempt, 'irh11: register');
@@ -1457,7 +1485,7 @@ test('IRH-12: REVALIDATION — the session is revoked (committed asynchronously,
   await installProbes();
   await withEntry(async (ctx) => {
     const w = await world(ctx, 'irh12');
-    const s = await signIn(ctx, w.mgr);
+    const s = await signInWithPageRoom(ctx, w.mgr);
     const invoice = await issueOne(ctx, s, w, 'irh12');
     const attempt = randomUUID();
     const registration = registeredOf(await ctx.register(s, w, invoice, { expectedTenant: w.T, attemptId: attempt }), invoice, attempt, 'irh12: register');
