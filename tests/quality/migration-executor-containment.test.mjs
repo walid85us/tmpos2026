@@ -678,6 +678,10 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // the harness's DURABLE disposable cluster through the SAME trusted executor and assertDisposableTestDsn, then drives the
     // composed tenant entry. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
     'tests/db/invoicePaymentRegistrationHttp.integration.test.mjs',
+    // M7B-PAYMENTS-P2 PRQ-1: the payment proof durability suite stands up every migration in the directory (037 included) on
+    // the two DURABLE disposable clusters it starts itself, then crash-restarts them, through the SAME trusted executor and
+    // assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    'tests/db/paymentProofDurability.integration.test.mjs',
     // C2B-M005-P2-B0: the fixed READ-ONLY comprehensive migration-005 preflight child. It imports
     // the executor for the SAME reason the default-ACL diagnostic does — the sealed managed target,
     // the bounded catalog port and the accepted pure classifiers — rather than opening a second
