@@ -185,10 +185,30 @@ export function localPostgresAvailable() {
  * The suites run one at a time on the shared CI service, so each installs its own at setup and none contends for the
  * singleton. Answers the key, for the session store's `issuerKey`.
  */
-export async function installTestIssuerKey(owner, issuerKey = randomBytes(32)) {
-  await owner`insert into tmpos_mint.issuer_key (singleton, key) values (true, ${issuerKey})
-    on conflict (singleton) do update set key = excluded.key`;
+export async function installTestIssuerKey(owner, issuerKey) {
+  try {
+    if (issuerKey === undefined) issuerKey = randomBytes(32); // a default parameter, but inside the seal
+    await owner`insert into tmpos_mint.issuer_key (singleton, key) values (true, ${issuerKey})
+      on conflict (singleton) do update set key = excluded.key`;
+  } catch (e) {
+    throw sealedInstallError('installTestIssuerKey', e);
+  }
   return issuerKey;
+}
+
+/**
+ * A key install's failure, sealed for every caller: a fixed operation label and a validated SQLSTATE (also kept as `code`
+ * so a caller can still branch on it), or a fixed fallback. The raw error never leaves: its message, detail, hint, where,
+ * query, bound parameters and cause can all carry the key bytes (a failing row is echoed in `detail`), and node:test prints
+ * every one of them for an uncaught rejection.
+ */
+function sealedInstallError(label, e) {
+  let raw;
+  try { raw = e?.code; } catch { raw = undefined; } // read once: a getter cannot pass the check and then answer other text
+  const code = typeof raw === 'string' && /^[0-9A-Z]{5}$/.test(raw) && /\d/.test(raw) ? raw : null;
+  const sealed = new Error(code === null ? `${label} failed (no SQLSTATE)` : `${label} failed: SQLSTATE ${code}`);
+  if (code !== null) sealed.code = code;
+  return sealed;
 }
 
 /**
@@ -197,12 +217,17 @@ export async function installTestIssuerKey(owner, issuerKey = randomBytes(32)) {
  * generation (037's install trigger refuses any other). The tenant entry refuses to start without one, so every suite
  * that starts it installs one at setup. A database below 037 has no such table and nothing to install: answers false.
  */
-export async function installTestPaymentProofKey(owner, key = randomBytes(32)) {
-  const [{ present }] = await owner`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`;
-  if (!present) return false;
-  const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
-  await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${key}, ${g}::bigint)
-    on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+export async function installTestPaymentProofKey(owner, key) {
+  try {
+    if (key === undefined) key = randomBytes(32); // a default parameter, but inside the seal
+    const [{ present }] = await owner`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`;
+    if (!present) return false;
+    const [{ g }] = await owner`select (coalesce(pg_catalog.max(generation), 0) + 1)::text as g from tmpos_invoice_payment.payment_proof_key_generation`;
+    await owner`insert into tmpos_invoice_payment.payment_proof_key (singleton, key, generation) values (true, ${key}, ${g}::bigint)
+      on conflict (singleton) do update set key = excluded.key, generation = excluded.generation`;
+  } catch (e) {
+    throw sealedInstallError('installTestPaymentProofKey', e);
+  }
   return true;
 }
 
