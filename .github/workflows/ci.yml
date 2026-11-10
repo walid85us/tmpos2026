@@ -97,6 +97,21 @@ jobs:
       # has fallen back. No database service is used. The fast half runs in `npm run test:existing` above.
       - name: Database tests never fall back to an ambient database (M7A-DBTEST-ISOLATION-P0)
         run: node_modules/.bin/tsx --test tests/quality/db-test-ambient-fallback.suites.mjs
+      # M7B-PAYMENTS-P2 (PRQ-1) — the disposable service's own log, which the runner prints at "Stop containers", carries no
+      # DETAIL line. Two suites put synthetic keys into it as DETAIL: the tenant entry suite's negative startup tests turn
+      # statement logging on for its runtime login (each bound parameter followed as "DETAIL: parameters"), and the session
+      # mint suite's check-constraint refusals printed the failing row. log_error_verbosity = terse drops DETAIL, HINT, CONTEXT
+      # and QUERY from the SERVER log only: every ERROR, STATEMENT and LOG line stays, clients still receive the full error,
+      # and the startup preflight's parameter-logging judgment does not read this setting. Set before the first suite; fails closed.
+      - name: Disposable service log carries no row or parameter values (M7B-PAYMENTS-P2)
+        env:
+          SERVICE_CONTAINER: ${{ job.services.tmpos_s1b_postgres.id }}
+        run: |
+          q() { docker exec "$SERVICE_CONTAINER" psql -X -At -v ON_ERROR_STOP=1 -U tmpos_s1b_owner -d tmpos_s1b_ci -c "$1"; }
+          q "alter system set log_error_verbosity = 'terse'"
+          q "select pg_catalog.pg_reload_conf()"
+          for i in $(seq 1 50); do [ "$(q 'show log_error_verbosity')" = terse ] && exit 0; sleep 0.2; done
+          echo "::error::the disposable service did not apply log_error_verbosity = terse"; exit 1
       # Phase 4.0 M3 S1b — the trusted executor against the disposable service above. Proves
       # session-scoped advisory locking, stable backend identity across per-file commits, durable
       # dirty markers, and idempotent reruns against REAL PostgreSQL. Bound exclusively through
