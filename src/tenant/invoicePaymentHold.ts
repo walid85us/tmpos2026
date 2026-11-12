@@ -29,7 +29,7 @@ export type PaymentStage = 'register' | 'proof' | 'record' | 'settle';
 export type PaymentState = 'sending' | 'checking' | 'unresolved' | 'recorded' | 'lookup' | 'done';
 /** What the attempt says now (the section words it): '' for nothing beyond its state. */
 export type PaymentSay =
-  | '' | 'uncertain' | 'inProgress' | 'rateLimited' | 'detached' | 'record404' | 'writeConflict' | 'amountExceeds' | 'invalidState'
+  | '' | 'uncertain' | 'inProgress' | 'rateLimited' | 'detached' | 'record404' | 'writeConflict' | 'amountExceeds' | 'invalidState' | 'invalidStateLookup'
   | 'denied' | 'signedOut' | 'notAccepted' | 'confirmed' | 'withdrawn';
 
 export interface HeldPayment {
@@ -50,6 +50,8 @@ export interface HeldPayment {
   /** A monotonic and a wall-clock reading at the stage's FIRST send: Check again never moves them. */
   readonly sentAt: number;
   readonly sentWall: number;
+  /** A monotonic reading at the stage's LATEST send (its first send or a Check again): how long its last request may still run. */
+  readonly lastSentAt: number;
   readonly registrationId: string | null;
   /** The registration proof: memory only, never shown, logged or put into text; null once the record is decided. */
   readonly proof: string | null;
@@ -79,10 +81,17 @@ export const isOpenPayment = (held: HeldPayment | undefined): held is HeldPaymen
 
 /**
  * Blocking (R2 N1): undecided AND still sendable or out here — attached, and out, recorded (Confirm waits) or holding bytes.
- * A detached or byte-less one is still shown on its invoice but blocks nothing: the server's per-invoice slot decides.
+ * It holds every invoice of its store back (busy); one detached or byte-less is still never replaced (isPaymentHeldElsewhere).
  */
 export const isBlockingPayment = (held: HeldPayment | undefined): held is HeldPayment => held !== undefined && held.state !== 'done' && held.csrf !== null
   && (held.state === 'sending' || held.state === 'checking' || held.state === 'recorded' || held.body !== '');
+/**
+ * Held elsewhere (G3, R5): undecided at ANY stage, attached or not, and for another store or invoice — finished there first.
+ * An open register-stage attempt's outcome is unknown too (a definite answer makes it done), so a press or a row's settlement
+ * elsewhere never replaces it; on its own invoice Find decides it, by its row or by its absence (R3 L-M1, R4).
+ */
+export const isPaymentHeldElsewhere = (held: HeldPayment | undefined, storeId: string, invoiceId: string): boolean =>
+  isOpenPayment(held) && (held.storeId !== storeId || held.invoiceId !== invoiceId);
 /** What never changes after `put` (the token only through detach). */
 const FIXED: ReadonlySet<string> = new Set(['key', 'storeId', 'tenantId', 'invoiceId', 'number', 'amountCents', 'csrf']);
 
@@ -185,14 +194,17 @@ function unresolvedOf(answer: StageAnswer): PaymentVerdict {
 
 /**
  * One stage's answer. `first`: that stage's first send (else a Check again). Only a register's first send can be refused
- * for good before anything was written (400/401/403/413/415, a 404 or nothing sent); everywhere else those leave it
+ * for good before anything was written (400/401/403/413/415, a 404, a 422, the tenant 409 or nothing sent); everywhere else those leave it
  * unresolved. A record 404 never leads to a fresh key or a resend: the lookup decides it.
  */
 export function judgePayment(stage: PaymentStage, answer: StageAnswer, first: boolean): PaymentVerdict {
   const k = answer.kind;
-  if (k === 'tenant-conflict') return { kind: 'lookup', say: 'detached', reread: false };
-  // A 422 means these bytes can never be sent under that key again: Check again would only loop (R1 S6).
-  if (k === 'key-reused') return { kind: 'lookup', say: 'detached', reread: false };
+  // The unsealed tenant 409 and the 422 (idempotency_key_reused) are decided before anything is written, and a register's
+  // first send has a fresh key: nothing was registered (G2). Anywhere else an earlier send under that key may have been, and
+  // these bytes can never be sent under that key again: Check again would only loop (R1 S6).
+  if (k === 'tenant-conflict' || k === 'key-reused') {
+    return stage === 'register' && first ? { kind: 'final', say: 'notAccepted', reread: false } : { kind: 'lookup', say: 'detached', reread: false };
+  }
   switch (stage) {
     case 'register':
       if (answer.kind === 'registered') return { kind: 'registered', registrationId: answer.registrationId };
@@ -210,14 +222,14 @@ export function judgePayment(stage: PaymentStage, answer: StageAnswer, first: bo
     case 'record':
       if (answer.kind === 'recorded') return { kind: 'recorded', payment: answer.payment };
       if (k === 'already-recorded') return { kind: 'recorded', payment: null };
-      if (k === 'invalid-state') return { kind: 'lookup', say: 'invalidState', reread: true };
+      if (k === 'invalid-state') return { kind: 'lookup', say: 'invalidStateLookup', reread: true };
       if (k === 'amount-exceeds') return { kind: 'lookup', say: 'amountExceeds', reread: true };
       if (k === 'write-conflict') return { kind: 'lookup', say: 'detached', reread: false }; // sealed, unreachable here: never looped (R1 S6)
       if (k === 'unmatched') return { kind: 'lookup', say: 'record404', reread: false }; // never a resend or a fresh key
       return unresolvedOf(answer);
     case 'settle':
       if (answer.kind === 'settled') return { kind: 'settled', state: answer.state };
-      if (k === 'write-conflict' || k === 'not-found') return { kind: 'lookup', say: '', reread: false };
+      if (k === 'write-conflict' || k === 'not-found') return { kind: 'lookup', say: 'detached', reread: false };
       return unresolvedOf(answer);
   }
 }

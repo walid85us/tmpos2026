@@ -95,7 +95,7 @@ import { pickerWaitText } from './ServerCustomerPicker';
 import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, RecordId, recordIdText, storeLabel } from './ServerInvoiceDrafts';
 import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import {
-  isBlockingPayment, judgePayment, paymentExpired, paymentHolds as shopPaymentHolds, type HeldPayment, type PaymentHoldStore, type PaymentSay,
+  isBlockingPayment, isOpenPayment, isPaymentHeldElsewhere, judgePayment, paymentExpired, paymentHolds as shopPaymentHolds, type HeldPayment, type PaymentHoldStore, type PaymentSay,
 } from './invoicePaymentHold';
 
 const DEFAULT_WAIT_SECONDS = 60;
@@ -103,6 +103,13 @@ const DEFAULT_WAIT_SECONDS = 60;
 const IN_PROGRESS_WAIT_MS = 5_000;
 /** The attempts lookup reads at most this many pages (50 each) from the start (G2). */
 const LOOKUP_PAGE_CAP = 20;
+/**
+ * How long after a register's LAST send a lookup's absence may decide it (R4): far past the server's 2 s command transaction
+ * deadline (server/runtime/commandTransaction.ts COMMAND_TRANSACTION_DEADLINE_MS) and this client's 15 s request timeout
+ * (REQUEST_TIMEOUT_MS), so by then the register's work has ended, committed or rolled back. It equals the server's 60 s
+ * idempotency lease (IDEMPOTENCY_POLICY.leaseMs), which by itself ends no transaction.
+ */
+const REGISTER_QUIET_MS = 60_000;
 /**
  * How long the void's explicit sign-in is waited for (M7B-INVOICES-VOID-P2-R1), from the press of Confirm sign-in — never
  * while typing — over the provider's leg, the session's and the hand-back to the dialog. After it this page stops waiting:
@@ -197,10 +204,12 @@ export const RECORD_TEXT = Object.freeze({
   find: 'Find this payment attempt',
   inProgress: VOID_NOTE_TEXT.inProgress,
   detached: "This payment attempt can't be checked from here any more. Find it to finish it.",
-  record404: "The server couldn't find this invoice for the payment. No new payment will be sent. Find this payment attempt to finish it.",
+  record404: "This payment couldn't be finished from here. It may or may not have been recorded. No new payment will be sent. Find this payment attempt to finish it.",
   writeConflict: 'You have an unfinished payment attempt on this invoice. Finish it before recording another payment.',
   amountExceeds: 'No payment was recorded: the amount is more than the remaining balance. Withdraw the attempt, then record the correct amount.',
   invalidState: "No payment was recorded: this invoice can't take this payment now.",
+  /** The record's invalid_state: its registration still holds the invoice until the lookup settles it. */
+  invalidStateLookup: "No payment was recorded: this invoice can't take this payment now. Find this payment attempt to finish it.",
   denied: 'You cannot record payments for this invoice at this store.',
   notAccepted: 'No payment was recorded: the server did not accept this request.',
   lookingUp: 'Checking your payment attempts…',
@@ -209,6 +218,8 @@ export const RECORD_TEXT = Object.freeze({
   withdraw: 'Withdraw attempt',
   none: 'You have no unfinished payment attempts on this invoice.',
   failed: 'Your payment attempts could not be loaded.',
+  /** R4: a complete read without the held register-stage attempt within REGISTER_QUIET_MS of its last send decides nothing. */
+  stillRegistering: 'This payment attempt may still be in progress. Try again in a minute.',
   tryAgain: 'Try again',
   cap: 'There are too many payment attempts to check here.',
   withdrawn: 'Attempt withdrawn. No payment was recorded.',
@@ -216,6 +227,8 @@ export const RECORD_TEXT = Object.freeze({
   notSent: 'Nothing was sent. Check the details and press Record again.',
   /** R1 S3: a row action held back while another attempt is undecided. */
   finishFirst: 'Finish the payment attempt above first.',
+  /** G3: an undecided attempt held for another invoice; its store named when it is another store's (R3 M2). */
+  finishOn: (n: number, store: string | null) => `Finish your payment attempt on invoice ${n}${store === null ? '' : ` at ${store}`} first.`,
 });
 
 export const SETTINGS_TEXT = Object.freeze({
@@ -787,6 +800,7 @@ function IssuedSection({
       if (h === undefined || h.key !== attemptId || h.csrf === null || h.body === '') return;
       const csrf = h.csrf;
       const since = sessionEndsSoFar();
+      payHolds.change(uid, attemptId, { lastSentAt: clock() }); // R4: the stage's LATEST send, for runLookup's quiet window
       const answer = await sendStage(h, csrf);
       const now = payHolds.get(uid);
       if (now === undefined || now.key !== attemptId) return;
@@ -842,8 +856,19 @@ function IssuedSection({
   async function recordPayment(viewId: number, store: StoreEntry, press: PaymentPress): Promise<string | null> {
     if (paying.current) return SETTINGS_TEXT.busy;
     if (waitRef.current) return pickerWaitText(waitLeft());
-    const open = payHolds.get(uid);
-    if (isBlockingPayment(open) && open.storeId === store.id) return SETTINGS_TEXT.busy;
+    // Before anything is minted, and again after the session check (R3 S-3): an undecided attempt elsewhere, at any stage, is
+    // finished there, never replaced from here, and named even while it still blocks this store (G3, R5); an undecided one on
+    // this invoice is decided only by the lookup and a settlement (G1, G1b, R3 S-1); an unsettled attempt the lookup lists on
+    // this invoice holds its slot, so a new press would only be refused again (R5 B).
+    const gate = (h: HeldPayment | undefined): string | null => {
+      if (lookupListsUnsettled(lookupRef.current, store.id, press.invoiceId)) return RECORD_TEXT.writeConflict;
+      if (h === undefined || !isOpenPayment(h)) return null;
+      if (isPaymentHeldElsewhere(h, store.id, press.invoiceId)) return finishOnText(h, store.id);
+      if (isBlockingPayment(h) && h.storeId === store.id) return SETTINGS_TEXT.busy;
+      return h.storeId === store.id && h.invoiceId === press.invoiceId ? RECORD_TEXT.writeConflict : null;
+    };
+    const shut = gate(payHolds.get(uid));
+    if (shut !== null) return shut;
     setPaying(true);
     try {
       const mine = gen.current.n;
@@ -853,18 +878,20 @@ function IssuedSection({
       const csrf = await payConnect(stands);
       if (csrf === null) return !stands() ? RECORD_TEXT.notSent : waitRef.current ? pickerWaitText(waitLeft()) : ISSUED_TEXT.unavailable; // nothing sent: said
       if (adopt(csrf) || !stands()) return RECORD_TEXT.notSent;
+      const shutNow = gate(payHolds.get(uid));
+      if (shutNow !== null) return shutNow;
       const attemptId = nextKey();
       const stageKey = nextKey();
       const body = registerBodyOf(store.tenantId, attemptId);
       if (body === null) return RECORD_TEXT.notAccepted;
       const held: HeldPayment = {
         key: attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: press.invoiceId, number: press.number, csrf, stage: 'register', stageKey, body,
-        sentAt: clock(), sentWall: wall(), registrationId: null, proof: null, amountCents: press.amountCents, method: press.method, payment: null, settleVersion: null,
+        sentAt: clock(), sentWall: wall(), lastSentAt: clock(), registrationId: null, proof: null, amountCents: press.amountCents, method: press.method, payment: null, settleVersion: null,
         state: 'sending', say: '', retryAfter: 0, rereads: 0,
       };
       const was = payHolds.get(uid);
       const wasKey = was?.key;
-      if (wasKey !== undefined && !isBlockingPayment(was)) payHolds.remove(uid, wasKey); // unsendable: it blocks nothing (R2 N1)
+      if (wasKey !== undefined && !isOpenPayment(was)) payHolds.remove(uid, wasKey); // a decided one only: the gate refuses every open one (R5)
       if (!payHolds.put(uid, held)) return SETTINGS_TEXT.busy;
       dropLookup();
       try { await runStage(attemptId, true); } finally { unstick(attemptId); }
@@ -873,6 +900,14 @@ function IssuedSection({
       setPaying(false);
     }
   }
+
+  /** A store's label for the text (R3 M2); one no longer listed is "another store". */
+  function storeNameOf(id: string): string {
+    const entry = storesRef.current.stores.find((s) => s.id === id);
+    return entry === undefined ? 'another store' : storeLabel(entry);
+  }
+  /** "Finish your payment attempt on invoice N first." — its store named when it is not `here`. */
+  const finishOnText = (h: HeldPayment, here: string): string => RECORD_TEXT.finishOn(h.number, h.storeId === here ? null : storeNameOf(h.storeId));
 
   /** Whether the held attempt may be sent here now: same token (session generation), the same store chosen with its tenant, within 23 h. */
   function paySendable(h: HeldPayment): boolean {
@@ -939,7 +974,7 @@ function IssuedSection({
     if (store === undefined) return;
     const cur = payHolds.get(uid);
     if (cur !== undefined && (cur.state === 'sending' || cur.state === 'checking')) return;
-    if (rowHeldBack(cur, row)) return; // R1 S3/S4: another undecided attempt is never dropped; a sendable settle only by Check again
+    if (rowHeldBack(cur, row) || isPaymentHeldElsewhere(cur, l.storeId, row.invoiceId)) return; // R1 S3/S4, G3: another undecided attempt is never dropped; a sendable settle only by Check again
     setPaying(true);
     // R3-4: a lookup answer still out is dropped before the await; the rows shown stay (R2 R5).
     lookupSeq.current += 1;
@@ -953,11 +988,11 @@ function IssuedSection({
       const body = settleBodyOf(store.tenantId, row.attemptId, version);
       if (body === null) return;
       const was = payHolds.get(uid);
-      if (rowHeldBack(was, row)) return;
+      if (rowHeldBack(was, row) || isPaymentHeldElsewhere(was, store.id, row.invoiceId)) return;
       if (was !== undefined) payHolds.remove(uid, was.key);
       const held: HeldPayment = {
         key: row.attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: row.invoiceId, number: row.invoiceNumber, csrf, stage: 'settle', stageKey: nextKey(), body,
-        sentAt: clock(), sentWall: wall(), registrationId: null, proof: null, amountCents: row.payment?.amountCents ?? was?.amountCents ?? 0,
+        sentAt: clock(), sentWall: wall(), lastSentAt: clock(), registrationId: null, proof: null, amountCents: row.payment?.amountCents ?? was?.amountCents ?? 0,
         method: row.payment?.method ?? null, payment: row.payment === null ? null : { id: row.payment.id, amountCents: row.payment.amountCents, method: row.payment.method },
         settleVersion: version, state: 'sending', say: '', retryAfter: 0, rereads: was?.key === row.attemptId ? was.rereads : 0,
       };
@@ -974,9 +1009,13 @@ function IssuedSection({
   /**
    * "Find this payment attempt" (spec §6, G2): this user's attempts at the store, paged from the start to the end (at most
    * LOOKUP_PAGE_CAP pages), kept for THIS invoice in state open or recorded. A withdrawn or confirmed row for the held
-   * attempt decides it; its absence never does. Only for the open dialog's invoice; a later lookup or a close drops it.
+   * attempt decides it at any time; its absence from a COMPLETE read decides it too, except for a register-stage attempt
+   * whose last send is under REGISTER_QUIET_MS before the read started (R4): that register may still be committing, so
+   * the hold stays undecided and the lookup fails with Try again. Only for the open dialog's invoice; a later lookup or a
+   * close drops it.
    */
   async function runLookup(storeId: string, invoiceId: string): Promise<void> {
+    const startedAt = clock(); // before the session check: an earlier start only widens the quiet window (R4)
     const v = viewRef.current;
     if (v === null || v.storeId !== storeId || v.invoiceId !== invoiceId || storeRef.current !== storeId) return;
     const n = ++lookupSeq.current;
@@ -1022,6 +1061,14 @@ function IssuedSection({
       const row = rows.find((r) => r.attemptId === h.key);
       if (row?.state === 'withdrawn') payHolds.change(uid, h.key, { state: 'done', say: 'withdrawn', body: '', proof: null });
       if (row?.state === 'confirmed') payHolds.change(uid, h.key, { state: 'done', say: 'confirmed', body: '', proof: null, rereads: h.rereads + 1 });
+      // R3 L-M1: a COMPLETE read lists every unsettled registration of this caller at the store whatever its age (037), so no
+      // row of it means it never registered or was settled over 24 h ago: decided, nothing sent. A capped, failed or dropped
+      // read (returned above) never decides it. R4 (R3-1): nor does one started within REGISTER_QUIET_MS of a register-stage
+      // attempt's last send — that register may still be committing (its row not yet visible, or behind the keyset already read).
+      if (row === undefined && !capped && h.state !== 'sending' && h.state !== 'checking') {
+        if (h.stage === 'register' && startedAt - h.lastSentAt < REGISTER_QUIET_MS) return putLookup({ ...base, phase: 'failed', text: RECORD_TEXT.stillRegistering });
+        payHolds.change(uid, h.key, { state: 'done', say: '', body: '', proof: null, rereads: h.rereads + 1 });
+      }
     }
     const unsettled = rows.filter((r) => r.state === 'open' || r.state === 'recorded');
     putLookup({ ...base, rows: unsettled, phase: capped ? 'cap' : 'ready', text: capped ? RECORD_TEXT.cap : unsettled.length === 0 ? RECORD_TEXT.none : '' });
@@ -2101,6 +2148,7 @@ function IssuedSection({
   /** The Issued section's payment recording for the dialog it opened (M7B-PAYMENTS-P2B; never the drafts card's). */
   const recordingOf = (v: ViewOpen, store: StoreEntry): PaymentRecording => ({
     held: payHeld,
+    heldStore: payHeld === undefined || payHeld.storeId === v.storeId ? null : storeNameOf(payHeld.storeId),
     expired: payHeld !== undefined && payHeld.body !== '' && paymentExpired(payHeld, clock(), wall()),
     cooling: payCool,
     out: payOut,
@@ -2349,6 +2397,8 @@ export interface PaymentPress { readonly invoiceId: string; readonly number: num
 export interface PaymentRecording {
   /** The user's payment attempt now (the section's hold), whatever invoice it is for. */
   readonly held: HeldPayment | undefined;
+  /** Its store's label when it is not this dialog's store (R3 M2), else null. */
+  readonly heldStore: string | null;
   /** Whether that attempt's stage is past its 23-hour cutoff. */
   readonly expired: boolean;
   /** Check again waits a moment after an in-progress answer. */
@@ -3061,7 +3111,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
         )}
         {payments !== undefined && invoice !== null && (
           // Read-only (M7B-PAYMENTS-P2A): the server's amounts and word over the whole history — never a sum made here — and
-          // the pages read so far, oldest first. Amounts never break; text wraps (320 px).
+          // the pages read so far, oldest first. Summary amounts wrap only when they cannot fit; text wraps (320 px).
           <section aria-labelledby="issued-payments-title" data-testid="issued-payments" className="space-y-3">
             <h3 ref={payHeading} id="issued-payments-title" tabIndex={-1} className="text-base font-black text-primary">{PAYMENTS_TEXT.title}</h3>
             {pay.page !== null && (
@@ -3070,11 +3120,11 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
                 <dt className={labelClass}>Payment status</dt>
                 <dd data-testid="issued-payments-status" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_PAYMENT_STATUSES[pay.page.paymentStatus]}</dd>
                 <dt className={labelClass}>Amount due</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-due" className="whitespace-nowrap">{formatCents(pay.page.amounts.dueCents)}</span></dd>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-due" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.dueCents)}</span></dd>
                 <dt className={labelClass}>Recorded</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-recorded" className="whitespace-nowrap">{formatCents(pay.page.amounts.appliedCents)}</span></dd>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-recorded" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.appliedCents)}</span></dd>
                 <dt className={labelClass}>Remaining</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-remaining" className="whitespace-nowrap">{formatCents(pay.page.amounts.remainingCents)}</span></dd>
+                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-remaining" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.remainingCents)}</span></dd>
               </dl>
             )}
             <p data-testid="issued-payments-note" className={hintClass}>{PAYMENTS_TEXT.note}</p>
@@ -3145,13 +3195,18 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   );
 }
 
+/** R5 B: the lookup of this store's invoice lists an unsettled attempt, which holds the invoice's slot: no new Record until it is settled. */
+export function lookupListsUnsettled(lookup: PaymentLookup | null, storeId: string, invoiceId: string): boolean {
+  return lookup !== null && lookup.storeId === storeId && lookup.invoiceId === invoiceId && lookup.rows.some((r) => r.state === 'open' || r.state === 'recorded');
+}
+
 /**
  * Whether a lookup row's action is held back (R1 S3/S4): another attempt of this user is undecided (never dropped for it),
  * or this row's own settlement is held and still sendable (only Check again sends it again, same key and bytes).
  */
 export function rowHeldBack(held: HeldPayment | undefined, row: Pick<PaymentAttempt, 'attemptId'>): boolean {
   if (held === undefined || held.state === 'done') return false;
-  if (held.key !== row.attemptId) return isBlockingPayment(held); // an unsendable one blocks nothing (R2 N1)
+  if (held.key !== row.attemptId) return isBlockingPayment(held); // on its own invoice an unsendable one holds no other row back (R2 N1); elsewhere isPaymentHeldElsewhere does (R5)
   return held.stage === 'settle' && held.csrf !== null && held.body !== '';
 }
 
@@ -3161,7 +3216,7 @@ function paymentFlowText(h: HeldPayment, expired: boolean): string {
   const sayText: Record<Exclude<PaymentSay, ''>, string> = {
     uncertain: RECORD_TEXT.uncertain, inProgress: `${RECORD_TEXT.uncertain} ${RECORD_TEXT.inProgress}`, rateLimited: `${RECORD_TEXT.uncertain} ${pickerWaitText(h.retryAfter)}`,
     detached: RECORD_TEXT.detached, record404: RECORD_TEXT.record404, writeConflict: RECORD_TEXT.writeConflict, amountExceeds: RECORD_TEXT.amountExceeds,
-    invalidState: RECORD_TEXT.invalidState, denied: RECORD_TEXT.denied, signedOut: ISSUED_TEXT.ended, notAccepted: RECORD_TEXT.notAccepted,
+    invalidState: RECORD_TEXT.invalidState, invalidStateLookup: RECORD_TEXT.invalidStateLookup, denied: RECORD_TEXT.denied, signedOut: ISSUED_TEXT.ended, notAccepted: RECORD_TEXT.notAccepted,
     confirmed: RECORD_TEXT.confirmed, withdrawn: RECORD_TEXT.withdrawn,
   };
   switch (h.state) {
@@ -3228,14 +3283,17 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
   const blocked = isBlockingPayment(held) && held.storeId === storeId; // R2 N1
   const deniedHere = mine !== undefined && mine.state === 'done' && mine.say === 'denied';
   const remaining = page !== null && page.invoice.status === 'issued' ? page.amounts.remainingCents : 0;
-  const offered = allowed && remaining > 0 && !blocked && !deniedHere && !pressingShown;
+  const undecided = mine !== undefined && isOpenPayment(mine); // G1b, R3 S-1: only Find and a settlement decide it
+  const elsewhere = isPaymentHeldElsewhere(held, storeId, invoiceId); // G3, R5: any undecided attempt elsewhere is finished on its own invoice first, named here
+  const listed = lookupListsUnsettled(recording.lookup, storeId, invoiceId); // R5 B: a listed unsettled attempt holds this invoice's slot
+  const offered = allowed && remaining > 0 && !blocked && !elsewhere && !undecided && !deniedHere && !listed && !pressingShown;
   const remainingText = formatCents(remaining);
   const busy = mine !== undefined && (mine.state === 'sending' || mine.state === 'checking');
   const attached = mine !== undefined && mine.csrf !== null;
   const checkable = mine !== undefined && mine.state === 'unresolved' && attached && mine.body !== '' && !recording.expired;
   const findable = mine !== undefined && !busy && mine.state !== 'done' && !(mine.state === 'recorded' && attached);
   const lookup = recording.lookup;
-  const flow = pressingShown && mine === undefined ? RECORD_TEXT.recording : notSent !== '' ? notSent : mine === undefined ? '' : paymentFlowText(mine, recording.expired);
+  const flow = pressingShown && mine === undefined ? RECORD_TEXT.recording : notSent !== '' ? notSent : mine === undefined ? (held !== undefined && (elsewhere || blocked) ? RECORD_TEXT.finishOn(held.number, recording.heldStore) : '') : paymentFlowText(mine, recording.expired);
   const press = (el: HTMLElement): void => { pressed.current = el; };
 
   async function submit(): Promise<void> {
@@ -3360,8 +3418,8 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
               const textId = `issued-payments-attempt-text-${index}`;
               const noteId = `issued-payments-attempt-note-${index}`;
               const heldBack = rowHeldBack(held, row);
-              const other = heldBack && held !== undefined && held.key !== row.attemptId; // another attempt is undecided (S3)
-              const off = waiting || busy || heldBack || recording.out; // R2 N2: a chain still out holds the row back, said
+              const other = (heldBack && held !== undefined && held.key !== row.attemptId) || elsewhere; // another attempt is undecided (S3, G3)
+              const off = waiting || busy || heldBack || elsewhere || recording.out; // R2 N2: a chain still out holds the row back, said
               const describedBy = [textId, other ? noteId : '', recording.out ? 'issued-payments-rows-out' : ''].filter((id) => id !== '').join(' ');
               return (
                 <li key={row.attemptId} data-testid="issued-payments-attempt" data-attempt-state={row.state} className={`px-4 py-3 text-sm space-y-2 ${fitsRow}`}>

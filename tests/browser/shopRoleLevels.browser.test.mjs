@@ -555,7 +555,10 @@
 //          open); SIS-26 a double press records one payment, and Confirm pressed while the post-record session check or
 //          payments re-read is out still settles once; SIS-27 a lost record answer, Check again replays the same key and
 //          bytes; SIS-28 a reload after a lost answer: write_conflict, the lookup, Confirm of the lost attempt; SIS-29 a
-//          technician gets the eligibility 403 and no Record payment; SIS-30 the form and its result at 320 px (larger text).
+//          technician gets the eligibility 403 and no Record payment; SIS-30 the form and its result at 320 px (larger text);
+//          SIS-31 a registered-but-unrecorded attempt (the record request lost) is found and withdrawn: no payment; SIS-32 a
+//          committed payment survives a Withdraw (sealed 409) and is confirmed from the lookup; SIS-33 a record 404 offers only
+//          Find this payment attempt (no Record), and the found open attempt is withdrawn.
 //   QA-UI-01-P1 — THE LINE HEADINGS OVER THEIR COLUMNS:
 //   SLH-01 the reopen dialog's and the issued dialog's lines tables, in SIS-22's six cells (1440x900, 768x1024, 320x640,
 //          320x480, 768x1024 and 320x600 at a 24 px default text size): ONE header row of five column headings (scope col,
@@ -1818,7 +1821,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
-  'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30',
+  'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30', 'SIS-31', 'SIS-32', 'SIS-33',
   'SLH-01', 'SLH-02',
 ]);
 const registered = new Set();
@@ -10816,6 +10819,9 @@ const PAY_SAID = Object.freeze({
   confirmed: 'Payment confirmed.',
   uncertain: "We couldn't confirm whether this payment was recorded. Nothing is sent again unless you press Check again.",
   conflict: 'You have an unfinished payment attempt on this invoice. Finish it before recording another payment.',
+  // ServerIssuedInvoices.tsx RECORD_TEXT.record404 / .withdrawn (SIS-33 reads the wording the component has now).
+  record404: "This payment couldn't be finished from here. It may or may not have been recorded. No new payment will be sent. Find this payment attempt to finish it.",
+  withdrawn: 'Attempt withdrawn. No payment was recorded.',
 });
 const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 /** The amount INPUT (P2A's history items carry a span with the same test id). */
@@ -10878,16 +10884,19 @@ async function confirmRecorded(page, label) {
 }
 /** The register/proof/record checks every recorded chain shares: exact bytes, key order, three distinct v4 keys; the proof never printed. */
 function assertChainBytes(tenant, { reg, proof, rec }, { amountCents, method }) {
-  const attemptId = JSON.parse(reg.body).attemptId;
+  const attemptId = jsonOf(reg.body, 'the register body').attemptId;
   assert.ok(V4.test(attemptId), 'the attempt id is a v4 UUID minted by the page');
   assert.ok(reg.body === JSON.stringify({ expectedTenant: tenant, attemptId }), 'the register body, exactly (compared, never printed)');
-  const registrationId = JSON.parse(reg.replied.text).registration.id;
-  assert.equal(proof.query, `?registration=${registrationId}`, 'the proof GET names the registration the entry answered');
+  const registrationId = jsonOf(reg.replied.text, 'the register answer').registration.id;
+  // Never to be seen on a page, in storage or in a message: the ids and the keys of this chain join the leak check.
+  for (const secret of [attemptId, registrationId, reg.headers['idempotency-key'], rec.headers['idempotency-key']]) if (typeof secret === 'string') st.secrets.add(secret);
+  assert.ok(proof.query === `?registration=${registrationId}`, 'the proof GET names the registration the entry answered (compared, never printed)');
   const proofText = proofOf(proof);
-  const body = JSON.parse(rec.body);
+  const body = jsonOf(rec.body, 'the record body');
   assert.deepEqual(Object.keys(body), RECORD_KEYS, 'the record body\'s keys, in the fixed order');
   const { registrationProof, ...rest } = body;
-  assert.deepEqual(rest, { expectedTenant: tenant, registrationId, attemptId, amountCents, method }, 'the record body\'s values');
+  assert.ok(rest.expectedTenant === tenant && rest.registrationId === registrationId && rest.attemptId === attemptId, 'the record body names the tenant, the registration and the attempt the register answered (compared, never printed)');
+  assert.deepEqual([rest.amountCents, rest.method], [amountCents, method], 'the record body\'s amount and method');
   assert.ok(typeof proofText === 'string' && /^[0-9a-f]{64}$/.test(proofText) && registrationProof === proofText, 'the record carries exactly the proof the entry answered (compared, never printed)');
   assert.ok(rec.body === JSON.stringify(body), 'the record bytes are compact JSON in that order (compared, never printed)');
   const keys = [reg, rec].map((r) => r.headers['idempotency-key']);
@@ -10916,7 +10925,7 @@ scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner o
   const section = await paySectionOf(page);
   assert.ok(section.includes(PAY_SAID.recorded('$12.50', 'Cash')), `the recorded result is said: ${section}`);
   assert.equal(await textOf(page, 'issued-payments-remaining'), '$29.50', 'the payments re-read shows $29.50 remaining');
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'ONE payment, its registration recorded (not yet confirmed)');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'recorded' }] }, 'ONE payment, its registration recorded (not yet confirmed)');
 
   const confirmFrom = st.api.length;
   await confirmRecorded(page, 'SIS-25');
@@ -10926,8 +10935,8 @@ scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner o
   assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], 'Confirm is ONE settle, and no extra read');
   assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle body, exactly (version 2: seen recorded; compared, never printed)');
   assert.ok(V4.test(settles[0].headers['idempotency-key']) && ![reg, rec].some((r) => r.headers['idempotency-key'] === settles[0].headers['idempotency-key']), 'a third distinct v4 key');
-  assert.deepEqual(JSON.parse(settles[0].replied.text), { settlement: { invoiceId: id, attemptId, state: 'confirmed' } }, 'the entry confirmed it');
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, its registration confirmed');
+  assertSettlement(settles[0], id, attemptId, 'confirmed'); // the entry confirmed it (ids compared, never printed)
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'ONE payment, its registration confirmed');
   assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'the register, record and settle audits, once each');
   assert.deepEqual([sentBy(page, isIssuedDetailOrList, from), sentBy(page, isVoidRoute, from), sentBy(page, isPaymentEligibilityRead, from)].map((l) => l.map(readLine)), [[], [], []], 'no detail, void or eligibility re-read');
   assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), opened).map((r) => `${r.method} ${r.path.slice(issuedPath(main.id).length)}`),
@@ -10952,7 +10961,7 @@ scenario('SIS-26', 'M7B-PAYMENTS-P2B A DOUBLE PRESS RECORDS ONE PAYMENT — the 
   assert.ok((await paySectionOf(page)).includes(PAY_SAID.recorded('$10.00', 'Card on a separate terminal')), 'the recorded result is said');
   await confirmRecorded(page, 'SIS-26');
   await quiet(page, from);
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1000, method: 'external_card_terminal' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1000, method: 'external_card_terminal' }], registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
   assert.equal(sentBy(page, isPaymentWrite, from).length, 3, 'register, record and settle: three payment POSTs in all');
 
   // A second payment, its Confirm pressed while the record's payments re-read is still out (its answer parked at the front):
@@ -11015,7 +11024,7 @@ scenario('SIS-27', 'M7B-PAYMENTS-P2B A LOST RECORD ANSWER, THEN CHECK AGAIN — 
   const { attemptId } = assertChainBytes(tenant, { reg: first[0], proof: first[1], rec: first[2] }, { amountCents: 1250, method: 'cash' });
   assert.ok(section.includes(PAY_SAID.uncertain), `the uncertain text is said: ${section}`);
   assert.deepEqual([await has(page, 'issued-payments-check'), await has(page, 'issued-payments-find'), await has(page, 'issued-payments-confirm')], [true, true, false], 'Check again and Find this payment attempt; never "recorded"');
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'the entry committed ONE payment');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'recorded' }] }, 'the entry committed ONE payment');
   const watch = postWatch(page);
   await focusAndSettle(page, 'focus');
   await focusAndSettle(page, 'visibilitychange');
@@ -11036,7 +11045,7 @@ scenario('SIS-27', 'M7B-PAYMENTS-P2B A LOST RECORD ANSWER, THEN CHECK AGAIN — 
   assert.ok((await paySectionOf(page)).includes(PAY_SAID.recorded('$12.50', 'Cash')), 'recorded, from the replayed answer');
   await confirmRecorded(page, 'SIS-27');
   await quiet(page, checkFrom);
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'still ONE payment, its registration confirmed');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'still ONE payment, its registration confirmed');
   assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'ONE record audit: the replay added none');
   assert.deepEqual(sentBy(page, isPaymentWrite, from).map(payLine(main.id, id)), ['POST /payment-registrations 201', 'POST /payments 201 (response lost)', 'POST /payments 201', 'POST /payment-settlement 200'], 'four payment POSTs in all, one key for both records');
   await assertNoLeak(page);
@@ -11059,7 +11068,7 @@ scenario('SIS-28', 'M7B-PAYMENTS-P2B A RELOAD AFTER A LOST RECORD ANSWER — the
   await quiet(page, from);
   const first = sentBy(page, isPaymentChain(main.id, id), from);
   const { attemptId } = assertChainBytes(tenant, { reg: first[0], proof: first[1], rec: first[2] }, { amountCents: 1250, method: 'cash' });
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'the entry committed ONE payment');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'recorded' }] }, 'the entry committed ONE payment');
 
   // The reload: a fresh document, the held attempt gone with the page's memory.
   await page.goto(`${SHOP}/invoices`, 30_000);
@@ -11079,8 +11088,8 @@ scenario('SIS-28', 'M7B-PAYMENTS-P2B A RELOAD AFTER A LOST RECORD ANSWER — the
   record('SIS-28', { phase: 'write conflict', chain: blocked.map(payLine(main.id, id)).map((l) => l.replace(/after=[^ ]+/, 'after=…')) });
   assert.deepEqual(blocked.map(payLine(main.id, id)).filter((l) => !l.startsWith('GET /api/v1/stores/')), ['POST /payment-registrations 409 write_conflict'], 'ONE register, the sealed write_conflict: no proof, no record');
   const lookups = blocked.filter(isPaymentAttemptsRead(main.id));
-  assert.ok(lookups.length === 1 && lookups[0].status === 200 && JSON.parse(lookups[0].replied.text).nextCursor === null, `the lookup is exactly ONE payment-attempts read, a single page to its end (${lookups.length} sent)`);
-  const newAttempt = JSON.parse(blocked[0].body).attemptId;
+  assert.ok(lookups.length === 1 && lookups[0].status === 200 && jsonOf(lookups[0].replied.text, 'the payment-attempts answer').nextCursor === null, `the lookup is exactly ONE payment-attempts read, a single page to its end (${lookups.length} sent)`);
+  const newAttempt = jsonOf(blocked[0].body, 'the register body').attemptId;
   assert.ok(V4.test(newAttempt) && newAttempt !== attemptId, 'the new submission minted a NEW attempt id');
   assert.ok(section.includes(PAY_SAID.conflict), `the unfinished attempt is said: ${section}`);
   const rows = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-attempt"]')].map((r) => r.dataset.attemptState)`);
@@ -11100,7 +11109,7 @@ scenario('SIS-28', 'M7B-PAYMENTS-P2B A RELOAD AFTER A LOST RECORD ANSWER — the
   assert.ok(after.confirmed || after.remaining === '$29.50', `the result is on screen after the lookup's Confirm: "Payment confirmed." or $29.50 remaining ${JSON.stringify(after)}`);
   assert.equal(after.remaining, '$29.50', 'the re-read shows the remaining after the one payment');
   assert.ok(settled[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle confirms THE LOST attempt, seen recorded (compared, never printed)');
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
   assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'the refused register wrote nothing');
   assert.equal(sentBy(page, isPaymentRecord(main.id, id), retry).length, 0, 'no record POST after the reload');
   await assertNoLeak(page);
@@ -11125,10 +11134,10 @@ scenario('SIS-29', 'M7B-PAYMENTS-P2B NO PERMISSION, NO RECORD PAYMENT — a tech
   await focusAndSettle(page, 'focus');
   assert.equal(sentBy(page, isPaymentEligibilityRead, opened).length, 1, 'the refused eligibility is never retried');
   assert.deepEqual(sentBy(page, isPaymentWrite, opened).map(readLine), [], 'no payment write');
-  assert.deepEqual(await storedPaymentsOf(id), { payments: [], registrations: [] }, 'nothing written');
+  assert.deepEqual(await storedFor(id, ''), { payments: [], registrations: [] }, 'nothing written'); // any row would show as 'other', never its id
 }, 240_000);
 
-scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s longest invoice ($90,071,992,547,409.91 remaining) opened by the owner at 320x640 and 320x480 (16 px default text) and 320x600 with a 24 px default text size: in the two 16 px cells, with the recording form open and again with the recorded result and Confirm payment, the dialog never overflows sideways (nor the page) and every box of the Payments section (P2A\'s summary included) lies inside the dialog; in the 24 px cell only P2B\'s own boxes (the form, amount, methods, Record/Cancel, the flow line, Confirm payment, the attempts block) are asserted inside the dialog and reachable, while P2A\'s summary at that size (its nowrap amounts) is recorded, not asserted; in every cell the amount, methods, Record and Confirm payment are in view once scrolled to (CI fonts are wider: the suite\'s tolerance; every measurement recorded)', async () => {
+scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s longest invoice ($90,071,992,547,409.91 remaining) opened by the owner at 320x640 and 320x480 (16 px default text) and 320x600 with a 24 px default text size: in the two 16 px cells, with the recording form open and again with the recorded result and Confirm payment, the dialog never overflows sideways (nor the page) and every box of the Payments section (P2A\'s summary included) lies inside the dialog; in the 24 px cell only P2B\'s own boxes (the form, amount, methods, Record/Cancel, the flow line, Confirm payment, the attempts block) are asserted inside the dialog and reachable, and P2A\'s due and remaining values lie inside the dialog (the invoice\'s own Subtotal/Total spans still make it scroll 37 px sideways there: recorded, not asserted); in every cell the amount, methods, Record and Confirm payment are in view once scrolled to (CI fonts are wider: the suite\'s tolerance; every measurement recorded)', async () => {
   const { tenant, main, boss, ids: [id] } = await voidShop('i30', 1, { long: true });
   void tenant;
   const page = await voidPage(boss, main.id, 1);
@@ -11144,6 +11153,27 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
     const mine = ['issued-payments-form', 'issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit', 'issued-payments-cancel', 'issued-payments-flow', 'issued-payments-confirm', 'issued-payments-attempts']
       .flatMap((id) => [...s.querySelectorAll('[data-testid="' + id + '"]')].map((e) => [id, e.getBoundingClientRect()]))
       .filter(([, r]) => r.width > 0 && r.height > 0 && (r.left < pr.left - ${HOLD_TOLERANCE} || r.right > pr.right + ${HOLD_TOLERANCE})).map(([id]) => id);
+    // P2A's summary values: fully inside the dialog's visible box with the panel at scrollLeft 0 (the x position does not depend on the vertical scroll).
+    const summary = Object.fromEntries(['issued-payments-due', 'issued-payments-remaining'].map((id) => {
+      const t = document.querySelector('[data-testid="' + id + '"]');
+      if (t === null) return [id, null];
+      p.scrollLeft = 0; // horizontal position only: nothing is scrolled vertically
+      const r = t.getBoundingClientRect(), lo = p.getBoundingClientRect().left + p.clientLeft;
+      return [id, r.left >= lo - ${HOLD_TOLERANCE} && r.right <= lo + p.clientWidth + ${HOLD_TOLERANCE}];
+    }));
+    // R6: no amount is clipped — neither the value nor its cell (the dd: an inline span has no scroll box) overflows sideways or downward, and
+    // nothing ellipsizes them; Recorded too where present.
+    const unclipped = Object.fromEntries(['issued-payments-due', 'issued-payments-recorded', 'issued-payments-remaining'].map((id) => {
+      const t = document.querySelector('[data-testid="' + id + '"]');
+      if (t === null) return [id, null];
+      const cell = t.closest('dd');
+      return [id, cell !== null && cell.clientWidth > 0 && [t, cell].every((e) => e.scrollWidth <= e.clientWidth + 1 && e.scrollHeight <= e.clientHeight + 1 && getComputedStyle(e).textOverflow !== 'ellipsis')];
+    }));
+    // Whatever lies past the dialog's inner right edge (what makes it scroll sideways), by test id or tag.
+    const edge = pr.left + p.clientLeft + p.clientWidth;
+    const wide = [...p.querySelectorAll('*')].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.right > edge + ${HOLD_TOLERANCE}; })
+      .filter((e) => { for (let a = e.parentElement; a !== null && a !== p; a = a.parentElement) if (getComputedStyle(a).overflowX !== 'visible') return false; return true; })
+      .map((e) => (e.dataset.testid || e.tagName.toLowerCase()) + '<' + (e.parentElement.closest('[data-testid]')?.dataset.testid ?? '-') + ':' + Math.round(e.getBoundingClientRect().right - edge)).slice(0, 8);
     const seen = ['issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit', 'issued-payments-confirm'].map((id) => {
       const t = document.querySelector('[data-testid="' + id + '"]');
       if (t === null) return [id, null];
@@ -11151,7 +11181,7 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
       const r = t.getBoundingClientRect();
       return [id, r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5];
     });
-    return { panel: { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, scrollLeft: p.scrollLeft, left: pr.left, right: pr.right }, page: { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }, outside, mine, seen: Object.fromEntries(seen) };
+    return { panel: { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, scrollLeft: p.scrollLeft, left: pr.left, right: pr.right }, page: { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }, outside, mine, summary, unclipped, wide, seen: Object.fromEntries(seen) };
   })()`);
   // SIS-22's 320 px cells, the 24 px default text size LAST (font sizes are never reset): CI fonts are wider than local ones.
   for (const [cell, width, height, font] of [['N320', 320, 640, null], ['S320', 320, 480, null], ['S320H600', 320, 600, 24]]) {
@@ -11169,19 +11199,24 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
       check(m.panel.left >= -HOLD_TOLERANCE && m.panel.right <= width + HOLD_TOLERANCE, `${cell} ${phase}: the dialog lies outside the viewport ${JSON.stringify(m.panel)}`);
       check(m.page.scrollWidth <= m.page.clientWidth + HOLD_TOLERANCE, `${cell} ${phase}: the page scrolls sideways ${JSON.stringify(m.page)}`);
       check(m.mine.length === 0, `${cell} ${phase}: P2B boxes reach past the dialog ${JSON.stringify(m.mine)}`);
+      check(m.summary['issued-payments-due'] === true && m.summary['issued-payments-remaining'] === true, `${cell} ${phase}: P2A's due or remaining value is not fully inside the dialog ${JSON.stringify(m.summary)}`);
+      check(m.unclipped['issued-payments-due'] === true && m.unclipped['issued-payments-remaining'] === true && m.unclipped['issued-payments-recorded'] !== false, `${cell} ${phase}: an amount is clipped or ellipsized ${JSON.stringify(m.unclipped)}`);
       if (font === null) {
         check(m.panel.scrollWidth <= m.panel.clientWidth + HOLD_TOLERANCE && m.panel.scrollLeft === 0, `${cell} ${phase}: the dialog overflows sideways ${JSON.stringify(m.panel)}`);
         check(m.outside.length === 0, `${cell} ${phase}: boxes reach past the dialog ${JSON.stringify(m.outside)}`);
       } else {
-        // Out of P2B's scope: P2A's merged summary (nowrap amounts) at 24 px — recorded so it stays visible, not asserted.
-        record('SIS-30', { cell, phase, p2aOverflow: { scrollWidth: m.panel.scrollWidth, clientWidth: m.panel.clientWidth, outside: m.outside } });
+        // The dialog still scrolls 37 px sideways at 24 px, from the invoice's own Subtotal/Total spans (issued-view-subtotal, issued-view-total: outside the Payments section): recorded, not asserted.
+        record('SIS-30', { cell, phase, p2aOverflow: { scrollWidth: m.panel.scrollWidth, clientWidth: m.panel.clientWidth, outside: m.outside, pastTheEdge: m.wide } });
       }
     };
     fits(open, 'form open');
     if (open !== null) for (const k of ['issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit']) check(open.seen[k] === true, `${cell}: ${k} is not in view once scrolled to (${open.seen[k]})`);
+    const sent = st.api.length;
     await page.click(by('issued-payments-submit'));
     await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, `${cell}: recorded`);
-    await page.settle();
+    // The record's payments re-read answered before anything is measured or pressed: its answer re-renders the section, and
+    // a press whose coordinates were read before that landed missed (the N320 flake).
+    await rereadAnswered(page, main.id, id, sent);
     const recorded = await measure();
     record('SIS-30', { cell, phase: 'recorded', ...recorded });
     fits(recorded, 'recorded');
@@ -11193,3 +11228,201 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
   assert.deepEqual(problems, [], 'the recording form and its result fit 320 px');
   assert.equal((await storedPaymentsOf(id)).payments.length, 3, 'one payment per cell');
 }, 300_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-PAYMENTS-P2B (R1): a registered attempt that never recorded is withdrawn; a committed payment is never withdrawn away;
+// a record the server cannot find offers only the recovery path.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The Payments section filled and Record pressed with the record lost at `phase` (st.lose); waits for Check again; the chain sent from there. */
+async function recordLostAt(page, store, id, phase, dollars, method) {
+  await fillPaymentForm(page, dollars, method);
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, at) => at === phase && isPaymentRecord(store, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-payments-submit'));
+    await page.waitFor(`!!${q('issued-payments-check')}`, 30_000, 'unresolved: Check again offered');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, from);
+  await page.settle();
+  return { from, chain: sentBy(page, isPaymentChain(store, id), from) };
+}
+/** JSON.parse of a request or answer body that never echoes it: a body that is not JSON is a fixed message. */
+function jsonOf(text, what) {
+  try { return JSON.parse(text); } catch { throw new Error(`${what} is not JSON`); }
+}
+/** "Find this payment attempt" pressed: ONE payment-attempts read to its end, and the states of the rows shown (nothing secret). */
+async function findAttempts(page, store, wantState) {
+  const from = st.api.length;
+  await page.click(by('issued-payments-find'));
+  await page.waitFor(`!!document.querySelector('[data-testid="issued-payments-attempt"][data-attempt-state="${wantState}"]')`, 30_000, `the lookup lists the ${wantState} attempt`);
+  await quiet(page, from);
+  await page.settle();
+  const lookups = sentBy(page, isPaymentAttemptsRead(store), from);
+  assert.ok(lookups.length === 1 && lookups[0].status === 200 && jsonOf(lookups[0].replied.text, 'the payment-attempts answer').nextCursor === null, `the lookup is exactly ONE payment-attempts read, a single page to its end (${lookups.length} sent)`);
+  return page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-attempt"]')].map((r) => r.dataset.attemptState)`);
+}
+/** A lookup row's Withdraw or Confirm pressed: the payment requests it sent, once its settle is answered (and, for Confirm, the payments re-read). */
+async function pressRow(page, store, id, testId) {
+  const from = st.api.length;
+  await page.click(by(testId));
+  await page.waitFor(() => sentBy(page, isPaymentSettle(store, id), from).some((r) => r.status !== null), 30_000, 'the settle answered');
+  if (testId === 'issued-payments-attempt-confirm') await page.waitFor(() => sentBy(page, isPaymentsOf(store, id), from).some((r) => r.status !== null), 30_000, 'the payments re-read after the confirm');
+  await quiet(page, from);
+  await page.settle();
+  return sentBy(page, isPaymentChain(store, id), from);
+}
+/** storedPaymentsOf with the attempt's id replaced by the label 'this' (any other by 'other'): a mismatch prints no id. */
+async function storedFor(invoice, attemptId) {
+  const stored = await storedPaymentsOf(invoice);
+  const mark = (row) => ({ ...row, attempt: row.attempt === attemptId ? 'this' : 'other' });
+  return { payments: stored.payments.map(mark), registrations: stored.registrations.map(mark) };
+}
+/** A settle's 200 answer names this invoice and attempt and the state (ids compared, never printed). */
+function assertSettlement(rec, invoice, attemptId, state) {
+  const answer = jsonOf(rec.replied.text, 'the settle answer');
+  assert.ok(Object.keys(answer).join() === 'settlement' && answer.settlement.invoiceId === invoice && answer.settlement.attemptId === attemptId, 'the settle answer names this invoice and attempt');
+  assert.ok(Object.keys(answer.settlement).sort().join() === 'attemptId,invoiceId,state', 'the settle answer carries exactly invoiceId, attemptId and state (compared, never printed)');
+  assert.equal(answer.settlement.state, state, 'the settle answer\'s state');
+}
+/** The record POST's body keys and values against the attempt the register named and the proof the entry answered (booleans; nothing printed). */
+function assertRecordBody(tenant, { reg, proof, rec }, { amountCents, method }) {
+  const attemptId = jsonOf(reg.body, 'the register body').attemptId;
+  const registrationId = jsonOf(reg.replied.text, 'the register answer').registration.id;
+  const body = jsonOf(rec.body, 'the record body');
+  // Never to be seen on a page, in storage or in a message: the ids and the keys of this chain join the leak check.
+  for (const secret of [attemptId, registrationId, reg.headers['idempotency-key'], rec.headers['idempotency-key']]) if (typeof secret === 'string') st.secrets.add(secret);
+  assert.ok(typeof registrationId === 'string' && proof.query === `?registration=${registrationId}`, 'the proof GET names the registration the register answered (compared, never printed)');
+  assert.deepEqual(Object.keys(body), RECORD_KEYS, 'the record body\'s keys, in the fixed order');
+  const { registrationProof, ...rest } = body;
+  assert.ok(rest.expectedTenant === tenant && rest.registrationId === registrationId && rest.attemptId === attemptId, 'the record body names the tenant, the registration and the attempt the register answered (compared, never printed)');
+  assert.deepEqual([rest.amountCents, rest.method], [amountCents, method], 'the record body\'s amount and method');
+  assert.ok(typeof registrationProof === 'string' && registrationProof === proofOf(proof), 'the record carries the proof the entry answered (compared, never printed)');
+  return attemptId;
+}
+
+scenario('SIS-31', 'M7B-PAYMENTS-P2B A REGISTERED ATTEMPT THAT NEVER RECORDED IS WITHDRAWN — the record request is lost before it leaves the front (st.lose, request phase): ONE register (201) and ONE proof (200) were sent, the record never reached the entry, so the registration stays open and NO payment exists; the section offers Check again and Find this payment attempt; Find lists the attempt as open (ONE payment-attempts read), its Withdraw attempt is ONE settle (expectedVersion 1, 200, withdrawn); the database holds ZERO payments and the registration withdrawn, with the register and settle audits only; the section then offers Record payment again', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i31', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  const { from, chain } = await recordLostAt(page, main.id, id, 'request', '12.50', 'cash');
+  record('SIS-31', { phase: 'record lost', chain: chain.map(payLine(main.id, id)) });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 0 (request lost)'], 'register and proof answered; the record never reached the entry');
+  const attemptId = assertRecordBody(tenant, { reg: chain[0], proof: chain[1], rec: chain[2] }, { amountCents: 1250, method: 'cash' });
+  assert.ok((await paySectionOf(page)).includes(PAY_SAID.uncertain), 'the uncertain text is said');
+  assert.deepEqual([await has(page, 'issued-payments-check'), await has(page, 'issued-payments-find'), await has(page, 'issued-payments-confirm')], [true, true, false], 'Check again and Find this payment attempt; never "recorded"');
+  assert.equal(await has(page, 'issued-payments-record'), false, 'no Record payment while the attempt is undecided');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [], registrations: [{ attempt: 'this', state: 'open' }] }, 'the registration is open and NO payment exists');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register'], 'the register audit only');
+
+  assert.deepEqual(await findAttempts(page, main.id, 'open'), ['open'], 'exactly the one attempt, open');
+  assert.equal(await has(page, 'issued-payments-withdraw'), true, 'the open row offers Withdraw attempt');
+  assert.equal(await has(page, 'issued-payments-record'), false, 'still no Record payment while the listed attempt is undecided');
+  const settled = await pressRow(page, main.id, id, 'issued-payments-withdraw');
+  record('SIS-31', { phase: 'withdrawn', chain: settled.map(payLine(main.id, id)) });
+  const settles = settled.filter(isPaymentSettle(main.id, id));
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], 'Withdraw attempt is ONE settle');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 1 }), 'the settle withdraws THE attempt, seen open (version 1; compared, never printed)');
+  assertSettlement(settles[0], id, attemptId, 'withdrawn');
+  assert.equal(sentBy(page, isPaymentRecord(main.id, id), from).length, 1, 'the only record POST is the lost one: nothing re-sent');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [], registrations: [{ attempt: 'this', state: 'withdrawn' }] }, 'ZERO payments, the registration withdrawn');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'settle'], 'the register and settle audits: no record audit');
+  await page.waitFor(`!!${q('issued-payments-record')}`, 30_000, 'Record payment offered again');
+  assert.deepEqual([await has(page, 'issued-payments-record'), await has(page, 'issued-payments-check'), await has(page, 'issued-payments-confirm')], [true, false, false], 'the section offers Record payment again, no Check again');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-32', 'M7B-PAYMENTS-P2B A COMMITTED PAYMENT IS PRESERVED — the record committed but its answer is lost (st.lose, response phase): the database holds ONE payment and its registration recorded; (a) a Withdraw (expectedVersion 1) for that attempt sent directly under the staff member\'s own session is the entry\'s sealed 409 write_conflict: still ONE payment, the registration still recorded, no settle audit; (b) in the page, Find lists the attempt as recorded and its Confirm payment is ONE settle (expectedVersion 2, 200) then ONE payments re-read: the registration confirmed, still ONE payment, its amount unchanged', async () => {
+  const { tenant, main, boss, direct, ids: [id] } = await voidShop('i32', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  const { chain } = await recordLostAt(page, main.id, id, 'response', '12.50', 'cash');
+  record('SIS-32', { phase: 'answer lost', chain: chain.map(payLine(main.id, id)) });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 201 (response lost)'], 'the record committed, its answer lost');
+  const { attemptId } = assertChainBytes(tenant, { reg: chain[0], proof: chain[1], rec: chain[2] }, { amountCents: 1250, method: 'cash' });
+  const committed = { payments: [{ attempt: 'this', amount: 1250, method: 'cash' }], registrations: [{ attempt: 'this', state: 'recorded' }] };
+  assert.deepEqual(await storedFor(id, attemptId), committed, 'the entry committed ONE payment');
+
+  // (a) A Withdraw for the recorded attempt, straight at the entry under the same staff member (a settle binds no session): refused, sealed.
+  const withdraw = await call('POST', `${issuedPath(main.id)}/${id}/payment-settlement`, { session: direct, body: { expectedTenant: tenant, attemptId, expectedVersion: 1 }, key: randomUUID() });
+  let refusal = null;
+  try { refusal = JSON.parse(withdraw.text).error ?? null; } catch { /* not JSON */ }
+  record('SIS-32', { phase: 'direct withdraw', status: withdraw.status, error: refusal });
+  assert.deepEqual([withdraw.status, refusal], [409, 'write_conflict'], 'a Withdraw for a recorded attempt is the sealed 409 write_conflict');
+  assert.deepEqual(await storedFor(id, attemptId), committed, 'still ONE payment, the registration still recorded');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record'], 'the refusal wrote no settle audit');
+
+  // (b) The page: Find lists it as recorded; Confirm payment confirms it, once.
+  assert.deepEqual(await findAttempts(page, main.id, 'recorded'), ['recorded'], 'exactly the one attempt, recorded');
+  assert.deepEqual([await has(page, 'issued-payments-attempt-confirm'), await has(page, 'issued-payments-withdraw')], [true, false], 'a recorded row offers Confirm payment, never Withdraw attempt');
+  const settled = await pressRow(page, main.id, id, 'issued-payments-attempt-confirm');
+  record('SIS-32', { phase: 'confirmed', chain: settled.map(payLine(main.id, id)) });
+  const settles = settled.filter(isPaymentSettle(main.id, id));
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], 'Confirm payment is ONE settle');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle confirms THE attempt, seen recorded (version 2; compared, never printed)');
+  assertSettlement(settles[0], id, attemptId, 'confirmed');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: committed.payments, registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'still ONE payment, amount unchanged, its registration confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'one settle audit, from the confirm');
+  assert.equal(await textOf(page, 'issued-payments-remaining'), '$29.50', 'the re-read shows the remaining after the one payment');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-33', 'M7B-PAYMENTS-P2B A RECORD ANSWERED 404 BY A SESSION MISMATCH OFFERS ONLY THE RECOVERY PATH — the record request is held at the front and sent under ANOTHER real session of the same staff member (cookie and session token swapped for that request only), so the registration and proof do not match that session and the entry answers its uniform 404: in all ONE register, ONE proof and ONE record were sent; the section says this payment couldn\'t be finished from here and may or may not have been recorded, and offers Find this payment attempt, with NO Record payment and nothing sent again; Find lists the attempt as open, Withdraw attempt withdraws it (ONE settle, version 1): ZERO payments, the registration withdrawn, and Record payment is offered again', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i33', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await fillPaymentForm(page, '12.50', 'cash');
+  const from = st.api.length;
+  const held = gate((r) => r.frameId === page.frameId && isPaymentRecord(main.id, id)(r), 'request');
+  await page.click(by('issued-payments-submit'));
+  const rec = await Promise.race([held.reached, delay(30_000).then(() => null)]);
+  assert.ok(rec !== null, 'the record was sent and held at the front');
+  // A second real session of the same staff member: its cookie and session token stand in for the page's on this one request.
+  const second = await directLogin(boss);
+  const cookieName = second.cookie.split('=')[0];
+  st.secrets.add(second.csrf);
+  st.secrets.add(second.cookie.split('=').slice(1).join('='));
+  st.tamper = async (r, out) => {
+    if (r !== rec) return;
+    out.cookie = [...(out.cookie ?? '').split(/;\s*/).filter((p) => p !== '' && !p.startsWith(`${cookieName}=`)), second.cookie].join('; ');
+    out[SESSION_CSRF] = second.csrf;
+  };
+  held.release();
+  await page.waitFor(() => rec.status !== null, 30_000, 'the swapped record was answered');
+  st.tamper = null;
+  await page.waitFor(async () => (await paySectionOf(page)).includes(PAY_SAID.record404), 30_000, 'the record-404 message is said');
+  await quiet(page, from);
+  await page.settle();
+  const chain = sentBy(page, isPaymentChain(main.id, id), from);
+  record('SIS-33', { phase: 'record 404', chain: chain.map(payLine(main.id, id)), checkOffered: await has(page, 'issued-payments-check') });
+  // The component's own lookup decides a record that did not answer (its lookup verdict): ONE payment-attempts read follows the 404.
+  assert.deepEqual(chain.filter((r) => !isPaymentAttemptsRead(main.id)(r)).map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 404 not_found'], 'register and proof answered; the entry\'s uniform 404 for the record');
+  assert.equal(chain.filter(isPaymentAttemptsRead(main.id)).length, 1, 'the 404 is followed by ONE payment-attempts read and nothing else');
+  const attemptId = assertRecordBody(tenant, { reg: chain[0], proof: chain[1], rec: chain[2] }, { amountCents: 1250, method: 'cash' });
+  const counts = () => [isPaymentRegister, isPaymentProof, isPaymentRecord].map((m) => st.api.filter(m(main.id, id)).length);
+  assert.deepEqual(counts(), [1, 1, 1], 'ONE register, ONE proof, ONE record in all');
+  assert.deepEqual([await has(page, 'issued-payments-find'), await has(page, 'issued-payments-record'), await has(page, 'issued-payments-confirm')], [true, false, false], 'Find this payment attempt; NO Record payment, nothing to confirm');
+  assert.equal(await has(page, 'issued-payments-check'), false, 'no Check again after the record 404: only Find and a settlement go on');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [], registrations: [{ attempt: 'this', state: 'open' }] }, 'the 404 wrote nothing: the registration is open, no payment');
+  const watch = postWatch(page);
+  await delay(3_000);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual(watch.disarm(), [], 'nothing re-sent after the 404, on a wait, a focus or a tab return');
+  assert.deepEqual(counts(), [1, 1, 1], 'still ONE register, ONE proof, ONE record after waiting');
+
+  assert.deepEqual(await findAttempts(page, main.id, 'open'), ['open'], 'exactly the one attempt, open');
+  const settled = await pressRow(page, main.id, id, 'issued-payments-withdraw');
+  record('SIS-33', { phase: 'withdrawn', chain: settled.map(payLine(main.id, id)) });
+  const settles = settled.filter(isPaymentSettle(main.id, id));
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], 'Withdraw attempt is ONE settle');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 1 }), 'the settle withdraws THE attempt, seen open (version 1; compared, never printed)');
+  assert.deepEqual(counts(), [1, 1, 1], 'no register, proof or record was sent again');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [], registrations: [{ attempt: 'this', state: 'withdrawn' }] }, 'ZERO payments, the registration withdrawn');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'settle'], 'the register and settle audits: no record audit');
+  await page.waitFor(`!!${q('issued-payments-record')}`, 30_000, 'Record payment offered again');
+  await assertNoLeak(page);
+}, 240_000);
