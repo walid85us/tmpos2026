@@ -202,6 +202,8 @@ export const RECORD_TEXT = Object.freeze({
   uncertain: "We couldn't confirm whether this payment was recorded. Nothing is sent again unless you press Check again.",
   check: 'Check again',
   find: 'Find this payment attempt',
+  /** R9: nothing held in this page (after a reload) and nothing remaining, so no Record: the lookup only on a press. */
+  findAny: 'Find an unfinished payment attempt',
   inProgress: VOID_NOTE_TEXT.inProgress,
   detached: "This payment attempt can't be checked from here any more. Find it to finish it.",
   record404: "This payment couldn't be finished from here. It may or may not have been recorded. No new payment will be sent. Find this payment attempt to finish it.",
@@ -3266,7 +3268,9 @@ function paymentFlowText(h: HeldPayment, expired: boolean): string {
  * allowed, page one says issued with something remaining and no attempt of this user is undecided at this store; the form
  * (amount, method, no default) checks everything first and sends nothing on an error; one press is one chain (the
  * section's). The held attempt for THIS invoice (and store) says where it is — out, recorded (Confirm), undecided (Check
- * again, Find), never sent again (Find) or decided — and the lookup's rows offer their deliberate settlement. Every
+ * again, Find), never sent again (Find) or decided — and the lookup's rows offer their deliberate settlement. With nothing
+ * held here and nothing remaining (R9: a reload after recording the whole balance), "Find an unfinished payment attempt"
+ * runs the same lookup, on a press only. Every
  * control is aria-disabled, never disabled; a control that goes while focused hands focus to the section's heading.
  */
 function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, recording, headingRef }: {
@@ -3317,6 +3321,8 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
   const attached = mine !== undefined && mine.csrf !== null;
   const checkable = mine !== undefined && mine.state === 'unresolved' && attached && mine.body !== '' && !recording.expired;
   const findable = mine !== undefined && !busy && mine.state !== 'done' && !(mine.state === 'recorded' && attached);
+  // R9: an attempt left unsettled by a page reload at zero remaining has neither Find (nothing held here) nor Record's conflict path.
+  const findAny = allowed && mine === undefined && page !== null && page.invoice.status === 'issued' && page.amounts.remainingCents === 0;
   const lookup = recording.lookup;
   const flow = pressingShown && mine === undefined ? RECORD_TEXT.recording : notSent !== '' ? notSent : mine === undefined ? (held !== undefined && (elsewhere || blocked) ? RECORD_TEXT.finishOn(held.number, recording.heldStore) : '') : paymentFlowText(mine, recording.expired);
   const press = (el: HTMLElement): void => { pressed.current = el; };
@@ -3422,6 +3428,17 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
           )}
           {waiting && <span id="issued-payments-check-wait" className="sr-only">{SETTINGS_TEXT.checkWaiting}</span>}
           {recording.cooling && <span id="issued-payments-check-cool" className="sr-only">{VOID_TEXT.coolDown}</span>}
+          {recording.out && <span id="issued-payments-out" className="sr-only">{SETTINGS_TEXT.busy}</span>}
+        </div>
+      )}
+      {findAny && (
+        <div className="flex flex-wrap gap-2">
+          <button type="button" data-testid="issued-payments-find-any" aria-disabled={lookup?.phase === 'loading' || recording.out}
+            aria-describedby={recording.out ? 'issued-payments-out' : undefined}
+            onClick={(e) => { if (lookup?.phase !== 'loading' && !recording.out) { press(e.currentTarget); recording.find(); } }} className={`${quiet} ${waitable} ${fitsRow}`}
+          >
+            {RECORD_TEXT.findAny}
+          </button>
           {recording.out && <span id="issued-payments-out" className="sr-only">{SETTINGS_TEXT.busy}</span>}
         </div>
       )}

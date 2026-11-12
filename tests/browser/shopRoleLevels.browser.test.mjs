@@ -558,7 +558,8 @@
 //          technician gets the eligibility 403 and no Record payment; SIS-30 the form and its result at 320 px (larger text);
 //          SIS-31 a registered-but-unrecorded attempt (the record request lost) is found and withdrawn: no payment; SIS-32 a
 //          committed payment survives a Withdraw (sealed 409) and is confirmed from the lookup; SIS-33 a record 404 offers only
-//          Find this payment attempt (no Record), and the found open attempt is withdrawn.
+//          Find this payment attempt (no Record), and the found open attempt is withdrawn; SIS-34 the full balance recorded,
+//          a reload before Confirm: Find an unfinished payment attempt (pressed only) and the recorded attempt confirmed.
 //   QA-UI-01-P1 — THE LINE HEADINGS OVER THEIR COLUMNS:
 //   SLH-01 the reopen dialog's and the issued dialog's lines tables, in SIS-22's six cells (1440x900, 768x1024, 320x640,
 //          320x480, 768x1024 and 320x600 at a 24 px default text size): ONE header row of five column headings (scope col,
@@ -1821,7 +1822,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
-  'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30', 'SIS-31', 'SIS-32', 'SIS-33',
+  'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30', 'SIS-31', 'SIS-32', 'SIS-33', 'SIS-34',
   'SLH-01', 'SLH-02',
 ]);
 const registered = new Set();
@@ -11424,5 +11425,66 @@ scenario('SIS-33', 'M7B-PAYMENTS-P2B A RECORD ANSWERED 404 BY A SESSION MISMATCH
   assert.deepEqual(await storedFor(id, attemptId), { payments: [], registrations: [{ attempt: 'this', state: 'withdrawn' }] }, 'ZERO payments, the registration withdrawn');
   assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'settle'], 'the register and settle audits: no record audit');
   await page.waitFor(`!!${q('issued-payments-record')}`, 30_000, 'Record payment offered again');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOAD BEFORE CONFIRM — the owner records the whole $42.00 by Cash and is offered Confirm payment; the page is reloaded before it is pressed (the in-memory attempt gone; the registration recorded in the database; nothing remaining): the reopened invoice reads its 4 reads and no payment-attempts, shows its one payment and $0.00 remaining with NO Record payment, NO Confirm payment and no pending line, and offers "Find an unfinished payment attempt"; pressed, it is ONE payment-attempts read listing the attempt as recorded, whose Confirm payment is ONE settle of THAT attempt (version 2, 200) then ONE payments re-read, "Payment confirmed."; after the reload no register, proof or record is sent; the database holds ONE payment and ONE registration, confirmed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i34', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await fillPaymentForm(page, '42.00', 'cash');
+  const from = st.api.length;
+  await page.click(by('issued-payments-submit'));
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, 'the full balance recorded: Confirm payment offered');
+  await rereadAnswered(page, main.id, id, from);
+  const first = sentBy(page, isPaymentChain(main.id, id), from);
+  const attemptId = assertRecordBody(tenant, { reg: first[0], proof: first[1], rec: first[2] }, { amountCents: 4200, method: 'cash' });
+  assert.equal(await textOf(page, 'issued-payments-remaining'), '$0.00', 'the whole balance recorded: nothing remaining');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 4200, method: 'cash' }], registrations: [{ attempt: 'this', state: 'recorded' }] }, 'ONE payment, its registration recorded (not confirmed)');
+
+  // The reload before Confirm: a fresh document, the held attempt gone with the page's memory.
+  const reloaded = st.api.length;
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the invoice listed after the reload');
+  const opened = await openVoidable(page, main.id, id, 1);
+  await page.waitFor(`!!${q('issued-payments-find-any')}`, 30_000, 'Find an unfinished payment attempt offered');
+  await quiet(page, opened);
+  await page.settle();
+  assert.deepEqual(sentBy(page, isIssuedRead, opened).map(readLine).sort(), [
+    `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility — 4 reads');
+  assert.equal(st.api.slice(reloaded).filter(isPaymentAttemptsRead(main.id)).length, 0, 'no lookup on open: only on a press');
+  const shown = {
+    remaining: await textOf(page, 'issued-payments-remaining'), items: await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-item"]').length`),
+    record: await has(page, 'issued-payments-record'), confirm: await has(page, 'issued-payments-confirm'), find: await has(page, 'issued-payments-find'),
+    flow: await textOf(page, 'issued-payments-flow'), lookup: await textOf(page, 'issued-payments-attempts'), label: await textOf(page, 'issued-payments-find-any'),
+  };
+  record('SIS-34', { phase: 'reopened', ...shown });
+  assert.deepEqual(shown, { remaining: '$0.00', items: 1, record: false, confirm: false, find: false, flow: '', lookup: '', label: 'Find an unfinished payment attempt' },
+    'the one payment and $0.00 remaining; no Record, no Confirm, no pending line; the find control');
+
+  const findFrom = st.api.length;
+  await page.click(by('issued-payments-find-any'));
+  await page.waitFor(`!!document.querySelector('[data-testid="issued-payments-attempt"][data-attempt-state="recorded"]')`, 30_000, 'the lookup lists the attempt as recorded');
+  await quiet(page, findFrom);
+  await page.settle();
+  const lookups = sentBy(page, isPaymentAttemptsRead(main.id), findFrom);
+  assert.ok(lookups.length === 1 && lookups[0].status === 200 && jsonOf(lookups[0].replied.text, 'the payment-attempts answer').nextCursor === null, `the lookup is exactly ONE payment-attempts read, a single page to its end (${lookups.length} sent)`);
+  const rows = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-attempt"]')].map((r) => r.dataset.attemptState)`);
+  assert.deepEqual(rows, ['recorded'], 'exactly the attempt, recorded');
+
+  const settled = await pressRow(page, main.id, id, 'issued-payments-attempt-confirm');
+  record('SIS-34', { phase: 'confirmed', chain: settled.map(payLine(main.id, id)) });
+  assert.deepEqual(settled.map(payLine(main.id, id)), ['POST /payment-settlement 200', 'GET /payments 200'], 'ONE settle, then ONE payments re-read');
+  assert.ok(settled[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle confirms THE recorded attempt (version 2; compared, never printed)');
+  assertSettlement(settled[0], id, attemptId, 'confirmed');
+  await page.waitFor(async () => (await paySectionOf(page)).includes(PAY_SAID.confirmed), 30_000, '"Payment confirmed." is said');
+  assert.equal(await textOf(page, 'issued-payments-remaining'), '$0.00', 'still nothing remaining');
+  const chainAfter = st.api.slice(reloaded).filter((r) => [isPaymentRegister, isPaymentProof, isPaymentRecord].some((m) => m(main.id, id)(r)));
+  assert.equal(chainAfter.length, 0, 'no register, proof or record after the reload');
+  assert.deepEqual(await storedFor(id, attemptId), { payments: [{ attempt: 'this', amount: 4200, method: 'cash' }], registrations: [{ attempt: 'this', state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'register, record and settle audits: nothing more');
   await assertNoLeak(page);
 }, 240_000);

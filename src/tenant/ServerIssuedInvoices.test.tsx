@@ -7912,4 +7912,96 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect(posts(server, 'payment-settlement').length, 'one settlement').toBe(1);
     expect(posts(server, 'payments').length, 'never a record').toBe(0);
   });
+
+  it('SII-230. QA: the FULL remaining balance recorded, then a page reload before Confirm (the attempt held only in memory is gone; the server holds it recorded; nothing remaining, so no Record): "Find an unfinished payment attempt" reads the attempts only when pressed, its recorded row\'s Confirm settles THAT attempt (v2) — "Payment confirmed.", still ONE payment and nothing registered, proved or recorded again; reopened or reloaded once more nothing is pending; a fully paid invoice says "No unfinished…" only when asked; view-only staff see the history without the control', async () => {
+    const { server, made, r, view } = await setup();
+    await openRecordable(3);
+    expect(screen.queryByTestId('issued-payments-find-any'), 'something remaining: Record covers it').toBeNull();
+    const full = tid('issued-payments-remaining').textContent ?? '';
+    await recordWith(full.slice(1));
+    await waitFor(() => expect(flow()).toBe(`Payment recorded: ${full}, Cash. Confirm it to finish. Until you confirm, you can't record another payment.`));
+    await paymentsReady();
+    expect(tid('issued-payments-remaining')).toHaveTextContent('$0.00');
+    expect(screen.queryByTestId('issued-payments-confirm')).not.toBeNull();
+    expect(screen.queryByTestId('issued-payments-find-any'), 'held in this page: its Confirm covers it').toBeNull();
+    const attemptId = r.keys[0];
+    const chain = () => ['payment-registrations', 'payment-registration-proof', 'payments'].map((route) => server.payRequests(route as 'payments').length).join(',');
+    const before = chain();
+    const lookups = () => server.payRequests('payment-attempts').length;
+    // A full page reload before Confirm: the attempt held in this page's memory goes with it.
+    let shown = view;
+    const reload = async () => {
+      shown.unmount();
+      shown = render(<ServerIssuedInvoices {...r.props({ paymentHolds: createPaymentHoldStore({ now: () => r.clock.mono, wallNow: () => r.clock.wall }) })} />);
+      await showAndChoose(STORE_1);
+      await listReady();
+    };
+    const nothingPending = () => {
+      expect(screen.queryByTestId('issued-payments-confirm')).toBeNull();
+      expect(screen.queryByTestId('issued-payments-record'), 'nothing remaining: no Record').toBeNull();
+      expect(screen.queryAllByTestId('issued-payments-attempt').length, 'no rows').toBe(0);
+      expect(flow(), 'no pending line').toBe('');
+      expect(tid('issued-payments-attempts').textContent, 'no lookup line').toBe('');
+    };
+    await reload();
+    await open(3);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-find-any')).not.toBeNull());
+    expect(screen.getAllByTestId('issued-payments-item').length, 'the one payment in the history').toBe(1);
+    expect(tid('issued-payments-remaining')).toHaveTextContent('$0.00');
+    nothingPending();
+    expect(tid('issued-payments-find-any')).toHaveTextContent('Find an unfinished payment attempt');
+    expect(tid('issued-payments-find-any')).toHaveAttribute('aria-disabled', 'false');
+    await settle();
+    expect(lookups(), 'no lookup on open: only on a press').toBe(0);
+    await click('issued-payments-find-any');
+    await lookupReady();
+    expect(lookups()).toBe(1);
+    const row = screen.getByTestId('issued-payments-attempt');
+    expect(row).toHaveAttribute('data-attempt-state', 'recorded');
+    expect(row).toHaveTextContent(`${full}, Cash recorded`);
+    const reads = server.paymentReads().length;
+    await click('issued-payments-attempt-confirm');
+    await waitFor(() => expect(flow()).toBe('Payment confirmed.'));
+    // In the same open: the settled row and its Confirm are gone at once — no stale confirmation action (owner AC 3).
+    expect(screen.queryAllByTestId('issued-payments-attempt'), 'the settled row is gone').toHaveLength(0);
+    expect(screen.queryByTestId('issued-payments-attempt-confirm'), 'no row Confirm left').toBeNull();
+    expect(screen.queryByTestId('issued-payments-confirm'), 'no top Confirm').toBeNull();
+    const settles = posts(server, 'payment-settlement');
+    expect(settles.length, 'ONE settlement').toBe(1);
+    same(settles[0].body, `{"expectedTenant":"${TENANT_A}","attemptId":"${attemptId}","expectedVersion":2}`, 'settle v2 of the ORIGINAL attempt');
+    expect(server.regs.map((g) => g.state)).toEqual(['confirmed']);
+    await waitFor(() => expect(server.paymentReads()).toHaveLength(reads + 1));
+    await paymentsReady();
+    expect(screen.getAllByTestId('issued-payments-item').length, 'still one history row').toBe(1);
+    expect(tid('issued-payments-remaining')).toHaveTextContent('$0.00');
+    expect((server.payments.get(made[2].id) ?? []).length, 'ONE payment').toBe(1);
+    expect(chain(), 'nothing registered, proved or recorded after the reload').toBe(before);
+    // Closed and reopened, then reloaded again: nothing pending, nothing read until asked.
+    await close();
+    await open(3);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-find-any')).not.toBeNull());
+    nothingPending();
+    await reload();
+    await open(3);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-find-any')).not.toBeNull());
+    nothingPending();
+    await settle();
+    expect(lookups(), 'still no lookup on open').toBe(1);
+    await click('issued-payments-find-any'); // fully paid, nothing unfinished: said only when asked
+    await lookupReady();
+    expect(tid('issued-payments-attempts')).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
+    expect(screen.queryAllByTestId('issued-payments-attempt').length).toBe(0);
+    // View-only staff (eligibility 403): the history, never the control.
+    server.recorders.delete('uid-a');
+    const eligibility = server.payRequests('payment-eligibility').length;
+    await reload();
+    await open(3);
+    await waitFor(() => expect(server.payRequests('payment-eligibility').length).toBe(eligibility + 1));
+    await settle();
+    expect(screen.getAllByTestId('issued-payments-item').length).toBe(1);
+    expect(screen.queryByTestId('issued-payments-find-any'), 'view-only: no control').toBeNull();
+    expect(screen.queryByTestId('issued-payments-record')).toBeNull();
+    expect(chain(), 'never a register, proof or record after the reload').toBe(before);
+    expect(posts(server, 'payment-settlement').length).toBe(1);
+  });
 });
