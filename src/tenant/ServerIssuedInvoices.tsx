@@ -85,6 +85,7 @@ import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
   INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_PAYMENT_STATUSES, INVOICE_VOID_REASONS, VOID_REASON_CODES, invoiceIssuing as issuingClient, isVoidTarget, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText, voidBodyOf,
+  paymentAmountOf, recordBodyOf, registerBodyOf, settleBodyOf, type InvoicePaymentMethod, type PaymentAttempt, type ProofResult, type RecordResult, type RegisterResult, type SettleResult,
   type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoicePayment, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
   type IssuedStatus, type IssuingSettingsFields, type PaymentsPage, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
 } from './invoiceIssuingClient';
@@ -93,10 +94,15 @@ import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
 import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, RecordId, recordIdText, storeLabel } from './ServerInvoiceDrafts';
 import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
+import {
+  isBlockingPayment, judgePayment, paymentExpired, paymentHolds as shopPaymentHolds, type HeldPayment, type PaymentHoldStore, type PaymentSay,
+} from './invoicePaymentHold';
 
 const DEFAULT_WAIT_SECONDS = 60;
 /** How long Check again waits after the server said the same request is still in progress (no Retry-After): it only re-enables. */
 const IN_PROGRESS_WAIT_MS = 5_000;
+/** The attempts lookup reads at most this many pages (50 each) from the start (G2). */
+const LOOKUP_PAGE_CAP = 20;
 /**
  * How long the void's explicit sign-in is waited for (M7B-INVOICES-VOID-P2-R1), from the press of Confirm sign-in — never
  * while typing — over the provider's leg, the session's and the hand-back to the dialog. After it this page stops waiting:
@@ -160,6 +166,56 @@ export const PAYMENTS_TEXT = Object.freeze({
   waiting: LIST_TEXT.waiting,
   loadMore: 'Load more payments',
   reversed: 'Reversed',
+});
+
+/**
+ * Recording a payment (M7B-PAYMENTS-P2B, slice wording G1): every word "recorded", never "paid"; nothing says a payment
+ * was recorded before the server's 201 (or its sealed already_recorded) for this attempt, or the lookup's row.
+ */
+export const RECORD_TEXT = Object.freeze({
+  record: 'Record payment',
+  legend: 'Record a payment',
+  amount: 'Amount (USD)',
+  hint: (remaining: string) => `Up to ${remaining} remaining.`,
+  method: 'Method',
+  submit: 'Record',
+  cancel: 'Cancel',
+  amountFormat: 'Enter an amount, such as 12.50.',
+  amountDecimals: 'Enter an amount with no more than two decimal places.',
+  amountZero: 'Enter an amount of at least $0.01.',
+  amountOver: (remaining: string) => `The amount can't be more than the ${remaining} remaining.`,
+  methodMissing: 'Choose how the payment was taken.',
+  recording: 'Recording the payment…',
+  recorded: (amount: string, method: string) => `Payment recorded: ${amount}, ${method}.`,
+  recordedHint: "Confirm it to finish. Until you confirm, you can't record another payment.",
+  confirm: 'Confirm payment',
+  confirming: 'Confirming…',
+  withdrawing: 'Withdrawing…',
+  confirmed: 'Payment confirmed.',
+  uncertain: "We couldn't confirm whether this payment was recorded. Nothing is sent again unless you press Check again.",
+  check: 'Check again',
+  find: 'Find this payment attempt',
+  inProgress: VOID_NOTE_TEXT.inProgress,
+  detached: "This payment attempt can't be checked from here any more. Find it to finish it.",
+  record404: "The server couldn't find this invoice for the payment. No new payment will be sent. Find this payment attempt to finish it.",
+  writeConflict: 'You have an unfinished payment attempt on this invoice. Finish it before recording another payment.',
+  amountExceeds: 'No payment was recorded: the amount is more than the remaining balance. Withdraw the attempt, then record the correct amount.',
+  invalidState: "No payment was recorded: this invoice can't take this payment now.",
+  denied: 'You cannot record payments for this invoice at this store.',
+  notAccepted: 'No payment was recorded: the server did not accept this request.',
+  lookingUp: 'Checking your payment attempts…',
+  openRow: (time: string) => `Attempt started ${time}: no payment recorded.`,
+  recordedRow: (time: string, amount: string, method: string, at: string) => `Attempt started ${time}: ${amount}, ${method} recorded ${at}.`,
+  withdraw: 'Withdraw attempt',
+  none: 'You have no unfinished payment attempts on this invoice.',
+  failed: 'Your payment attempts could not be loaded.',
+  tryAgain: 'Try again',
+  cap: 'There are too many payment attempts to check here.',
+  withdrawn: 'Attempt withdrawn. No payment was recorded.',
+  /** R1 S11: a press whose context went before anything left. */
+  notSent: 'Nothing was sent. Check the details and press Record again.',
+  /** R1 S3: a row action held back while another attempt is undecided. */
+  finishFirst: 'Finish the payment attempt above first.',
 });
 
 export const SETTINGS_TEXT = Object.freeze({
@@ -377,6 +433,8 @@ export interface ServerIssuedInvoicesProps {
   readonly newKey?: () => string;
   /** The void hold (default the shop's one, invoiceVoidHold.ts): tests give each rig its own; a new store and a remount is a page load. */
   readonly voidHolds?: VoidHoldStore;
+  /** The payment hold (default the shop's one, invoicePaymentHold.ts): tests give each rig its own. */
+  readonly paymentHolds?: PaymentHoldStore;
 }
 
 /** One section per signed-in user (keyed by UID): nothing a previous user's reads answer ever reaches it. */
@@ -384,9 +442,10 @@ export function ServerIssuedInvoices(props: ServerIssuedInvoicesProps) {
   const holds = props.voidHolds ?? shopVoidHolds; // read at render, never at this module's top level (design R3)
   // Another user (or none): every other user's void attempt is detached before anything of this one runs (design R12; a
   // layout effect, so before a late answer of the previous section's request).
-  useLayoutEffect(() => { holds.detachOthers(props.uid); }, [holds, props.uid]);
+  const payHolds = props.paymentHolds ?? shopPaymentHolds;
+  useLayoutEffect(() => { holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); }, [holds, payHolds, props.uid]);
   if (props.uid === null) return null;
-  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} />;
+  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -451,7 +510,7 @@ function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
 }
 
 function IssuedSection({
-  uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds,
+  uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds, paymentHolds: payHolds = shopPaymentHolds,
 }: ServerIssuedInvoicesProps & { readonly uid: string }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -500,6 +559,22 @@ function IssuedSection({
   // The attempt whose first-send 403 the one fresh check confirmed: only it says "you can no longer void…" (iam 3).
   const [voidDenied, setVoidDenied] = useState<string | null>(null);
   const voidCardHeading = useRef<HTMLHeadingElement | null>(null);
+  // The payment attempt (M7B-PAYMENTS-P2B): held in the payment hold for this uid; the lookup the section ran for the open
+  // dialog's invoice; a ref that holds every second payment press back while one chain is out (one chain per press).
+  const payHeld = useSyncExternalStore(payHolds.subscribe, () => payHolds.get(uid));
+  const [lookup, setLookupState] = useState<PaymentLookup | null>(null);
+  const lookupRef = useRef<PaymentLookup | null>(null);
+  const lookupSeq = useRef(0);
+  const lookupCtl = useRef<AbortController | null>(null);
+  const paying = useRef(false);
+  const confirming = useRef(false); // a Confirm press out (R1 S12)
+  // Whether a payment chain or Confirm is out (R2 N2): Find and row actions say so instead of ignoring a press.
+  const [payOut, setPayOut] = useState(false);
+  const setPaying = (on: boolean): void => { paying.current = on; setPayOut(on || confirming.current); };
+  const setConfirming = (on: boolean): void => { confirming.current = on; setPayOut(on || paying.current); };
+  const [payCool, setPayCool] = useState(false);
+  const payCoolRef = useRef(false);
+  const payCoolTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waitRef = useRef(false);
   const waitUntil = useRef(0);
   const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -535,7 +610,17 @@ function IssuedSection({
   const putStores = (next: StoresState): void => { storesRef.current = next; setStoresState(next); };
   const putList = (next: ListState): void => { listRef.current = next; setListState(next); };
   /** Close the issued-invoice dialog (its own read's late answer then finds nothing: it is unmounted), and stop waiting for its sign-in (R1). */
-  const closeView = (): void => { dropSignIn(null); viewRef.current = null; setViewState(null); };
+  const closeView = (): void => {
+    dropSignIn(null);
+    dropLookup();
+    // A decided attempt's text (and a denial) goes with the dialog (R2 R4): a later open offers what its eligibility says.
+    const done = payHolds.get(uid);
+    const closing = viewRef.current;
+    // R3-12: only the closing dialog's own invoice's decided attempt goes.
+    if (done !== undefined && done.state === 'done' && closing !== null && done.storeId === closing.storeId && done.invoiceId === closing.invoiceId) payHolds.remove(uid, done.key);
+    viewRef.current = null;
+    setViewState(null);
+  };
   const putPanel = (next: SettingsPanel | null): void => {
     panelRef.current = next;
     if (next?.attempt?.key !== attemptToken.current?.key) attemptToken.current = null; // the token goes with its attempt
@@ -609,11 +694,15 @@ function IssuedSection({
   function judgeVoid(csrf: string): void {
     const h = holds.get(uid);
     if (h !== undefined && h.csrf !== null && h.csrf !== csrf) holds.detach(uid);
+    const p = payHolds.get(uid);
+    if (p !== undefined && p.csrf !== null && p.csrf !== csrf) detachPay(); // a payment attempt too (spec §7)
   }
   /** Past the cutoff, the bytes go (a focus, a tab return; the hold's own timer too). Never a send. */
   function scrubVoid(): void {
     const h = holds.get(uid);
     if (h !== undefined && h.body !== '' && voidExpired(h, clock(), wall())) holds.change(uid, h.key, { body: '' });
+    const p = payHolds.get(uid);
+    if (p !== undefined && p.body !== '' && paymentExpired(p, clock(), wall())) payHolds.change(uid, p.key, { body: '', proof: null });
   }
   /** After an in-progress answer Check again waits a moment; the timer only gives it back. */
   function coolVoid(key: string): void {
@@ -621,6 +710,339 @@ function IssuedSection({
     voidCoolRef.current = key;
     setVoidCool(key);
     voidCoolTimer.current = setTimeout(() => { voidCoolTimer.current = null; voidCoolRef.current = null; setVoidCool(null); }, IN_PROGRESS_WAIT_MS);
+  }
+
+  // ---- recording a payment (M7B-PAYMENTS-P2B) ----
+
+  const putLookup = (next: PaymentLookup | null): void => { lookupRef.current = next; setLookupState(next); };
+  /** The lookup goes with the dialog (its late pages find nothing). */
+  function dropLookup(): void {
+    lookupSeq.current += 1;
+    lookupCtl.current?.abort();
+    if (lookupRef.current !== null) putLookup(null);
+  }
+  /**
+   * Detach the payment attempt for good (a token change, a sign-out, a store switch): its token, bytes and proof go, so
+   * it is never sent again; one still out or unresolved then says so, and only the lookup decides it.
+   */
+  function detachPay(): void {
+    const h = payHolds.get(uid);
+    if (h === undefined) return;
+    if (h.csrf !== null) payHolds.detach(uid);
+    // Detached elsewhere too (the hold's own sign-out binding): one left out or unresolved is never left "sending" (R1 S1).
+    if (h.state === 'sending' || h.state === 'checking' || h.state === 'unresolved') payHolds.change(uid, h.key, { state: 'unresolved', say: 'detached', body: '', proof: null });
+    else if (h.state === 'recorded' && h.say !== 'detached') payHolds.change(uid, h.key, { say: 'detached' });
+  }
+  /** Progressing or settling an attempt (R2 R5): a lookup still out is dropped, so its late answer cannot overwrite what follows. */
+  function invalidateLookup(): void {
+    lookupSeq.current += 1;
+    lookupCtl.current?.abort();
+    if (lookupRef.current?.phase === 'loading') putLookup(null);
+  }
+  /** After a press's chain: an attempt it left out (a context that went mid-way) is never left "sending" or "checking". */
+  function unstick(key: string): void {
+    const h = payHolds.get(uid);
+    if (h === undefined || h.key !== key || (h.state !== 'sending' && h.state !== 'checking')) return;
+    payHolds.change(uid, key, h.csrf === null ? { state: 'unresolved', say: 'detached', body: '', proof: null } : { state: 'unresolved', say: 'uncertain' });
+  }
+  function coolPay(): void {
+    if (payCoolTimer.current !== null) clearTimeout(payCoolTimer.current);
+    payCoolRef.current = true;
+    setPayCool(true);
+    payCoolTimer.current = setTimeout(() => { payCoolTimer.current = null; payCoolRef.current = false; setPayCool(false); }, IN_PROGRESS_WAIT_MS);
+  }
+  /** One session check before a payment request: its token, or null (the failure handled: a sign-out ends the session, a 429 waits). */
+  async function payConnect(stands: () => boolean): Promise<string | null> {
+    const s = await connect();
+    if (!stands()) return null;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') failSession(failure);
+      else if (failure.seconds !== undefined) startWait(failure.seconds);
+      return null;
+    }
+    return s.csrf;
+  }
+
+  /** The held stage's ONE request, with the token it was held with: its exact key and bytes (the proof: the same GET). */
+  function sendStage(h: HeldPayment, csrf: string): Promise<RegisterResult | ProofResult | RecordResult | SettleResult> {
+    switch (h.stage) {
+      case 'register': return issuing.registerPayment(h.storeId, h.invoiceId, h.stageKey, h.body, csrf);
+      case 'proof': return issuing.paymentProof(h.storeId, h.invoiceId, h.body, h.key, csrf);
+      case 'record': return issuing.recordPayment(h.storeId, h.invoiceId, h.stageKey, h.body, csrf);
+      case 'settle': return issuing.settlePayment(h.storeId, h.invoiceId, h.stageKey, h.body, csrf);
+    }
+  }
+
+  /**
+   * The held attempt's chain from its current stage (`first`: that stage's first send, else a Check again): each answer is
+   * settled BY ATTEMPT in the hold whatever is mounted, and the next stage is held (key and bytes) BEFORE it leaves —
+   * register 201 → the proof GET → the record under a NEW key. An answer after the token changed or a sign-out began
+   * proves nothing: the attempt is detached. Never a retry: an undecided answer leaves it for Check again or the lookup.
+   */
+  async function runStage(attemptId: string, first: boolean): Promise<void> {
+    let firstSend = first;
+    for (;;) {
+      const h = payHolds.get(uid);
+      if (h === undefined || h.key !== attemptId || h.csrf === null || h.body === '') return;
+      const csrf = h.csrf;
+      const since = sessionEndsSoFar();
+      const answer = await sendStage(h, csrf);
+      const now = payHolds.get(uid);
+      if (now === undefined || now.key !== attemptId) return;
+      if (now.csrf !== csrf || since !== sessionEndsSoFar()) return detachPay();
+      if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+      const v = judgePayment(h.stage, answer, firstSend);
+      const bump = (yes: boolean): number => h.rereads + (yes ? 1 : 0);
+      if (v.kind === 'registered') {
+        payHolds.change(uid, attemptId, { stage: 'proof', stageKey: '', body: v.registrationId, registrationId: v.registrationId, sentAt: clock(), sentWall: wall(), state: 'sending', say: '' });
+        firstSend = true;
+        continue;
+      }
+      if (v.kind === 'proof') {
+        const body = h.registrationId === null || h.method === null ? null : recordBodyOf({
+          expectedTenant: h.tenantId, registrationId: h.registrationId, attemptId, amountCents: h.amountCents, method: h.method, registrationProof: v.proof,
+        });
+        if (body === null) { payHolds.change(uid, attemptId, { state: 'lookup', say: 'detached', body: '', proof: null }); return; }
+        // The record's NEW key and exact bytes are held BEFORE it leaves; the proof stays in memory only.
+        payHolds.change(uid, attemptId, { stage: 'record', stageKey: nextKey(), body, proof: v.proof, sentAt: clock(), sentWall: wall(), state: 'sending', say: '' });
+        firstSend = true;
+        continue;
+      }
+      if (v.kind === 'recorded') {
+        const method = v.payment?.method ?? h.method ?? 'cash';
+        payHolds.change(uid, attemptId, {
+          state: 'recorded', say: '', body: '', proof: null, payment: v.payment ?? { id: null, amountCents: h.amountCents, method }, rereads: bump(true),
+        });
+      } else if (v.kind === 'settled') {
+        // A confirmation from the lookup (no registration id here) reads page one once; the press's own Confirm reads nothing.
+        payHolds.change(uid, attemptId, { state: 'done', say: v.state, body: '', proof: null, rereads: bump(v.state === 'confirmed' && h.registrationId === null) });
+        const l = lookupRef.current;
+        if (l !== null && l.invoiceId === h.invoiceId) putLookup({ ...l, rows: l.rows.filter((r) => r.attemptId !== attemptId) });
+      } else if (v.kind === 'final') {
+        payHolds.change(uid, attemptId, { state: 'done', say: v.say, body: '', proof: null, rereads: bump(v.reread) });
+        if (v.lookup) void runLookup(h.storeId, h.invoiceId); // this attempt wrote nothing: no hold blocks, the lookup shows the other one
+      } else if (v.kind === 'lookup') {
+        payHolds.change(uid, attemptId, { state: 'lookup', say: v.say, body: '', proof: null, rereads: bump(v.reread) });
+        void runLookup(h.storeId, h.invoiceId);
+      } else {
+        payHolds.change(uid, attemptId, { state: 'unresolved', say: v.say, retryAfter: v.retryAfter });
+        if (v.say === 'inProgress') coolPay();
+      }
+      if (answer.kind === 'signed-out') failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+      return;
+    }
+  }
+
+  /**
+   * One Record press (spec §4): ONE chain. The section's ref holds a second press back before any render; after the
+   * session check the context is checked again, then the attempt id and register key are minted and the attempt held
+   * BEFORE the register leaves. Null when it went (the hold says what next); otherwise why nothing was sent.
+   */
+  async function recordPayment(viewId: number, store: StoreEntry, press: PaymentPress): Promise<string | null> {
+    if (paying.current) return SETTINGS_TEXT.busy;
+    if (waitRef.current) return pickerWaitText(waitLeft());
+    const open = payHolds.get(uid);
+    if (isBlockingPayment(open) && open.storeId === store.id) return SETTINGS_TEXT.busy;
+    setPaying(true);
+    try {
+      const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && mine === gen.current.n && since === sessionEndsSoFar() && storeRef.current === store.id
+        && viewRef.current?.id === viewId && viewRef.current.invoiceId === press.invoiceId;
+      const csrf = await payConnect(stands);
+      if (csrf === null) return !stands() ? RECORD_TEXT.notSent : waitRef.current ? pickerWaitText(waitLeft()) : ISSUED_TEXT.unavailable; // nothing sent: said
+      if (adopt(csrf) || !stands()) return RECORD_TEXT.notSent;
+      const attemptId = nextKey();
+      const stageKey = nextKey();
+      const body = registerBodyOf(store.tenantId, attemptId);
+      if (body === null) return RECORD_TEXT.notAccepted;
+      const held: HeldPayment = {
+        key: attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: press.invoiceId, number: press.number, csrf, stage: 'register', stageKey, body,
+        sentAt: clock(), sentWall: wall(), registrationId: null, proof: null, amountCents: press.amountCents, method: press.method, payment: null, settleVersion: null,
+        state: 'sending', say: '', retryAfter: 0, rereads: 0,
+      };
+      const was = payHolds.get(uid);
+      const wasKey = was?.key;
+      if (wasKey !== undefined && !isBlockingPayment(was)) payHolds.remove(uid, wasKey); // unsendable: it blocks nothing (R2 N1)
+      if (!payHolds.put(uid, held)) return SETTINGS_TEXT.busy;
+      dropLookup();
+      try { await runStage(attemptId, true); } finally { unstick(attemptId); }
+      return null;
+    } finally {
+      setPaying(false);
+    }
+  }
+
+  /** Whether the held attempt may be sent here now: same token (session generation), the same store chosen with its tenant, within 23 h. */
+  function paySendable(h: HeldPayment): boolean {
+    const store = storesRef.current.stores.find((entry) => entry.id === h.storeId);
+    return h.csrf !== null && h.csrf === gen.current.csrf && storeRef.current === h.storeId && store?.tenantId === h.tenantId;
+  }
+
+  /** "Check again" (spec §5): the held stage's exact bytes under its same key (the proof: the same GET) — only a user press. */
+  async function checkPayment(): Promise<void> {
+    const h = payHolds.get(uid);
+    if (paying.current || h === undefined || h.state !== 'unresolved' || waitRef.current || payCoolRef.current) return;
+    if (h.body === '' || paymentExpired(h, clock(), wall())) { payHolds.change(uid, h.key, { body: '', proof: null }); return; }
+    if (!paySendable(h)) return detachPay();
+    setPaying(true);
+    invalidateLookup(); // R3-4: before the await, so a lookup answering during the session check is never shown
+    try {
+      const since = sessionEndsSoFar();
+      const csrf = await payConnect(() => alive.current && since === sessionEndsSoFar());
+      if (csrf === null) return;
+      if (csrf !== h.csrf) { adopt(csrf); detachPay(); return; }
+      const now = payHolds.get(uid);
+      if (now === undefined || now.key !== h.key || now.state !== 'unresolved' || now.body === '' || paymentExpired(now, clock(), wall()) || !paySendable(now)) return;
+      invalidateLookup();
+      payHolds.change(uid, h.key, { state: 'checking' });
+      await runStage(h.key, false);
+    } finally {
+      setPaying(false);
+      unstick(h.key); // never left checking or sending
+    }
+  }
+
+  /** The deliberate "Confirm payment" of the held recorded attempt (G5): settle v2 under a NEW key, held before it leaves. */
+  async function confirmPayment(): Promise<void> {
+    const h = payHolds.get(uid);
+    // Its own guard (R1 S12): a recorded attempt's chain is over, so a page-one re-read or the press's tail never swallows it.
+    if (confirming.current || waitRef.current || h === undefined || h.state !== 'recorded' || h.csrf === null) return;
+    if (!paySendable(h)) return detachPay();
+    setConfirming(true);
+    invalidateLookup(); // R3-4: before the await
+    try {
+      const since = sessionEndsSoFar();
+      const csrf = await payConnect(() => alive.current && since === sessionEndsSoFar());
+      if (csrf === null) return;
+      if (csrf !== h.csrf) { adopt(csrf); detachPay(); return; }
+      const body = settleBodyOf(h.tenantId, h.key, 2);
+      const now = payHolds.get(uid);
+      if (body === null || now === undefined || now.key !== h.key || now.state !== 'recorded') return;
+      invalidateLookup();
+      payHolds.change(uid, h.key, { stage: 'settle', stageKey: nextKey(), body, settleVersion: 2, sentAt: clock(), sentWall: wall(), state: 'sending', say: '' });
+      try { await runStage(h.key, true); } finally { unstick(h.key); }
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  /**
+   * A lookup row's deliberate action (spec §6): withdraw (v1) an open attempt or confirm (v2) a recorded one, under a NEW
+   * key, held before it leaves (it replaces any attempt held here that is not out).
+   */
+  async function settleRow(row: PaymentAttempt, version: 1 | 2): Promise<void> {
+    const l = lookupRef.current;
+    if (paying.current || waitRef.current || l === null || l.invoiceId !== row.invoiceId || storeRef.current !== l.storeId) return;
+    const store = storesRef.current.stores.find((entry) => entry.id === l.storeId);
+    if (store === undefined) return;
+    const cur = payHolds.get(uid);
+    if (cur !== undefined && (cur.state === 'sending' || cur.state === 'checking')) return;
+    if (rowHeldBack(cur, row)) return; // R1 S3/S4: another undecided attempt is never dropped; a sendable settle only by Check again
+    setPaying(true);
+    // R3-4: a lookup answer still out is dropped before the await; the rows shown stay (R2 R5).
+    lookupSeq.current += 1;
+    lookupCtl.current?.abort();
+    try {
+      const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && mine === gen.current.n && since === sessionEndsSoFar() && storeRef.current === store.id;
+      const csrf = await payConnect(stands);
+      if (csrf === null || adopt(csrf) || !stands()) return;
+      const body = settleBodyOf(store.tenantId, row.attemptId, version);
+      if (body === null) return;
+      const was = payHolds.get(uid);
+      if (rowHeldBack(was, row)) return;
+      if (was !== undefined) payHolds.remove(uid, was.key);
+      const held: HeldPayment = {
+        key: row.attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: row.invoiceId, number: row.invoiceNumber, csrf, stage: 'settle', stageKey: nextKey(), body,
+        sentAt: clock(), sentWall: wall(), registrationId: null, proof: null, amountCents: row.payment?.amountCents ?? was?.amountCents ?? 0,
+        method: row.payment?.method ?? null, payment: row.payment === null ? null : { id: row.payment.id, amountCents: row.payment.amountCents, method: row.payment.method },
+        settleVersion: version, state: 'sending', say: '', retryAfter: 0, rereads: was?.key === row.attemptId ? was.rereads : 0,
+      };
+      if (!payHolds.put(uid, held)) return;
+      // The lookup's rows stay shown; only an answer still out is dropped (R2 R5).
+      lookupSeq.current += 1;
+      lookupCtl.current?.abort();
+      try { await runStage(row.attemptId, true); } finally { unstick(row.attemptId); }
+    } finally {
+      setPaying(false);
+    }
+  }
+
+  /**
+   * "Find this payment attempt" (spec §6, G2): this user's attempts at the store, paged from the start to the end (at most
+   * LOOKUP_PAGE_CAP pages), kept for THIS invoice in state open or recorded. A withdrawn or confirmed row for the held
+   * attempt decides it; its absence never does. Only for the open dialog's invoice; a later lookup or a close drops it.
+   */
+  async function runLookup(storeId: string, invoiceId: string): Promise<void> {
+    const v = viewRef.current;
+    if (v === null || v.storeId !== storeId || v.invoiceId !== invoiceId || storeRef.current !== storeId) return;
+    const n = ++lookupSeq.current;
+    lookupCtl.current?.abort();
+    const controller = new AbortController();
+    lookupCtl.current = controller;
+    const base = { storeId, invoiceId, rows: [] as readonly PaymentAttempt[] };
+    putLookup({ ...base, phase: 'loading', text: RECORD_TEXT.lookingUp });
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || n !== lookupSeq.current || mine !== gen.current.n || storeRef.current !== storeId
+      || since !== sessionEndsSoFar() || viewRef.current?.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const failed = (text = ''): void => { if (!stale()) putLookup({ ...base, phase: 'failed', text: text === '' ? RECORD_TEXT.failed : `${RECORD_TEXT.failed} ${text}` }); };
+    // An answer a stale guard drops (another generation while this dialog stays, R1 S9) never leaves "Checking…" for good:
+    // the latest lookup of this still-open invoice says it could not be loaded, with Try again.
+    const dropped = (): void => {
+      if (alive.current && n === lookupSeq.current && lookupRef.current?.phase === 'loading' && viewRef.current?.storeId === storeId && viewRef.current.invoiceId === invoiceId) {
+        putLookup({ ...base, phase: 'failed', text: RECORD_TEXT.failed });
+      }
+    };
+    if (waitRef.current) return failed(pickerWaitText(waitLeft()));
+    const csrf = await payConnect(() => !stale());
+    if (csrf === null) { failed(waitRef.current ? pickerWaitText(waitLeft()) : ''); return dropped(); }
+    if (adopt(csrf) || stale()) return dropped();
+    const rows: PaymentAttempt[] = [];
+    let after: string | null = null;
+    let capped = false;
+    // shortcut: 20-page cap (1,000 rows), upgrade with a server per-invoice filter
+    for (let page = 0; ; page += 1) {
+      if (page === LOOKUP_PAGE_CAP) { capped = true; break; }
+      const answer = await issuing.paymentAttempts(storeId, after, csrf, controller.signal);
+      if (stale()) return dropped();
+      if (answer.kind !== 'ok') {
+        if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return; }
+        return failed(answer.kind === 'rate-limited' ? pickerWaitText(startWait(answer.retryAfterSeconds)) : '');
+      }
+      for (const a of answer.attempts) if (a.invoiceId === invoiceId) rows.push(a);
+      if (answer.nextCursor === null) break;
+      after = answer.nextCursor;
+    }
+    const h = payHolds.get(uid);
+    if (h !== undefined && h.state !== 'done' && h.storeId === storeId && h.invoiceId === invoiceId) {
+      const row = rows.find((r) => r.attemptId === h.key);
+      if (row?.state === 'withdrawn') payHolds.change(uid, h.key, { state: 'done', say: 'withdrawn', body: '', proof: null });
+      if (row?.state === 'confirmed') payHolds.change(uid, h.key, { state: 'done', say: 'confirmed', body: '', proof: null, rereads: h.rereads + 1 });
+    }
+    const unsettled = rows.filter((r) => r.state === 'open' || r.state === 'recorded');
+    putLookup({ ...base, rows: unsettled, phase: capped ? 'cap' : 'ready', text: capped ? RECORD_TEXT.cap : unsettled.length === 0 ? RECORD_TEXT.none : '' });
+  }
+
+  /** The dialog's recording eligibility (spec §1): 'allowed' only for the exact allowed; a 403 is 'not' and never retried. */
+  async function readPaymentEligibility(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<'allowed' | 'not' | null> {
+    if (waitRef.current) return 'not';
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || storeId !== storeRef.current || since !== sessionEndsSoFar()
+      || viewRef.current?.id !== viewId || viewRef.current.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const csrf = await payConnect(() => !stale());
+    if (csrf === null) return stale() ? null : 'not';
+    if (adopt(csrf)) return null;
+    const answer = await issuing.paymentEligibility(storeId, invoiceId, csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'allowed') return 'allowed';
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+    if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+    return 'not';
   }
 
   /** A new generation: everything read under the previous token goes, and the stores are read again. */
@@ -677,7 +1099,7 @@ function IssuedSection({
 
   /** A refusal of the session clears every view (Reconnect then). */
   function failSession(failure: Failure): void {
-    if (failure.kind === 'signed-out') holds.detach(uid); // design R12: a sent void can never be checked again under a later session
+    if (failure.kind === 'signed-out') { holds.detach(uid); detachPay(); } // design R12: a sent void can never be checked again under a later session
     abortReads();
     setChanged(false);
     putStores({ phase: failure.kind, text: failure.text, stores: [] });
@@ -773,6 +1195,8 @@ function IssuedSection({
     if (busyRef.current && storesRef.current.phase === 'loading') return;
     setNotice(''); // before the drop: a confirmed save that was not read back still says so
     dropPanel(); // a store change takes the panel, its values and any attempt with it
+    // A store switch disables a payment attempt's replay for good, even back to its own store (owner decision, spec §7).
+    if (payHolds.get(uid)?.storeId !== id) detachPay();
     closeView();
     // The previous store's pages go (a read still out for it is cancelled; its late page finds another store).
     ctl.current.list?.abort();
@@ -1657,6 +2081,8 @@ function IssuedSection({
       ctl.current.find?.abort();
       if (waitTimer.current !== null) clearTimeout(waitTimer.current);
       if (voidCoolTimer.current !== null) clearTimeout(voidCoolTimer.current);
+      if (payCoolTimer.current !== null) clearTimeout(payCoolTimer.current);
+      lookupCtl.current?.abort();
       dropSignIn(null); // its deadline goes; a late answer finds no owner (and `alive` already false: no state is set)
     };
     // A section serves one UID (see ServerIssuedInvoices); the clients are fixed for its life.
@@ -1672,6 +2098,19 @@ function IssuedSection({
   // Why Load more and Try again wait: the section's rate-limit wait, or a list read still out.
   const listHold = waiting ? 'issued-list-wait' : busy ? 'issued-list-busy' : undefined;
   const lastKnown = (list.phase === 'unavailable' || list.phase === 'rate-limited') && list.rows.length > 0;
+  /** The Issued section's payment recording for the dialog it opened (M7B-PAYMENTS-P2B; never the drafts card's). */
+  const recordingOf = (v: ViewOpen, store: StoreEntry): PaymentRecording => ({
+    held: payHeld,
+    expired: payHeld !== undefined && payHeld.body !== '' && paymentExpired(payHeld, clock(), wall()),
+    cooling: payCool,
+    out: payOut,
+    lookup: lookup !== null && lookup.storeId === v.storeId && lookup.invoiceId === v.invoiceId ? lookup : null,
+    record: (press) => recordPayment(v.id, store, press),
+    check: () => { void checkPayment(); },
+    confirm: () => { void confirmPayment(); },
+    find: () => { if (!paying.current && !confirming.current) void runLookup(v.storeId, v.invoiceId); }, // R3-4: never while a chain or Confirm is out
+    settle: (row, version) => { void settleRow(row, version); },
+  });
   /** The Issued section's void action for the dialog it opened (the drafts card's View invoice never gets one). */
   const voidingOf = (v: ViewOpen, store: StoreEntry): IssuedVoidCapability => ({
     store, held: voidHeld, expired: voidHeld !== undefined && voidExpired(voidHeld, clock(), wall()),
@@ -1860,7 +2299,13 @@ function IssuedSection({
           key={view.id} storeId={view.storeId} invoiceId={view.invoiceId} read={(s, i, signal) => readView(view.id, s, i, signal)} waiting={waiting} onClose={closeView} returnFocus={heading}
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
           voiding={view.store === null ? undefined : voidingOf(view, view.store)}
-          payments={{ read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal) }}
+          payments={{
+            read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal),
+            ...(view.store === null ? {} : {
+              eligibility: (signal: AbortSignal) => readPaymentEligibility(view.id, view.storeId, view.invoiceId, signal),
+              recording: recordingOf(view, view.store),
+            }),
+          }}
         />
       )}
     </section>
@@ -1884,6 +2329,39 @@ export type PaymentsReadAnswer =
 export interface IssuedPaymentsCapability {
   /** ONE page (`after` null: page one) under the owner's session and context; null when that context is gone. */
   readonly read: (after: string | null, signal: AbortSignal) => Promise<PaymentsReadAnswer | null>;
+  /** The action-only recording eligibility (M7B-PAYMENTS-P2B), once per open of an issued invoice; null when the context is gone. */
+  readonly eligibility?: (signal: AbortSignal) => Promise<'allowed' | 'not' | null>;
+  /** Recording and recovering a payment (M7B-PAYMENTS-P2B): the section's hold, lookup and actions. */
+  readonly recording?: PaymentRecording;
+}
+
+/** The attempts lookup the section ran for one invoice (M7B-PAYMENTS-P2B): this user's unsettled attempts on it. */
+export interface PaymentLookup {
+  readonly storeId: string;
+  readonly invoiceId: string;
+  readonly phase: 'loading' | 'ready' | 'failed' | 'cap';
+  readonly text: string;
+  /** Only this invoice's attempts in state open or recorded, in the server's order. */
+  readonly rows: readonly PaymentAttempt[];
+}
+/** One Record press: what the form validated. */
+export interface PaymentPress { readonly invoiceId: string; readonly number: number; readonly amountCents: number; readonly method: InvoicePaymentMethod }
+export interface PaymentRecording {
+  /** The user's payment attempt now (the section's hold), whatever invoice it is for. */
+  readonly held: HeldPayment | undefined;
+  /** Whether that attempt's stage is past its 23-hour cutoff. */
+  readonly expired: boolean;
+  /** Check again waits a moment after an in-progress answer. */
+  readonly cooling: boolean;
+  /** A payment chain or Confirm of this section is out (R2 N2): Find and row actions wait for it. */
+  readonly out: boolean;
+  readonly lookup: PaymentLookup | null;
+  /** One press: null when it went (the hold says what), else why nothing was sent. */
+  readonly record: (press: PaymentPress) => Promise<string | null>;
+  readonly check: () => void;
+  readonly confirm: () => void;
+  readonly find: () => void;
+  readonly settle: (row: PaymentAttempt, version: 1 | 2) => void;
 }
 
 /** One press of the void confirmation's "Void invoice" (M7B-INVOICES-VOID-P2): what is voided, why, and the confirmation's callbacks. */
@@ -2130,6 +2608,9 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const loadMorePayments = useRef<HTMLButtonElement | null>(null);
   const payRetry = useRef<HTMLButtonElement | null>(null);
   const payRefocus = useRef<HTMLElement | null>(null);
+  // Recording (M7B-PAYMENTS-P2B): the one eligibility read of this open (issued invoices only) and its abort.
+  const [payElig, setPayElig] = useState<'asking' | 'allowed' | 'not'>('asking');
+  const payEligCtl = useRef<AbortController | null>(null);
   const putPay = (next: PaymentsView): void => {
     // Load more (its last page, a change) or Try again (a read starts) going while focused: focus moves to the section's
     // heading, never to the body.
@@ -2173,7 +2654,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
    * continues what is held (paymentsJoin) — otherwise the held rows stay and the change is said, with no read of its own.
    * Its own sequence and abort: a later read, a close or a context gone drops its answer.
    */
-  async function loadPayments(after: string | null): Promise<void> {
+  async function loadPayments(after: string | null, keepShown = false): Promise<void> {
     const p = owner.current.payments;
     if (p === undefined) return;
     const n = ++paySeq.current;
@@ -2181,7 +2662,9 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     const controller = new AbortController();
     payCtl.current = controller;
     const held = payRef.current;
-    putPay(after === null ? PAYMENTS_LOADING : { ...held, text: PAYMENTS_TEXT.loading, more: true }); // the rows stay; the region says it reads
+    // The rows stay for Load more; a recording's re-read (`keep`, R2 R6) keeps the shown summary and rows too, so nothing
+    // under the pointer jumps while it reads (its phase says loading: no Record on the old remaining).
+    putPay(after === null ? (keepShown && held.page !== null ? { ...held, phase: 'loading', text: PAYMENTS_TEXT.loading, more: false } : PAYMENTS_LOADING) : { ...held, text: PAYMENTS_TEXT.loading, more: true });
     let answer: PaymentsReadAnswer | null;
     try { answer = await p.read(after, controller.signal); } catch { answer = UNAVAILABLE_PAYMENTS; }
     if (!alive.current || n !== paySeq.current) return; // closed, or another payments read took over
@@ -2197,7 +2680,10 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     }
     const text = answer.kind === 'rate-limited' ? answer.text : answer.kind === 'not-found' ? PAYMENTS_TEXT.notFound : answer.kind === 'denied' ? PAYMENTS_TEXT.denied : PAYMENTS_TEXT.unavailable;
     // A Load more that could not be read keeps what is shown (and its cursor); a refusal or a page one shows nothing read before.
-    const keep = after !== null && (answer.kind === 'unavailable' || answer.kind === 'rate-limited');
+    // R3-11: a recording's re-read (keepShown) that fails keeps the shown summary and rows too, saying the failure.
+    // R4-7: only a transient failure keeps it; a refusal (denied, not found) shows nothing read before.
+    const transient = answer.kind === 'unavailable' || answer.kind === 'rate-limited';
+    const keep = transient && (after !== null || (keepShown && held.page !== null));
     putPay(keep ? { ...held, phase: answer.kind, text, more: false } : { ...PAYMENTS_OPENING, phase: answer.kind, text });
   }
 
@@ -2234,6 +2720,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
       alive.current = false;
       ctl.current?.abort();
       payCtl.current?.abort();
+      payEligCtl.current?.abort();
       for (const controller of Object.values(vctl.current)) controller?.abort();
     };
     // One dialog per open: its store and invoice are fixed for its life.
@@ -2244,7 +2731,24 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     if (state.invoice === null || payStarted.current || owner.current.payments === undefined) return;
     payStarted.current = true;
     void loadPayments(null);
+    // The recording eligibility: ONE per open, only for an issued invoice (a voided one sends none), after the detail answered.
+    const ask = owner.current.payments?.eligibility;
+    if (state.invoice.status !== 'issued' || ask === undefined) return;
+    const controller = new AbortController();
+    payEligCtl.current = controller;
+    void ask(controller.signal).catch(() => 'not' as const).then((answer) => { if (alive.current && answer !== null && owner.current.current()) setPayElig(answer); });
   }, [state.invoice]);
+
+  // Page one again ONCE per bump of this invoice's payment attempt (a recorded payment, a sealed refusal, a lookup
+  // confirmation) — never for what was already so when this dialog opened.
+  const payHeldHere = payments?.recording?.held;
+  const payTag = payHeldHere !== undefined && payHeldHere.storeId === storeId && payHeldHere.invoiceId === invoiceId ? `${payHeldHere.key}:${payHeldHere.rereads}` : null;
+  const payTagSeen = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (payTagSeen.current === undefined || payTag === payTagSeen.current) { payTagSeen.current = payTag; return; }
+    payTagSeen.current = payTag;
+    if (payHeldHere !== undefined && payHeldHere.rereads > 0 && payStarted.current) void loadPayments(null, true);
+  }, [payTag]);
 
   // This invoice's attempt, whichever open pressed it (review B1 F1): the user's held attempt for this store and invoice.
   // `watched`: pressed here or seen out while this dialog was open — only its settling makes the dialog read again or say
@@ -2574,6 +3078,13 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
               </dl>
             )}
             <p data-testid="issued-payments-note" className={hintClass}>{PAYMENTS_TEXT.note}</p>
+            {/* Above the state line and the list (R2 R6): what a re-read changes never moves the recording controls. */}
+            {payments.recording !== undefined && (
+              <PaymentRecorder
+                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed'}
+                waiting={waiting} recording={payments.recording} headingRef={payHeading}
+              />
+            )}
             <p data-testid="issued-payments-state" data-phase={pay.phase} role={pay.phase === 'denied' ? 'alert' : 'status'} className="text-sm font-bold text-slate-600">{pay.text}</p>
             {(pay.phase === 'not-found' || pay.phase === 'denied' || pay.phase === 'unavailable' || pay.phase === 'rate-limited') && (
               <button
@@ -2631,6 +3142,254 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
         />
       )}
     </>
+  );
+}
+
+/**
+ * Whether a lookup row's action is held back (R1 S3/S4): another attempt of this user is undecided (never dropped for it),
+ * or this row's own settlement is held and still sendable (only Check again sends it again, same key and bytes).
+ */
+export function rowHeldBack(held: HeldPayment | undefined, row: Pick<PaymentAttempt, 'attemptId'>): boolean {
+  if (held === undefined || held.state === 'done') return false;
+  if (held.key !== row.attemptId) return isBlockingPayment(held); // an unsendable one blocks nothing (R2 N1)
+  return held.stage === 'settle' && held.csrf !== null && held.body !== '';
+}
+
+/** What a held payment attempt says in the flow region (spec "Wording"); '' for nothing. */
+function paymentFlowText(h: HeldPayment, expired: boolean): string {
+  const detached = h.csrf === null || ((h.state === 'unresolved') && (h.body === '' || expired));
+  const sayText: Record<Exclude<PaymentSay, ''>, string> = {
+    uncertain: RECORD_TEXT.uncertain, inProgress: `${RECORD_TEXT.uncertain} ${RECORD_TEXT.inProgress}`, rateLimited: `${RECORD_TEXT.uncertain} ${pickerWaitText(h.retryAfter)}`,
+    detached: RECORD_TEXT.detached, record404: RECORD_TEXT.record404, writeConflict: RECORD_TEXT.writeConflict, amountExceeds: RECORD_TEXT.amountExceeds,
+    invalidState: RECORD_TEXT.invalidState, denied: RECORD_TEXT.denied, signedOut: ISSUED_TEXT.ended, notAccepted: RECORD_TEXT.notAccepted,
+    confirmed: RECORD_TEXT.confirmed, withdrawn: RECORD_TEXT.withdrawn,
+  };
+  switch (h.state) {
+    case 'sending':
+    case 'checking':
+      if (h.csrf === null) return RECORD_TEXT.detached;
+      return h.stage !== 'settle' ? RECORD_TEXT.recording : h.settleVersion === 1 ? RECORD_TEXT.withdrawing : RECORD_TEXT.confirming;
+    case 'recorded': {
+      if (h.csrf === null) return RECORD_TEXT.detached;
+      const p = h.payment;
+      return p === null ? RECORD_TEXT.recordedHint : `${RECORD_TEXT.recorded(formatCents(p.amountCents), INVOICE_PAYMENT_METHODS[p.method])} ${RECORD_TEXT.recordedHint}`;
+    }
+    case 'unresolved':
+      return detached ? RECORD_TEXT.detached : h.say === '' ? RECORD_TEXT.uncertain : sayText[h.say];
+    default:
+      return h.say === '' ? '' : sayText[h.say];
+  }
+}
+
+/**
+ * Recording a payment inside the Payments section (M7B-PAYMENTS-P2B): "Record payment" only when the eligibility said
+ * allowed, page one says issued with something remaining and no attempt of this user is undecided at this store; the form
+ * (amount, method, no default) checks everything first and sends nothing on an error; one press is one chain (the
+ * section's). The held attempt for THIS invoice (and store) says where it is — out, recorded (Confirm), undecided (Check
+ * again, Find), never sent again (Find) or decided — and the lookup's rows offer their deliberate settlement. Every
+ * control is aria-disabled, never disabled; a control that goes while focused hands focus to the section's heading.
+ */
+function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, recording, headingRef }: {
+  readonly storeId: string; readonly invoiceId: string; readonly number: number; readonly page: PaymentsPage | null; readonly allowed: boolean;
+  readonly waiting: boolean; readonly recording: PaymentRecording; readonly headingRef: RefObject<HTMLHeadingElement | null>;
+}) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [method, setMethod] = useState<InvoicePaymentMethod | null>(null);
+  const [errors, setErrors] = useState<{ readonly amount: string; readonly method: string }>({ amount: '', method: '' });
+  const [notSent, setNotSent] = useState('');
+  const [focusFirst, setFocusFirst] = useState(0);
+  const [focusRecord, setFocusRecord] = useState(0);
+  const pressing = useRef(false);
+  const [pressingShown, setPressing] = useState(false);
+  const amountRef = useRef<HTMLInputElement | null>(null);
+  const cashRef = useRef<HTMLInputElement | null>(null);
+  const recordRef = useRef<HTMLButtonElement | null>(null);
+  const pressed = useRef<HTMLElement | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  // A pressed control that went while focus was on it (or on <body>): focus goes to the Payments heading, never to the body.
+  useLayoutEffect(() => {
+    const was = pressed.current;
+    if (was === null || was.isConnected) return;
+    pressed.current = null;
+    const at = document.activeElement;
+    if (at === null || at === document.body || at === was) headingRef.current?.focus();
+  });
+  useEffect(() => { if (formOpen) amountRef.current?.focus(); }, [formOpen]);
+  useEffect(() => {
+    if (focusFirst === 0) return;
+    (errors.amount !== '' ? amountRef.current : cashRef.current)?.focus();
+  }, [focusFirst]);
+  useEffect(() => { if (focusRecord > 0) (recordRef.current ?? headingRef.current)?.focus(); }, [focusRecord]);
+
+  const held = recording.held;
+  const mine = held !== undefined && held.storeId === storeId && held.invoiceId === invoiceId ? held : undefined;
+  const blocked = isBlockingPayment(held) && held.storeId === storeId; // R2 N1
+  const deniedHere = mine !== undefined && mine.state === 'done' && mine.say === 'denied';
+  const remaining = page !== null && page.invoice.status === 'issued' ? page.amounts.remainingCents : 0;
+  const offered = allowed && remaining > 0 && !blocked && !deniedHere && !pressingShown;
+  const remainingText = formatCents(remaining);
+  const busy = mine !== undefined && (mine.state === 'sending' || mine.state === 'checking');
+  const attached = mine !== undefined && mine.csrf !== null;
+  const checkable = mine !== undefined && mine.state === 'unresolved' && attached && mine.body !== '' && !recording.expired;
+  const findable = mine !== undefined && !busy && mine.state !== 'done' && !(mine.state === 'recorded' && attached);
+  const lookup = recording.lookup;
+  const flow = pressingShown && mine === undefined ? RECORD_TEXT.recording : notSent !== '' ? notSent : mine === undefined ? '' : paymentFlowText(mine, recording.expired);
+  const press = (el: HTMLElement): void => { pressed.current = el; };
+
+  async function submit(): Promise<void> {
+    if (pressing.current || page === null) return;
+    const checked = paymentAmountOf(amount, remaining);
+    const next = {
+      amount: checked.kind === 'ok' ? '' : checked.kind === 'format' ? RECORD_TEXT.amountFormat : checked.kind === 'decimals' ? RECORD_TEXT.amountDecimals
+        : checked.kind === 'zero' ? RECORD_TEXT.amountZero : RECORD_TEXT.amountOver(remainingText),
+      method: method === null ? RECORD_TEXT.methodMissing : '',
+    };
+    setErrors(next);
+    if (checked.kind !== 'ok' || method === null) { setFocusFirst((n) => n + 1); return; } // nothing is sent
+    pressing.current = true;
+    setPressing(true);
+    setNotSent('');
+    setFormOpen(false);
+    headingRef.current?.focus(); // the form goes: focus to the section's heading
+    try {
+      const why = await recording.record({ invoiceId, number, amountCents: checked.cents, method });
+      if (!alive.current) return;
+      if (why !== null) { setNotSent(why); setFormOpen(true); }
+      else { setAmount(''); setMethod(null); }
+    } finally {
+      pressing.current = false;
+      if (alive.current) setPressing(false);
+    }
+  }
+
+  const errorId = (field: 'amount' | 'method'): string => `issued-payments-${field}-error`;
+  return (
+    <div className="space-y-3 min-w-0">
+      <p data-testid="issued-payments-flow" role="status" className={`text-sm font-bold text-slate-700 ${fitsRow}`}>{flow}</p>
+      {offered && !formOpen && (
+        <button ref={recordRef} type="button" data-testid="issued-payments-record" aria-disabled={waiting} aria-describedby={waiting ? 'issued-payments-wait' : undefined}
+          onClick={() => { if (!waiting) { setNotSent(''); setErrors({ amount: '', method: '' }); setFormOpen(true); } }} className={`${button} ${waitable} ${fitsRow}`}
+        >
+          {RECORD_TEXT.record}
+        </button>
+      )}
+      {offered && formOpen && (
+        <form data-testid="issued-payments-form" noValidate onSubmit={(e) => { e.preventDefault(); void submit(); }} className="space-y-3 min-w-0">
+          <fieldset className="space-y-3 min-w-0">
+            <legend className="text-sm font-black text-primary">{RECORD_TEXT.legend}</legend>
+            <div className="space-y-1 min-w-0">
+              <label htmlFor="issued-payments-amount" className={labelClass}>{RECORD_TEXT.amount}</label>
+              <input
+                ref={amountRef} id="issued-payments-amount" data-testid="issued-payments-amount-input" type="text" inputMode="decimal" autoComplete="off" value={amount}
+                aria-invalid={errors.amount !== ''} aria-describedby={`issued-payments-amount-hint${errors.amount !== '' ? ` ${errorId('amount')}` : ''}`}
+                onChange={(e) => setAmount(e.target.value)} className={inputClass}
+              />
+              <p id="issued-payments-amount-hint" className={`${hintClass} ${fitsRow}`}>{RECORD_TEXT.hint(remainingText)}</p>
+              {errors.amount !== '' && <p id={errorId('amount')} role="alert" className={`text-sm font-bold text-rose-800 ${fitsRow}`}>{errors.amount}</p>}
+            </div>
+            <fieldset role="radiogroup" aria-required="true" aria-invalid={errors.method !== ''} aria-describedby={errors.method !== '' ? errorId('method') : undefined} className="space-y-1 min-w-0">
+              <legend className={labelClass}>{RECORD_TEXT.method}</legend>
+              {(['cash', 'external_card_terminal'] as const).map((m) => (
+                <label key={m} className={`flex items-center gap-2 text-sm text-slate-700 ${fitsRow}`}>
+                  <input
+                    ref={m === 'cash' ? cashRef : undefined} type="radio" name="issued-payments-method" value={m} checked={method === m}
+                    aria-invalid={errors.method !== ''} aria-describedby={errors.method !== '' ? errorId('method') : undefined}
+                    data-testid={m === 'cash' ? 'issued-payments-method-cash' : 'issued-payments-method-card'} onChange={() => setMethod(m)} className={focusRing}
+                  />
+                  {INVOICE_PAYMENT_METHODS[m]}
+                </label>
+              ))}
+              {errors.method !== '' && <p id={errorId('method')} role="alert" className={`text-sm font-bold text-rose-800 ${fitsRow}`}>{errors.method}</p>}
+            </fieldset>
+          </fieldset>
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" data-testid="issued-payments-submit" className={`${button} ${fitsRow}`}>{RECORD_TEXT.submit}</button>
+            <button type="button" data-testid="issued-payments-cancel" onClick={() => { setFormOpen(false); setErrors({ amount: '', method: '' }); setFocusRecord((n) => n + 1); }} className={`${quiet} ${fitsRow}`}>
+              {RECORD_TEXT.cancel}
+            </button>
+          </div>
+        </form>
+      )}
+      {mine !== undefined && (mine.state === 'recorded' && attached || checkable || findable) && (
+        <div className="flex flex-wrap gap-2">
+          {mine.state === 'recorded' && attached && (
+            <button type="button" data-testid="issued-payments-confirm" aria-disabled={waiting} aria-describedby={waiting ? 'issued-payments-wait' : undefined}
+              onClick={(e) => { if (!waiting) { press(e.currentTarget); recording.confirm(); } }} className={`${button} ${waitable} ${fitsRow}`}
+            >
+              {RECORD_TEXT.confirm}
+            </button>
+          )}
+          {checkable && (
+            <button type="button" data-testid="issued-payments-check" aria-disabled={waiting || recording.cooling}
+              aria-describedby={waiting ? 'issued-payments-check-wait' : recording.cooling ? 'issued-payments-check-cool' : undefined}
+              onClick={(e) => { if (!waiting && !recording.cooling) { press(e.currentTarget); recording.check(); } }} className={`${button} ${waitable} ${fitsRow}`}
+            >
+              {RECORD_TEXT.check}
+            </button>
+          )}
+          {findable && (
+            <button type="button" data-testid="issued-payments-find" aria-disabled={lookup?.phase === 'loading' || recording.out}
+              aria-describedby={recording.out ? 'issued-payments-out' : undefined}
+              onClick={(e) => { if (lookup?.phase !== 'loading' && !recording.out) { press(e.currentTarget); recording.find(); } }} className={`${quiet} ${waitable} ${fitsRow}`}
+            >
+              {RECORD_TEXT.find}
+            </button>
+          )}
+          {waiting && <span id="issued-payments-check-wait" className="sr-only">{SETTINGS_TEXT.checkWaiting}</span>}
+          {recording.cooling && <span id="issued-payments-check-cool" className="sr-only">{VOID_TEXT.coolDown}</span>}
+          {recording.out && <span id="issued-payments-out" className="sr-only">{SETTINGS_TEXT.busy}</span>}
+        </div>
+      )}
+      {/* Always mounted (R1 S13): its status line is a live region in place before "Checking your payment attempts…". */}
+      <div data-testid="issued-payments-attempts" data-phase={lookup?.phase ?? 'none'} className="space-y-2 min-w-0">
+        <p role="status" className={`text-sm font-bold text-slate-600 ${fitsRow}`}>{lookup?.text ?? ''}</p>
+        {lookup !== null && lookup.phase === 'failed' && (
+          <button type="button" data-testid="issued-payments-attempts-retry" aria-disabled={waiting} aria-describedby={waiting ? 'issued-payments-wait' : undefined}
+            aria-label="Try again: check your payment attempts" onClick={(e) => { if (!waiting) { press(e.currentTarget); recording.find(); } }} className={`${quiet} ${waitable}`}
+          >
+            {RECORD_TEXT.tryAgain}
+          </button>
+        )}
+        {recording.out && <span id="issued-payments-rows-out" className="sr-only">{SETTINGS_TEXT.busy}</span>}
+        {lookup !== null && lookup.rows.length > 0 && (
+          <ul aria-label="Your unfinished payment attempts on this invoice" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
+            {lookup.rows.map((row, index) => {
+              // Keyed by position (R3-1): no attempt id ever reaches a DOM attribute.
+              const textId = `issued-payments-attempt-text-${index}`;
+              const noteId = `issued-payments-attempt-note-${index}`;
+              const heldBack = rowHeldBack(held, row);
+              const other = heldBack && held !== undefined && held.key !== row.attemptId; // another attempt is undecided (S3)
+              const off = waiting || busy || heldBack || recording.out; // R2 N2: a chain still out holds the row back, said
+              const describedBy = [textId, other ? noteId : '', recording.out ? 'issued-payments-rows-out' : ''].filter((id) => id !== '').join(' ');
+              return (
+                <li key={row.attemptId} data-testid="issued-payments-attempt" data-attempt-state={row.state} className={`px-4 py-3 text-sm space-y-2 ${fitsRow}`}>
+                  <p id={textId} className="font-bold text-slate-700">
+                    {row.payment === null ? RECORD_TEXT.openRow(utcText(row.registeredAt))
+                      : RECORD_TEXT.recordedRow(utcText(row.registeredAt), formatCents(row.payment.amountCents), INVOICE_PAYMENT_METHODS[row.payment.method], utcText(row.payment.recordedAt))}
+                  </p>
+                  {other && <p id={noteId} className={`${hintClass} ${fitsRow}`}>{RECORD_TEXT.finishFirst}</p>}
+                  {row.state === 'open' ? (
+                    <button type="button" data-testid="issued-payments-withdraw" aria-disabled={off} aria-describedby={describedBy}
+                      onClick={(e) => { if (!off) { press(e.currentTarget); recording.settle(row, 1); } }} className={`${quiet} ${waitable} ${fitsRow}`}
+                    >
+                      {RECORD_TEXT.withdraw}
+                    </button>
+                  ) : (
+                    <button type="button" data-testid="issued-payments-attempt-confirm" aria-disabled={off} aria-describedby={describedBy}
+                      onClick={(e) => { if (!off) { press(e.currentTarget); recording.settle(row, 2); } }} className={`${button} ${waitable} ${fitsRow}`}
+                    >
+                      {RECORD_TEXT.confirm}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }
 

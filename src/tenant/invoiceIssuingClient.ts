@@ -69,6 +69,13 @@ export const voidEligibilityPathOf = (storeId: string, invoiceId: string): strin
 export const voidPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/void`;
 /** The payments read (M7B-PAYMENTS-P2A, docs/phase-4/15 §12.3), under the issued invoice's own path (server/runtime/invoicePayments.ts). */
 export const paymentsPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payments`;
+/** Recording (M7B-PAYMENTS-P2B, server/runtime/invoicePayments.ts): the record POST is the payments path itself. */
+export const paymentEligibilityPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-eligibility`;
+export const paymentRegistrationsPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-registrations`;
+export const paymentProofPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-registration-proof`;
+export const paymentSettlementPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-settlement`;
+/** The caller's own payment attempts at one store (every invoice), oldest registration first. */
+export const paymentAttemptsPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/payment-attempts`;
 
 export const LEGAL_NAME_MAX_CHARACTERS = 200;
 export const ISSUING_STORE_NAME_MAX_CHARACTERS = 120;
@@ -126,6 +133,19 @@ export const INVOICE_PAYMENT_REVERSAL_REASONS = Object.freeze({
 export type InvoicePaymentReversalReason = keyof typeof INVOICE_PAYMENT_REVERSAL_REASONS;
 /** The payments read's page: at most 50 (server INVOICE_PAYMENTS_PAGE_SIZE). */
 export const PAYMENTS_PAGE_SIZE = 50;
+/** The attempts read's page: at most 50 (server INVOICE_PAYMENT_ATTEMPTS_PAGE_SIZE). */
+export const PAYMENT_ATTEMPTS_PAGE_SIZE = 50;
+/** The four attempt states, each with its one lifecycle version (server STATE_VERSIONS, 037). */
+export const PAYMENT_ATTEMPT_VERSIONS = Object.freeze({ open: 1, recorded: 2, withdrawn: 3, confirmed: 3 } as const);
+export type PaymentAttemptState = keyof typeof PAYMENT_ATTEMPT_VERSIONS;
+/** Every recording body is at most 1 KiB (server: register, record and settle alike). */
+export const PAYMENT_BODY_MAX_BYTES = 1_024;
+const PROOF_RE = /^[0-9a-f]{64}$/;
+/** The server's Idempotency-Key grammar as this shop mints it: a canonical lowercase UUID version 4 (R1 S7). */
+const KEY_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// A payment amount typed in dollars: 1-13 digits, at most two decimals (so at most 10^15 cents, a safe integer).
+const PAYMENT_AMOUNT_RE = /^(\d{1,13})(?:\.(\d{1,2}))?$/;
+const PAYMENT_DECIMALS_RE = /^\d{1,13}\.\d{3,}$/;
 const isKeyOf = <T extends object>(map: T, value: unknown): value is keyof T => typeof value === 'string' && Object.prototype.hasOwnProperty.call(map, value);
 /** The lifecycle a read reports: its current state only — never which request made it so. */
 export type IssuedStatus = 'issued' | 'voided';
@@ -248,6 +268,49 @@ export type VoidResult =
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
 
+/**
+ * The chain's refusals every recording command shares (M7B-PAYMENTS-P2B): `tenant-conflict` (409 write_conflict in the
+ * chain's envelope), `in-progress`, `key-reused` (422), `not-found` (404, every mismatch alike), `denied` (any chain 403),
+ * `signed-out`, `invalid` (400/413/415) and the 429; `not-sent`: refused here, nothing sent.
+ */
+type PaymentChainKind = 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
+type Unknown = { readonly kind: 'unknown'; readonly responded: boolean };
+/** A register answer: `registered` names the new registration (never a proof); sealed `already-recorded`, `write-conflict`, `invalid-state`. */
+export type RegisterResult =
+  | { readonly kind: 'registered'; readonly registrationId: string; readonly replayed: boolean }
+  | { readonly kind: 'already-recorded' | 'write-conflict' | 'invalid-state' | PaymentChainKind }
+  | RateLimited | Unknown;
+/** A proof answer: the 64-hex proof (memory only: never shown, logged or stored); a 404 for every mismatch alike. */
+export type ProofResult =
+  | { readonly kind: 'proof'; readonly proof: string }
+  | { readonly kind: 'not-found' | 'denied' | 'signed-out' | 'invalid' | 'not-sent' }
+  | RateLimited | Unknown;
+/**
+ * A record answer: `recorded` the 201's payment; sealed `already-recorded`, `invalid-state`, `amount-exceeds`,
+ * `write-conflict`. Its 404 is `unmatched`, never `not-found`: 037 checks the whole scope (registration, session, key
+ * generation, proof) BEFORE already_recorded, so a record 404 can follow a committed payment — the outcome is unknown, and
+ * only the attempts lookup decides it (never a resend, a fresh key or a fresh proof).
+ */
+export type RecordResult =
+  | { readonly kind: 'recorded'; readonly payment: { readonly id: string; readonly amountCents: number; readonly method: InvoicePaymentMethod }; readonly replayed: boolean }
+  | { readonly kind: 'already-recorded' | 'invalid-state' | 'amount-exceeds' | 'write-conflict' | 'unmatched' | Exclude<PaymentChainKind, 'not-found'> }
+  | RateLimited | Unknown;
+/** A settlement answer: `settled` withdrawn (version 1 sent) or confirmed (2); sealed `write-conflict` (the other settlement or state). */
+export type SettleResult =
+  | { readonly kind: 'settled'; readonly state: 'withdrawn' | 'confirmed'; readonly replayed: boolean }
+  | { readonly kind: 'write-conflict' | PaymentChainKind }
+  | RateLimited | Unknown;
+/** One of the caller's own payment attempts as the attempts read answers it (never a registration id). */
+export interface PaymentAttempt {
+  readonly invoiceId: string; readonly invoiceNumber: number; readonly attemptId: string; readonly state: PaymentAttemptState; readonly version: 1 | 2 | 3;
+  readonly registeredAt: string; readonly settledAt: string | null;
+  readonly payment: Omit<InvoicePayment, 'attemptId'> | null;
+}
+/** One attempts page; `nextCursor` `<invoiceId>.<attemptId>` of its last row when more exist. A 400 (an unknown cursor) is `unavailable`. */
+export type AttemptsResult = { readonly kind: 'ok'; readonly attempts: readonly PaymentAttempt[]; readonly nextCursor: string | null } | ReadRefusal;
+/** A typed payment amount: exact integer cents within 1..remaining, or what is wrong with it. */
+export type PaymentAmount = { readonly kind: 'ok'; readonly cents: number } | { readonly kind: 'format' | 'decimals' | 'zero' | 'over' };
+
 // ---- text, rates and times ----
 
 /** A postal address as the server stores it — the whole value trimmed, 1-8 LF lines of 1-120 scalars, no CR anywhere — or null. */
@@ -344,6 +407,60 @@ export function issueBodyOf(expected: IssueExpected): string | null {
 export function voidBodyOf(expectedTenant: string, reasonCode: string): string | null {
   return isCustomerId(expectedTenant) && isVoidReasonCode(reasonCode) ? JSON.stringify({ expectedTenant, reasonCode }) : null;
 }
+
+/**
+ * A payment amount typed in dollars (G8): trimmed, 1-13 digits and at most two decimals, converted EXACTLY by its digits
+ * (never a float), then 1 cent .. `remainingCents` (the payments read's). `decimals`: three or more; `format`: anything else.
+ */
+export function paymentAmountOf(raw: string, remainingCents: number): PaymentAmount {
+  // A remaining that is not a safe integer of cents (never from the strict read) accepts nothing: never a throw.
+  if (!Number.isSafeInteger(remainingCents) || remainingCents < 0) return Object.freeze({ kind: 'over' });
+  const text = raw.trim();
+  const match = PAYMENT_AMOUNT_RE.exec(text);
+  if (match === null) return Object.freeze({ kind: PAYMENT_DECIMALS_RE.test(text) ? 'decimals' : 'format' });
+  const cents = BigInt(match[1]) * 100n + BigInt((match[2] ?? '').padEnd(2, '0'));
+  if (cents === 0n) return Object.freeze({ kind: 'zero' });
+  if (cents > BigInt(remainingCents)) return Object.freeze({ kind: 'over' });
+  return Object.freeze({ kind: 'ok', cents: Number(cents) });
+}
+
+/** The register body, built ONCE: exactly `{"expectedTenant":…,"attemptId":…}` (canonical uuids), or null. */
+export function registerBodyOf(expectedTenant: string, attemptId: string): string | null {
+  return isCustomerId(expectedTenant) && isCustomerId(attemptId) ? JSON.stringify({ expectedTenant, attemptId }) : null;
+}
+/** What a record carries, in the one key order the body is built in. */
+export interface RecordFields {
+  readonly expectedTenant: string; readonly registrationId: string; readonly attemptId: string;
+  readonly amountCents: number; readonly method: InvoicePaymentMethod; readonly registrationProof: string;
+}
+/**
+ * The record body, built ONCE in the fixed order expectedTenant, registrationId, attemptId, amountCents, method,
+ * registrationProof — canonical uuids, a safe integer amount of at least 1 cent, one of the two methods, a 64-hex proof — or null.
+ */
+export function recordBodyOf(f: RecordFields): string | null {
+  const { expectedTenant, registrationId, attemptId, amountCents, method, registrationProof } = f;
+  if (!isCustomerId(expectedTenant) || !isCustomerId(registrationId) || !isCustomerId(attemptId) || !isCount(amountCents, 1, MAX)
+    || !isKeyOf(INVOICE_PAYMENT_METHODS, method) || typeof registrationProof !== 'string' || !PROOF_RE.test(registrationProof)) return null;
+  return JSON.stringify({ expectedTenant, registrationId, attemptId, amountCents, method, registrationProof });
+}
+/** The settlement body, built ONCE: exactly `{"expectedTenant","attemptId","expectedVersion"}` — 1 withdraws an open attempt, 2 confirms a recorded one. */
+export function settleBodyOf(expectedTenant: string, attemptId: string, expectedVersion: 1 | 2): string | null {
+  return isCustomerId(expectedTenant) && isCustomerId(attemptId) && (expectedVersion === 1 || expectedVersion === 2)
+    ? JSON.stringify({ expectedTenant, attemptId, expectedVersion }) : null;
+}
+/** A recording body parsed back, only when it is byte for byte what its builder makes of the values it carries. */
+function sentOf(body: string, rebuild: (parsed: Record<string, unknown>) => string | null): Record<string, unknown> | null {
+  try {
+    if (bytesOf(body) > PAYMENT_BODY_MAX_BYTES) return null;
+    const parsed: unknown = JSON.parse(body);
+    return isPlain(parsed) && rebuild(parsed) === body ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+const registerSentOf = (body: string) => sentOf(body, (p) => registerBodyOf(p.expectedTenant as string, p.attemptId as string));
+const recordSentOf = (body: string) => sentOf(body, (p) => recordBodyOf(p as unknown as RecordFields));
+const settleSentOf = (body: string) => sentOf(body, (p) => settleBodyOf(p.expectedTenant as string, p.attemptId as string, p.expectedVersion as 1 | 2));
 
 // ---- strict answer parsers ----
 
@@ -616,6 +733,56 @@ function paymentsPageOf(body: unknown, invoiceId: string, after: string | null):
   });
 }
 
+const ATTEMPT_KEYS: readonly string[] = ['invoiceId', 'invoiceNumber', 'attemptId', 'state', 'version', 'registeredAt', 'settledAt', 'payment'];
+
+/** One attempt exactly (server attemptOf, restated): its state, version, settlement time and payment agree; times in order. */
+function attemptOf(value: unknown): PaymentAttempt | null {
+  if (!isPlain(value) || !hasKeys(value, ATTEMPT_KEYS)) return null;
+  const { invoiceId, invoiceNumber, attemptId, state, version, registeredAt, settledAt, payment } = value;
+  if (!isCustomerId(invoiceId) || !isCount(invoiceNumber, 1, MAX) || !isCustomerId(attemptId) || !isDraftCreatedAt(registeredAt) || !isKeyOf(PAYMENT_ATTEMPT_VERSIONS, state)) return null;
+  const settled = state === 'withdrawn' || state === 'confirmed';
+  const paid = state === 'recorded' || state === 'confirmed';
+  if (version !== PAYMENT_ATTEMPT_VERSIONS[state] || (settledAt === null) === settled || (payment === null) === paid) return null;
+  if (settledAt !== null && (!isDraftCreatedAt(settledAt) || settledAt < registeredAt)) return null;
+  let money: PaymentAttempt['payment'] = null;
+  if (payment !== null) {
+    const p = isPlain(payment) && hasKeys(payment, PAYMENT_KEYS.filter((k) => k !== 'attemptId')) ? paymentOf({ ...payment, attemptId }) : null;
+    if (p === null) return null;
+    money = Object.freeze({ id: p.id, amountCents: p.amountCents, method: p.method, recordedAt: p.recordedAt, reversal: p.reversal });
+  }
+  return Object.freeze({ invoiceId, invoiceNumber, attemptId, state, version: PAYMENT_ATTEMPT_VERSIONS[state], registeredAt, settledAt: settledAt as string | null, payment: money });
+}
+
+/**
+ * `{ attempts, nextCursor }` exactly: at most 50 attempts, each (invoice, attempt) pair once and never the cursor's,
+ * strictly ordered by (registeredAt, invoiceId, attemptId); a cursor only behind a full page, naming its last row. Otherwise null.
+ */
+function attemptsPageOf(body: unknown, after: string | null): { readonly attempts: readonly PaymentAttempt[]; readonly nextCursor: string | null } | null {
+  if (!isPlain(body) || !hasKeys(body, ['attempts', 'nextCursor']) || !Array.isArray(body.attempts) || body.attempts.length > PAYMENT_ATTEMPTS_PAGE_SIZE) return null;
+  const rows: PaymentAttempt[] = [];
+  const seen = new Set<string>();
+  for (const value of body.attempts as unknown[]) {
+    const a = attemptOf(value);
+    if (a === null) return null;
+    const pair = `${a.invoiceId}.${a.attemptId}`;
+    const prev = rows[rows.length - 1];
+    if (seen.has(pair) || pair === after || (prev !== undefined && !(prev.registeredAt < a.registeredAt || (prev.registeredAt === a.registeredAt
+      && (prev.invoiceId < a.invoiceId || (prev.invoiceId === a.invoiceId && prev.attemptId < a.attemptId)))))) return null;
+    seen.add(pair);
+    rows.push(a);
+  }
+  const last = rows[rows.length - 1];
+  const next = rows.length === PAYMENT_ATTEMPTS_PAGE_SIZE && last !== undefined ? `${last.invoiceId}.${last.attemptId}` : null;
+  if (body.nextCursor !== null && body.nextCursor !== next) return null;
+  return Object.freeze({ attempts: Object.freeze(rows), nextCursor: body.nextCursor === null ? null : next });
+}
+/** An attempts cursor this client could have decoded: `<uuid>.<uuid>`. */
+const isAttemptsCursor = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false;
+  const [a, b, ...rest] = value.split('.');
+  return rest.length === 0 && isCustomerId(a) && isCustomerId(b);
+};
+
 /**
  * What a settings body SENT, read from the caller's own string: its expected version and its values; null when it is not
  * one the server's planner takes (unreadable, over 8 KiB, not exactly the seven keys, a non-canonical tenant, a version
@@ -713,6 +880,21 @@ export interface InvoiceIssuingClient {
    * nothing sent. Never rejects.
    */
   voidInvoice(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<VoidResult>;
+  /** Whether this session may record payments at `storeId` now — action-only, target-blind (voidEligibility's rules). Never rejects. */
+  paymentEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
+  /**
+   * The recording commands (M7B-PAYMENTS-P2B): `body` exactly as its builder made it, under `idempotencyKey` (a canonical
+   * lowercase UUID v4, else not-sent); never aborted
+   * by the caller (no signal: the module's own timeout ends only the wait). A body not byte for byte its builder's or an id
+   * outside its grammar is `not-sent`, nothing sent. One fetch each, never a retry. Never rejects.
+   */
+  registerPayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<RegisterResult>;
+  recordPayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<RecordResult>;
+  settlePayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<SettleResult>;
+  /** The open registration's proof (same session only), its answer naming that registration AND `attemptId`; no signal, as the chain it belongs to. Never rejects. */
+  paymentProof(storeId: string, invoiceId: string, registrationId: string, attemptId: string, csrf: string): Promise<ProofResult>;
+  /** One page of the caller's own payment attempts at `storeId`: page one or the page after a `nextCursor` this client decoded. Never rejects. */
+  paymentAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<AttemptsResult>;
 }
 
 interface Answer { readonly status: number; readonly body: unknown; readonly header: (name: string) => string | null }
@@ -990,7 +1172,136 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return chainRefusal(answer) ?? Object.freeze({ kind: 'unknown', responded: true });
   }
 
-  return Object.freeze({ getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice });
+  // ---- recording (M7B-PAYMENTS-P2B) ----
+
+  async function paymentEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
+    const answer = await read(paymentEligibilityPathOf(storeId, invoiceId), csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const allowed = isPlain(answer.body) && hasKeys(answer.body, ['eligibility']) && answer.body.eligibility === 'allowed';
+      return allowed ? Object.freeze({ kind: 'allowed' }) : UNAVAILABLE;
+    }
+    if (answer.status === 403 && refusalOf(answer.body)?.sealed === false) return Object.freeze({ kind: 'denied' });
+    return readRefusal(answer) ?? UNAVAILABLE;
+  }
+
+  const NOT_SENT = Object.freeze({ kind: 'not-sent' as const });
+  const NO_ANSWER = Object.freeze({ kind: 'unknown' as const, responded: false });
+  const ANSWERED = Object.freeze({ kind: 'unknown' as const, responded: true });
+  /**
+   * What a recording command's non-success answer is: its sealed words (the key's recorded completion, `sealedWords`), then
+   * the chain's own each by status AND word; anything else unknown (the outcome undecided). Never a proof or body text.
+   */
+  function paymentRefusal<K extends string>(answer: Answer, sealedWords: Readonly<Record<string, K>>):
+    { readonly kind: K | Exclude<PaymentChainKind, 'not-sent'> } | RateLimited | Unknown {
+    const { status } = answer;
+    const { sealed, chain } = shapes(answer);
+    // R2 R3: any 422 — whatever its body — is another request's under this key: never undecided (Check-again-able).
+    if (status === 422) return Object.freeze({ kind: 'key-reused' });
+    if (status === 409) for (const [word, kind] of Object.entries(sealedWords)) if (sealed(word)) return Object.freeze({ kind });
+    if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-conflict' });
+    if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
+    if (status === 404 && chain('not_found')) return Object.freeze({ kind: 'not-found' });
+    if (status === 403 && refusalOf(answer.body)?.sealed === false) return Object.freeze({ kind: 'denied' }); // forbidden, a missing context
+    return chainRefusal(answer) ?? ANSWERED;
+  }
+  /** The one object a 2xx body must be: exactly `{ [name]: {...} }` with exactly `keys`; else undefined. */
+  const memberOf = (body: unknown, name: string, keys: readonly string[]): Data | undefined => {
+    const v = isPlain(body) && hasKeys(body, [name]) ? body[name] : undefined;
+    return isPlain(v) && hasKeys(v, keys) ? v : undefined;
+  };
+
+  async function registerPayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<RegisterResult> {
+    const sent = registerSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await command('POST', paymentRegistrationsPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 201) {
+      const replayed = replayOf(answer);
+      const r = memberOf(answer.body, 'registration', ['id', 'invoiceId', 'attemptId', 'state']);
+      if (r !== undefined && isCustomerId(r.id) && r.invoiceId === invoiceId && r.attemptId === sent.attemptId && r.state === 'open' && replayed !== null) {
+        return Object.freeze({ kind: 'registered', registrationId: r.id, replayed });
+      }
+      return ANSWERED;
+    }
+    return paymentRefusal(answer, { already_recorded: 'already-recorded', write_conflict: 'write-conflict', invalid_state: 'invalid-state' } as const);
+  }
+
+  async function paymentProof(storeId: string, invoiceId: string, registrationId: string, attemptId: string, csrf: string): Promise<ProofResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || !isCustomerId(registrationId) || !isCustomerId(attemptId)) return NOT_SENT;
+    // No caller's signal: the proof belongs to the held chain, which no close cancels.
+    const answer = await read(`${paymentProofPathOf(storeId, invoiceId)}?registration=${registrationId}`, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 200) {
+      const got = answer.body;
+      const r = isPlain(got) && hasKeys(got, ['registration', 'proof']) && isPlain(got.registration) && hasKeys(got.registration, ['id', 'invoiceId', 'attemptId']) ? got.registration : undefined;
+      if (r !== undefined && isPlain(got) && r.id === registrationId && r.invoiceId === invoiceId && r.attemptId === attemptId && typeof got.proof === 'string' && PROOF_RE.test(got.proof)) {
+        return Object.freeze({ kind: 'proof', proof: got.proof });
+      }
+      return ANSWERED;
+    }
+    if (answer.status === 404 && shapes(answer).chain('not_found')) return Object.freeze({ kind: 'not-found' });
+    if (answer.status === 400 && shapes(answer).chain('invalid_request')) return Object.freeze({ kind: 'invalid' });
+    if (answer.status === 403 && refusalOf(answer.body)?.sealed === false) return Object.freeze({ kind: 'denied' });
+    const refused = readRefusal(answer);
+    return refused === null || refused.kind === 'unavailable' ? ANSWERED : refused.kind === 'rate-limited' ? refused : Object.freeze({ kind: refused.kind });
+  }
+
+  async function recordPayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<RecordResult> {
+    const sent = recordSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await command('POST', paymentsPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 201) {
+      const replayed = replayOf(answer);
+      const p = memberOf(answer.body, 'payment', ['id', 'invoiceId', 'attemptId', 'amountCents', 'method']);
+      if (p !== undefined && isCustomerId(p.id) && p.invoiceId === invoiceId && p.attemptId === sent.attemptId && p.amountCents === sent.amountCents
+        && p.method === sent.method && isKeyOf(INVOICE_PAYMENT_METHODS, p.method) && replayed !== null) {
+        return Object.freeze({ kind: 'recorded', payment: Object.freeze({ id: p.id, amountCents: sent.amountCents as number, method: p.method }), replayed });
+      }
+      return ANSWERED;
+    }
+    // A record 404 proves nothing about an earlier delivery of this attempt (it may have committed): lookup only.
+    if (answer.status === 404) return Object.freeze({ kind: 'unmatched' }); // R2 R3: any record 404, whatever its body
+    const refused = paymentRefusal(answer, {
+      already_recorded: 'already-recorded', invalid_state: 'invalid-state', amount_exceeds_remaining: 'amount-exceeds', write_conflict: 'write-conflict',
+    } as const);
+    return refused.kind === 'not-found' ? ANSWERED : refused as RecordResult; // unreachable (the 404 above), kept total
+  }
+
+  async function settlePayment(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<SettleResult> {
+    const sent = settleSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await command('POST', paymentSettlementPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 200) {
+      const replayed = replayOf(answer);
+      const s = memberOf(answer.body, 'settlement', ['invoiceId', 'attemptId', 'state']);
+      const state = sent.expectedVersion === 1 ? 'withdrawn' : 'confirmed';
+      if (s !== undefined && s.invoiceId === invoiceId && s.attemptId === sent.attemptId && s.state === state && replayed !== null) {
+        return Object.freeze({ kind: 'settled', state, replayed });
+      }
+      return ANSWERED;
+    }
+    return paymentRefusal(answer, { write_conflict: 'write-conflict' } as const);
+  }
+
+  async function paymentAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<AttemptsResult> {
+    if (!isCustomerId(storeId) || (after !== null && !isAttemptsCursor(after))) return UNAVAILABLE; // nothing is sent
+    const answer = await read(`${paymentAttemptsPathOf(storeId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const page = attemptsPageOf(answer.body, after);
+      return page === null ? UNAVAILABLE : Object.freeze({ kind: 'ok', ...page });
+    }
+    return readRefusal(answer) ?? UNAVAILABLE; // a 400 (an unknown cursor among them) included
+  }
+
+  return Object.freeze({
+    getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice,
+    paymentEligibility, registerPayment, paymentProof, recordPayment, settlePayment, paymentAttempts,
+  });
 }
 
 /** The shop's one issuing client. */

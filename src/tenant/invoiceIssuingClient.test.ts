@@ -16,13 +16,17 @@ import {
   issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf, issuingSettingsBody, issuingSettingsPathOf, normalizePostalAddress, parseRatePercent, rateDigits, rateText,
   isVoidTarget, sameSettingsValues, utcText, voidBodyOf, voidEligibilityPathOf, voidPathOf, type IssuingSettingsFields,
 } from './invoiceIssuingClient';
+import {
+  PAYMENT_ATTEMPTS_PAGE_SIZE, PAYMENT_ATTEMPT_VERSIONS, paymentAmountOf, paymentAttemptsPathOf, paymentEligibilityPathOf, paymentProofPathOf, paymentRegistrationsPathOf,
+  paymentSettlementPathOf, recordBodyOf, registerBodyOf, settleBodyOf, type RecordFields,
+} from './invoiceIssuingClient';
 import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
 import { invoiceTaxOf, issueAmountsOf } from '../../server/runtime/invoiceIssuing';
 import { INVOICE_VOID_REASON_CODES, INVOICE_VOID_REASON_LABELS } from '../../server/runtime/invoiceVoid';
 import {
   INVOICE_PAYMENTS_PAGE_SIZE, INVOICE_PAYMENT_METHODS as SERVER_PAYMENT_METHODS, INVOICE_PAYMENT_METHOD_LABELS, INVOICE_PAYMENT_REVERSAL_REASON_CODES, INVOICE_PAYMENT_REVERSAL_REASON_LABELS,
-  INVOICE_PAYMENT_STATUSES as SERVER_PAYMENT_STATUSES,
+  INVOICE_PAYMENT_STATUSES as SERVER_PAYMENT_STATUSES, INVOICE_PAYMENT_ATTEMPTS_PAGE_SIZE, INVOICE_PAYMENT_ATTEMPT_STATES,
 } from '../../server/runtime/invoicePayments';
 
 const cp = (code: number): string => String.fromCodePoint(code);
@@ -1254,4 +1258,296 @@ test('IIC-35. a payments refusal counts only by status AND word AND envelope: 40
     assert.deepEqual(await client.getPayments(store, invoice, after, CSRF), { kind: 'unavailable' }, `${store} ${invoice} ${after}`);
   }
   assert.equal(calls.length, 0);
+});
+
+// ---- M7B-PAYMENTS-P2B: recording a payment — register, proof, record, settle, the attempts lookup and the eligibility ----
+const REG = uuid(0x4e1);
+const ATTEMPT = uuid(0xa7e);
+const PROOF = ['0123456789abcdef'.repeat(2), 'fedcba9876543210'.repeat(2)].join('');
+const BASE = `/api/v1/stores/${STORE}/invoices/${INVOICE}`;
+const REGISTER_BODY = `{"expectedTenant":"${TENANT}","attemptId":"${ATTEMPT}"}`;
+const RECORD_FIELDS: RecordFields = Object.freeze({ expectedTenant: TENANT, registrationId: REG, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', registrationProof: PROOF });
+const RECORD_BODY = `{"expectedTenant":"${TENANT}","registrationId":"${REG}","attemptId":"${ATTEMPT}","amountCents":1250,"method":"cash","registrationProof":"${PROOF}"}`;
+const SETTLE_BODY = (v: 1 | 2) => `{"expectedTenant":"${TENANT}","attemptId":"${ATTEMPT}","expectedVersion":${v}}`;
+const registered = (over: Record<string, unknown> = {}) => ({ registration: { id: REG, invoiceId: INVOICE, attemptId: ATTEMPT, state: 'open', ...over } });
+const proofBody = (over: Record<string, unknown> = {}, proof: unknown = PROOF) => ({ registration: { id: REG, invoiceId: INVOICE, attemptId: ATTEMPT, ...over }, proof });
+const recorded = (over: Record<string, unknown> = {}) => ({ payment: { id: uuid(0x9e1), invoiceId: INVOICE, attemptId: ATTEMPT, amountCents: 1250, method: 'cash', ...over } });
+const settled = (state: string, over: Record<string, unknown> = {}) => ({ settlement: { invoiceId: INVOICE, attemptId: ATTEMPT, state, ...over } });
+const attempt = (n: number, over: Record<string, unknown> = {}) => ({
+  invoiceId: INVOICE, invoiceNumber: 7, attemptId: uuid(0xa000 + n), state: 'open', version: 1, registeredAt: at(n), settledAt: null, payment: null as unknown, ...over,
+});
+const attemptPayment = (over: Record<string, unknown> = {}) => ({ id: uuid(0x9e1), amountCents: 1250, method: 'cash', recordedAt: at(59), reversal: null, ...over });
+
+test('IIC-36. the recording paths and the server\'s constants: payment-eligibility, payment-registrations, payment-registration-proof, payments (the record), payment-settlement under the invoice, payment-attempts under the store; the attempts page 50 and the four states with their versions', () => {
+  assert.equal(paymentEligibilityPathOf(STORE, INVOICE), `${BASE}/payment-eligibility`);
+  assert.equal(paymentRegistrationsPathOf(STORE, INVOICE), `${BASE}/payment-registrations`);
+  assert.equal(paymentProofPathOf(STORE, INVOICE), `${BASE}/payment-registration-proof`);
+  assert.equal(paymentsPathOf(STORE, INVOICE), `${BASE}/payments`);
+  assert.equal(paymentSettlementPathOf(STORE, INVOICE), `${BASE}/payment-settlement`);
+  assert.equal(paymentAttemptsPathOf(STORE), `/api/v1/stores/${STORE}/payment-attempts`);
+  assert.equal(PAYMENT_ATTEMPTS_PAGE_SIZE, INVOICE_PAYMENT_ATTEMPTS_PAGE_SIZE);
+  assert.deepEqual(Object.keys(PAYMENT_ATTEMPT_VERSIONS), [...INVOICE_PAYMENT_ATTEMPT_STATES]);
+  assert.deepEqual(Object.values(PAYMENT_ATTEMPT_VERSIONS), [1, 2, 3, 3]);
+});
+
+test('IIC-37. each recording request is ONE fetch: the three commands POST with exactly the five command headers and the caller\'s exact bytes, the proof and the attempts GET with the session token alone; same-origin, credentialed, uncached, never redirected; the commands and the proof take no AbortSignal', async () => {
+  const no = () => refused(503, 'service_unavailable');
+  const { calls, client } = scripted(no(), no(), no(), no(), no(), no(), no());
+  await client.paymentEligibility(STORE, INVOICE, CSRF);
+  await client.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF);
+  await client.paymentProof(STORE, INVOICE, REG, ATTEMPT, CSRF);
+  await client.recordPayment(STORE, INVOICE, KEY, RECORD_BODY, CSRF);
+  await client.settlePayment(STORE, INVOICE, KEY, SETTLE_BODY(2), CSRF);
+  await client.paymentAttempts(STORE, null, CSRF);
+  await client.paymentAttempts(STORE, `${INVOICE}.${ATTEMPT}`, CSRF);
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url}`), [
+    `GET ${BASE}/payment-eligibility`, `POST ${BASE}/payment-registrations`, `GET ${BASE}/payment-registration-proof?registration=${REG}`, `POST ${BASE}/payments`,
+    `POST ${BASE}/payment-settlement`, `GET /api/v1/stores/${STORE}/payment-attempts`, `GET /api/v1/stores/${STORE}/payment-attempts?after=${INVOICE}.${ATTEMPT}`,
+  ]);
+  const READ = [['accept', 'application/json'], ['x-tmpos-session-csrf', CSRF]];
+  const COMMAND = [['accept', 'application/json'], ['content-type', 'application/json'], ['idempotency-key', KEY], ['x-tmpos-csrf', '1'], ['x-tmpos-session-csrf', CSRF]];
+  calls.forEach((call, i) => {
+    assert.equal(call.init.credentials, 'include');
+    assert.equal(call.init.mode, 'same-origin');
+    assert.equal(call.init.cache, 'no-store');
+    assert.equal(call.init.redirect, 'error');
+    assert.equal(call.init.referrerPolicy, 'no-referrer');
+    assert.ok(call.init.signal instanceof AbortSignal);
+    // R2 U1: the key and the token are compared, never printed.
+    assert.ok(JSON.stringify([...headersOf(call).entries()]) === JSON.stringify(call.init.method === 'POST' ? COMMAND : READ), `headers of request ${i}`);
+  });
+  assert.ok(calls[1].init.body === REGISTER_BODY && calls[3].init.body === RECORD_BODY && calls[4].init.body === SETTLE_BODY(2), 'the caller\'s exact bytes');
+  assert.equal(calls[2].init.body, undefined);
+  assert.deepEqual([client.registerPayment.length, client.recordPayment.length, client.settlePayment.length, client.paymentProof.length], [5, 5, 5, 5]);
+});
+
+test('IIC-38. the bodies are built ONCE in their fixed key order — register {expectedTenant, attemptId}; record {expectedTenant, registrationId, attemptId, amountCents, method, registrationProof}; settle {expectedTenant, attemptId, expectedVersion 1|2} — and a body not byte for byte its builder\'s, or a bad id, sends NOTHING (not-sent)', async () => {
+  assert.ok(registerBodyOf(TENANT, ATTEMPT) === REGISTER_BODY, 'the builder\'s answer');
+  assert.ok(recordBodyOf(RECORD_FIELDS) === RECORD_BODY, 'the record bytes in the fixed order');
+  assert.ok(settleBodyOf(TENANT, ATTEMPT, 1) === SETTLE_BODY(1), 'the builder\'s answer');
+  assert.ok(settleBodyOf(TENANT, ATTEMPT, 2) === SETTLE_BODY(2), 'the builder\'s answer');
+  for (const bad of [TENANT.toUpperCase(), 'x', '']) assert.ok(registerBodyOf(bad, ATTEMPT) === null, bad);
+  assert.ok(registerBodyOf(TENANT, ATTEMPT.toUpperCase()) === null, 'the builder\'s answer');
+  for (const over of [
+    { amountCents: 0 }, { amountCents: -1 }, { amountCents: 1.5 }, { amountCents: MAX + 1 }, { amountCents: '1250' }, { method: 'card' }, { method: 'toString' },
+    { registrationProof: PROOF.slice(1) }, { registrationProof: PROOF.toUpperCase() }, { registrationProof: `${PROOF}0` }, { registrationId: 'x' }, { attemptId: REG.toUpperCase() },
+  ]) assert.ok(recordBodyOf({ ...RECORD_FIELDS, ...over } as RecordFields) === null, JSON.stringify(Object.keys(over)));
+  assert.ok(recordBodyOf({ ...RECORD_FIELDS, amountCents: MAX }) === RECORD_BODY.replace('1250', String(MAX)), 'the largest amount');
+  for (const v of [0, 3, '1']) assert.ok(settleBodyOf(TENANT, ATTEMPT, v as 1) === null, String(v));
+  const { calls, client } = scripted();
+  const notSent = { kind: 'not-sent' };
+  for (const [i, body] of [`${REGISTER_BODY} `, `{"attemptId":"${ATTEMPT}","expectedTenant":"${TENANT}"}`, REGISTER_BODY.replace('}', ',"x":1}'), REGISTER_BODY.replace(TENANT, TENANT.toUpperCase()), ''].entries()) {
+    assert.deepEqual(await client.registerPayment(STORE, INVOICE, KEY, body, CSRF), notSent, `register body row ${i}`);
+  }
+  for (const body of [RECORD_BODY.replace('"amountCents":1250', '"amountCents":1250.0'), RECORD_BODY.replace(PROOF, PROOF.toUpperCase()), RECORD_BODY.replace('cash', 'other'), ` ${RECORD_BODY}`]) {
+    assert.deepEqual(await client.recordPayment(STORE, INVOICE, KEY, body, CSRF), notSent);
+  }
+  for (const body of [SETTLE_BODY(1).replace(':1}', ':3}'), SETTLE_BODY(2).replace(':2}', ':"2"}'), `{"attemptId":"${ATTEMPT}","expectedTenant":"${TENANT}","expectedVersion":1}`]) {
+    assert.deepEqual(await client.settlePayment(STORE, INVOICE, KEY, body, CSRF), notSent, 'a settle body not the builder\'s');
+  }
+  for (const [store, invoice] of [['x', INVOICE], [STORE.toUpperCase(), INVOICE], [STORE, 'x'], [STORE, `${INVOICE}/x`]]) {
+    assert.deepEqual(await client.registerPayment(store, invoice, KEY, REGISTER_BODY, CSRF), notSent);
+    assert.deepEqual(await client.recordPayment(store, invoice, KEY, RECORD_BODY, CSRF), notSent);
+    assert.deepEqual(await client.settlePayment(store, invoice, KEY, SETTLE_BODY(1), CSRF), notSent);
+    assert.deepEqual(await client.paymentProof(store, invoice, REG, ATTEMPT, CSRF), notSent);
+    assert.deepEqual(await client.paymentEligibility(store, invoice, CSRF), { kind: 'denied' });
+  }
+  assert.deepEqual(await client.paymentProof(STORE, INVOICE, `${REG}&x=1`, ATTEMPT, CSRF), notSent);
+  for (const after of ['', 'x', INVOICE, `${INVOICE}.${ATTEMPT}.x`, `${INVOICE}.${ATTEMPT.toUpperCase()}`, `${INVOICE}.${ATTEMPT}&x=1`]) {
+    assert.deepEqual(await client.paymentAttempts(STORE, after, CSRF), { kind: 'unavailable' }, after);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('IIC-39. a success counts ONLY exactly: register 201 naming the invoice, the attempt sent and state open; proof 200 naming the registration and invoice with a 64 lowercase-hex proof; record 201 echoing the attempt, amount and method sent; settle 200 withdrawn for version 1 and confirmed for 2 — the replay header absent or "true"; anything else is unknown (responded)', async () => {
+  const one = async <T>(reply: Response, call: (c: ReturnType<typeof scripted>['client']) => Promise<T>): Promise<T> => call(scripted(reply).client);
+  const reg = (r: Response) => one(r, (c) => c.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF));
+  const prf = (r: Response) => one(r, (c) => c.paymentProof(STORE, INVOICE, REG, ATTEMPT, CSRF));
+  const rec = (r: Response) => one(r, (c) => c.recordPayment(STORE, INVOICE, KEY, RECORD_BODY, CSRF));
+  const stl = (v: 1 | 2, r: Response) => one(r, (c) => c.settlePayment(STORE, INVOICE, KEY, SETTLE_BODY(v), CSRF));
+  const ANSWERED = { kind: 'unknown', responded: true };
+  assert.deepEqual(await reg(json(201, registered())), { kind: 'registered', registrationId: REG, replayed: false });
+  assert.deepEqual(await reg(json(201, registered(), { 'idempotent-replayed': 'true' })), { kind: 'registered', registrationId: REG, replayed: true });
+  for (const r of [json(201, registered(), { 'idempotent-replayed': 'false' }), json(200, registered()), json(201, registered({ state: 'recorded' })), json(201, registered({ invoiceId: uuid(9) })),
+    json(201, registered({ attemptId: uuid(9) })), json(201, registered({ id: 'x' })), json(201, registered({ proof: PROOF })), json(201, { ...registered(), x: 1 })]) assert.deepEqual(await reg(r), ANSWERED);
+  const got = await prf(json(200, proofBody()));
+  assert.ok(got.kind === 'proof' && got.proof === PROOF, 'the proof accepted'); // R2 U1: never printed
+  for (const r of [json(200, proofBody({ id: uuid(9) })), json(200, proofBody({ invoiceId: uuid(9) })), json(200, proofBody({}, PROOF.toUpperCase())), json(200, proofBody({}, PROOF.slice(2))),
+    json(200, proofBody({ state: 'open' })), json(200, { ...proofBody(), x: 1 }), json(201, proofBody())]) assert.deepEqual(await prf(r), ANSWERED);
+  assert.deepEqual(await rec(json(201, recorded())), { kind: 'recorded', payment: { id: uuid(0x9e1), amountCents: 1250, method: 'cash' }, replayed: false });
+  assert.deepEqual((await rec(json(201, recorded(), { 'idempotent-replayed': 'true' }))).kind, 'recorded');
+  for (const r of [json(201, recorded({ amountCents: 1251 })), json(201, recorded({ method: 'external_card_terminal' })), json(201, recorded({ attemptId: uuid(9) })), json(201, recorded({ invoiceId: uuid(9) })),
+    json(201, recorded({ registrationProof: PROOF })), json(200, recorded()), json(201, recorded(), { 'idempotent-replayed': 'yes' })]) assert.deepEqual(await rec(r), ANSWERED);
+  assert.deepEqual(await stl(1, json(200, settled('withdrawn'))), { kind: 'settled', state: 'withdrawn', replayed: false });
+  assert.deepEqual(await stl(2, json(200, settled('confirmed'), { 'idempotent-replayed': 'true' })), { kind: 'settled', state: 'confirmed', replayed: true });
+  for (const [v, r] of [[1, json(200, settled('confirmed'))], [2, json(200, settled('withdrawn'))], [2, json(200, settled('confirmed', { attemptId: uuid(9) }))], [2, json(201, settled('confirmed'))],
+    [2, json(200, settled('confirmed', { version: 3 }))]] as Array<[1 | 2, Response]>) assert.deepEqual(await stl(v, r), ANSWERED);
+});
+
+test('IIC-40. every other recording answer is ONE outcome by status AND word AND envelope — sealed words only exactly {error} (register already_recorded/write_conflict/invalid_state, record already_recorded/invalid_state/amount_exceeds_remaining/write_conflict, settle write_conflict), the chain\'s write_conflict tenant-conflict, request_in_progress, 422, 404, any chain 403, 401, 400/413/415 and the 429 with its Retry-After; a 503, an unnamed word or no answer unknown; ONE fetch each, never a retry; no proof in any outcome but the proof\'s', async () => {
+  const common = (): Array<[Response | Error, unknown]> => [
+    [refused(409, 'write_conflict'), { kind: 'tenant-conflict' }], [refused(409, 'request_in_progress'), { kind: 'in-progress' }], [sealed(409, 'request_in_progress'), { kind: 'unknown', responded: true }],
+    [refused(422, 'idempotency_key_reused'), { kind: 'key-reused' }], [refused(404, 'not_found'), { kind: 'not-found' }], [sealed(404, 'not_found'), { kind: 'unknown', responded: true }],
+    [refused(403, 'forbidden'), { kind: 'denied' }], [refused(403, 'csrf_failed'), { kind: 'denied' }], [refused(401, 'unauthenticated'), { kind: 'signed-out' }],
+    [refused(400, 'invalid_request'), { kind: 'invalid' }], [refused(413, 'content_too_large'), { kind: 'invalid' }], [refused(415, 'unsupported_media_type'), { kind: 'invalid' }],
+    [refused(429, 'rate_limited', { 'retry-after': '9' }), { kind: 'rate-limited', retryAfterSeconds: 9 }], [refused(503, 'service_unavailable'), { kind: 'unknown', responded: true }],
+    [refused(409, 'payments_recorded'), { kind: 'unknown', responded: true }], [json(409, { error: 'already_recorded', x: 'y' }), { kind: 'unknown', responded: true }],
+    [network(), { kind: 'unknown', responded: false }],
+  ];
+  const sealedOf: Record<'register' | 'record' | 'settle', Array<[string, string]>> = {
+    register: [['already_recorded', 'already-recorded'], ['write_conflict', 'write-conflict'], ['invalid_state', 'invalid-state'], ['amount_exceeds_remaining', '']],
+    record: [['already_recorded', 'already-recorded'], ['invalid_state', 'invalid-state'], ['amount_exceeds_remaining', 'amount-exceeds'], ['write_conflict', 'write-conflict']],
+    settle: [['write_conflict', 'write-conflict'], ['invalid_state', ''], ['already_recorded', '']],
+  };
+  const run = { register: (c: ReturnType<typeof scripted>['client']) => c.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF),
+    record: (c: ReturnType<typeof scripted>['client']) => c.recordPayment(STORE, INVOICE, KEY, RECORD_BODY, CSRF),
+    settle: (c: ReturnType<typeof scripted>['client']) => c.settlePayment(STORE, INVOICE, KEY, SETTLE_BODY(1), CSRF) };
+  for (const command of ['register', 'record', 'settle'] as const) {
+    // The record's 404 is `unmatched` (037 checks the whole scope before already_recorded: it may follow a committed payment).
+    // R2 R3: ANY record 404 is `unmatched` (whatever its body); ANY 422 is `key-reused` for every command.
+    const fixed = (rows: Array<[Response | Error, unknown]>) => rows.map(([r, o]): [Response | Error, unknown] =>
+      [r, r instanceof Response && r.status === 404 && command === 'record' ? { kind: 'unmatched' } : r instanceof Response && r.status === 422 ? { kind: 'key-reused' } : o]);
+    const rows: Array<[Response | Error, unknown]> = [...fixed(common()), ...sealedOf[command].map(([word, kind]): [Response, unknown] => [sealed(409, word), kind === '' ? { kind: 'unknown', responded: true } : { kind }])];
+    for (const [reply, outcome] of rows) {
+      const name = `${command} ${await rowName(reply)}`;
+      const { calls, client } = scripted(reply);
+      const got = await run[command](client);
+      assert.deepEqual(got, outcome, name);
+      assert.equal(calls.length, 1, name);
+      assert.ok(!JSON.stringify(got).includes(PROOF), name);
+    }
+  }
+  const proofRows: Array<[Response | Error, unknown]> = [
+    [refused(404, 'not_found'), { kind: 'not-found' }], [refused(403, 'forbidden'), { kind: 'denied' }], [refused(401, 'unauthenticated'), { kind: 'signed-out' }],
+    [refused(400, 'invalid_request'), { kind: 'invalid' }], [refused(429, 'rate_limited', { 'retry-after': '3' }), { kind: 'rate-limited', retryAfterSeconds: 3 }],
+    [refused(503, 'service_unavailable'), { kind: 'unknown', responded: true }], [sealed(404, 'not_found'), { kind: 'unknown', responded: true }], [network(), { kind: 'unknown', responded: false }],
+  ];
+  for (const [reply, outcome] of proofRows) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.paymentProof(STORE, INVOICE, REG, ATTEMPT, CSRF), outcome, name);
+    assert.equal(calls.length, 1);
+  }
+});
+
+test('IIC-41. the payment eligibility: allowed ONLY for a 200 exactly { eligibility: "allowed" }; any chain 403 denied; 401 signed-out, 429 its wait, everything else unavailable; one GET', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [json(200, { eligibility: 'allowed' }), { kind: 'allowed' }], [json(200, { eligibility: 'allowed', x: 1 }), { kind: 'unavailable' }], [json(200, { eligibility: 'denied' }), { kind: 'unavailable' }],
+    [refused(403, 'forbidden'), { kind: 'denied' }], [refused(403, 'step_up_required'), { kind: 'denied' }], [sealed(403, 'forbidden'), { kind: 'unavailable' }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '4' }), { kind: 'rate-limited', retryAfterSeconds: 4 }],
+    [refused(503, 'service_unavailable'), { kind: 'unavailable' }], [network(), { kind: 'unavailable' }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.paymentEligibility(STORE, INVOICE, CSRF), outcome, name);
+    assert.equal(calls.length, 1);
+  }
+});
+
+test('IIC-42. the attempts page counts ONLY exactly as the server writes it: state and version agree (open 1, recorded 2, withdrawn/confirmed 3), a settlement time iff settled and not before the registration, a payment iff recorded or confirmed (exact keys, no attemptId), ordered by (registeredAt, invoiceId, attemptId), ≤ 50, the cursor only behind a full page naming its last row; refusals by status and word, a 400 unavailable', async () => {
+  const page = (attempts: unknown[], nextCursor: string | null = null) => json(200, { attempts, nextCursor });
+  const read = async (reply: Response | Error, after: string | null = null) => scripted(reply).client.paymentAttempts(STORE, after, CSRF);
+  const rows = [attempt(1), attempt(2, { state: 'recorded', version: 2, payment: attemptPayment() }), attempt(3, { state: 'withdrawn', version: 3, settledAt: at(4) }),
+    attempt(5, { state: 'confirmed', version: 3, settledAt: at(60), payment: attemptPayment({ reversal: { reversedAt: at(61), reasonCode: 'duplicate' } }) })];
+  const ok = await read(page(rows));
+  assert.equal(ok.kind, 'ok');
+  if (ok.kind === 'ok') {
+    assert.deepEqual(ok.attempts.map((a) => [a.state, a.version, a.payment?.amountCents ?? null]), [['open', 1, null], ['recorded', 2, 1250], ['withdrawn', 3, null], ['confirmed', 3, 1250]]);
+    assert.equal(ok.nextCursor, null);
+  }
+  const full = Array.from({ length: 50 }, (_, i) => attempt(i + 1));
+  const last = `${INVOICE}.${uuid(0xa000 + 50)}`;
+  assert.deepEqual((await read(page(full, last))).kind, 'ok');
+  for (const [name, reply] of [
+    ['version', page([attempt(1, { version: 2 })])], ['recorded without payment', page([attempt(1, { state: 'recorded', version: 2 })])], ['open with payment', page([attempt(1, { payment: attemptPayment() })])],
+    ['settled without time', page([attempt(1, { state: 'withdrawn', version: 3 })])], ['open with time', page([attempt(1, { settledAt: at(2) })])], ['settled before', page([attempt(5, { state: 'withdrawn', version: 3, settledAt: at(1) })])],
+    ['state', page([attempt(1, { state: 'reversed' })])], ['extra key', page([attempt(1, { registrationId: REG })])], ['payment attemptId', page([attempt(1, { state: 'recorded', version: 2, payment: { ...attemptPayment(), attemptId: ATTEMPT } })])],
+    ['order', page([attempt(2), attempt(1)])], ['twice', page([attempt(1), attempt(1)])], ['51', page([...full, attempt(51)])], ['cursor short page', page([attempt(1)], `${INVOICE}.${uuid(0xa001)}`)],
+    ['cursor other row', page(full, `${INVOICE}.${uuid(0xa001)}`)], ['extra', json(200, { attempts: [], nextCursor: null, x: 1 })], ['number', page([attempt(1, { invoiceNumber: 0 })])],
+  ] as Array<[string, Response]>) assert.deepEqual(await read(reply), { kind: 'unavailable' }, name);
+  assert.deepEqual(await read(page([attempt(1)]), `${INVOICE}.${uuid(0xa001)}`), { kind: 'unavailable' }); // the cursor's own row again
+  for (const [reply, outcome] of [
+    [refused(403, 'forbidden'), { kind: 'denied' }], [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '5' }), { kind: 'rate-limited', retryAfterSeconds: 5 }],
+    [refused(400, 'invalid_request'), { kind: 'unavailable' }], [refused(503, 'service_unavailable'), { kind: 'unavailable' }], [network(), { kind: 'unavailable' }],
+  ] as Array<[Response | Error, unknown]>) { const name = await rowName(reply); assert.deepEqual(await read(reply), outcome, name); }
+});
+
+test('IIC-43. the amount typed (G8): trimmed dollars, 1-13 digits and at most two decimals, converted exactly by its digits (never a float) to 1..remaining cents; three decimals, zero, over the remaining and anything else each say which', () => {
+  const table: Array<[string, number, unknown]> = [
+    ['12.50', 5000, { kind: 'ok', cents: 1250 }], [' 12.5 ', 5000, { kind: 'ok', cents: 1250 }], ['0.01', 1, { kind: 'ok', cents: 1 }], ['50', 5000, { kind: 'ok', cents: 5000 }],
+    ['0.29', 100, { kind: 'ok', cents: 29 }], ['1.10', 200, { kind: 'ok', cents: 110 }], ['9999999999999.99', MAX, { kind: 'ok', cents: 999999999999999 }],
+    ['50.01', 5000, { kind: 'over' }], ['0', 5000, { kind: 'zero' }], ['0.00', 5000, { kind: 'zero' }], ['1.234', 5000, { kind: 'decimals' }], ['1.2345', 5000, { kind: 'decimals' }],
+    ['', 5000, { kind: 'format' }], ['-1', 5000, { kind: 'format' }], ['1e2', 5000, { kind: 'format' }], ['$1', 5000, { kind: 'format' }], ['1,000', 5000, { kind: 'format' }],
+    ['.5', 5000, { kind: 'format' }], ['5.', 5000, { kind: 'format' }], ['12345678901234', MAX, { kind: 'format' }], [`1${cp(0x0661)}`, 5000, { kind: 'format' }],
+    ['1', MAX + 1, { kind: 'over' }], ['1', 1.5, { kind: 'over' }], ['1', -1, { kind: 'over' }], ['1', Number.NaN, { kind: 'over' }],
+  ];
+  for (const [raw, remaining, outcome] of table) assert.deepEqual(paymentAmountOf(raw, remaining), outcome, raw);
+});
+
+test('IIC-44. R1: a recording command sends NOTHING (not-sent) under an Idempotency-Key that is not a canonical lowercase UUID v4; the proof counts only when its answer names the attempt asked; replays say replayed; a 429\'s Retry-After missing, unreadable or in the date form waits the default 60 seconds', async () => {
+  const { calls, client } = scripted();
+  for (const [i, key] of [KEY.toUpperCase(), KEY.replace('-4a6b-', '-1a6b-'), KEY.replace('-9c8d-', '-7c8d-'), `${KEY} `, KEY.replace(/-/g, ''), '', 'x'].entries()) {
+    assert.equal((await client.registerPayment(STORE, INVOICE, key, REGISTER_BODY, CSRF)).kind, 'not-sent', `key row ${i}`);
+    assert.equal((await client.recordPayment(STORE, INVOICE, key, RECORD_BODY, CSRF)).kind, 'not-sent', `key row ${i}`);
+    assert.equal((await client.settlePayment(STORE, INVOICE, key, SETTLE_BODY(1), CSRF)).kind, 'not-sent', `key row ${i}`);
+  }
+  assert.equal(calls.length, 0);
+  assert.deepEqual(await client.paymentProof(STORE, INVOICE, REG, 'x', CSRF), { kind: 'not-sent' });
+  assert.deepEqual(await scripted(json(200, proofBody({ attemptId: uuid(9) }))).client.paymentProof(STORE, INVOICE, REG, ATTEMPT, CSRF), { kind: 'unknown', responded: true });
+  assert.deepEqual(await scripted(json(200, proofBody())).client.paymentProof(STORE, INVOICE, REG, uuid(9), CSRF), { kind: 'unknown', responded: true });
+  const replay = { 'idempotent-replayed': 'true' };
+  assert.deepEqual(await scripted(json(201, recorded(), replay)).client.recordPayment(STORE, INVOICE, KEY, RECORD_BODY, CSRF),
+    { kind: 'recorded', payment: { id: uuid(0x9e1), amountCents: 1250, method: 'cash' }, replayed: true });
+  assert.deepEqual(await scripted(json(200, settled('withdrawn'), replay)).client.settlePayment(STORE, INVOICE, KEY, SETTLE_BODY(1), CSRF), { kind: 'settled', state: 'withdrawn', replayed: true });
+  for (const header of [undefined, 'soon', 'Wed, 21 Oct 2026 07:28:00 GMT', '-5']) {
+    const reply = refused(429, 'rate_limited', header === undefined ? {} : { 'retry-after': header });
+    assert.deepEqual(await scripted(reply).client.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF), { kind: 'rate-limited', retryAfterSeconds: 60 }, String(header));
+  }
+});
+
+test('IIC-45. R2: the card method records as "external_card_terminal"; the record and settle builders refuse a non-canonical tenant; the attempts decoder refuses every state/version/time/payment disagreement and honours (registeredAt, invoiceId, attemptId) across invoices; v4 keys of each variant nibble 8/9/a/b are sent; a known chain word under another status is never mapped as that word', async () => {
+  const card = recordBodyOf({ ...RECORD_FIELDS, method: 'external_card_terminal' });
+  assert.ok(card !== null && card === RECORD_BODY.replace('"method":"cash"', '"method":"external_card_terminal"'), 'the card body');
+  const { calls: cardCalls, client: cardClient } = scripted(json(201, recorded({ method: 'external_card_terminal' })));
+  const cardAnswer = await cardClient.recordPayment(STORE, INVOICE, KEY, card ?? '', CSRF);
+  assert.ok(cardAnswer.kind === 'recorded' && cardAnswer.payment.method === 'external_card_terminal' && cardCalls.length === 1, 'recorded by card');
+  for (const tenant of [TENANT.toUpperCase(), 'x', '']) {
+    assert.ok(recordBodyOf({ ...RECORD_FIELDS, expectedTenant: tenant }) === null, `record tenant ${tenant.length}`);
+    assert.ok(settleBodyOf(tenant, ATTEMPT, 2) === null, `settle tenant ${tenant.length}`);
+  }
+  const read = async (attempts: unknown[]) => scripted(json(200, { attempts, nextCursor: null })).client.paymentAttempts(STORE, null, CSRF);
+  const settledAt = at(9);
+  for (const [name, row] of [
+    ['confirmed without payment', attempt(1, { state: 'confirmed', version: 3, settledAt })],
+    ['withdrawn with payment', attempt(1, { state: 'withdrawn', version: 3, settledAt, payment: attemptPayment() })],
+    ['recorded with settledAt', attempt(1, { state: 'recorded', version: 2, settledAt, payment: attemptPayment() })],
+    ['confirmed without settledAt', attempt(1, { state: 'confirmed', version: 3, payment: attemptPayment() })],
+    ['open version 3', attempt(1, { version: 3 })], ['recorded version 1', attempt(1, { state: 'recorded', version: 1, payment: attemptPayment() })],
+    ['confirmed version 2', attempt(1, { state: 'confirmed', version: 2, settledAt, payment: attemptPayment() })], ['version as text', attempt(1, { version: '1' })],
+  ] as Array<[string, unknown]>) assert.deepEqual(await read([row]), { kind: 'unavailable' }, name);
+  const [low, high] = [uuid(0x1a0), uuid(0x1a9)].sort();
+  const same = at(5);
+  const mixed = [attempt(1, { invoiceId: low, registeredAt: same, attemptId: uuid(0xa002) }), attempt(2, { invoiceId: high, registeredAt: same, attemptId: uuid(0xa001) }),
+    attempt(3, { invoiceId: high, registeredAt: same, attemptId: uuid(0xa003) }), attempt(4, { invoiceId: low, registeredAt: at(6) })];
+  assert.equal((await read(mixed)).kind, 'ok');
+  assert.deepEqual(await read([mixed[1], mixed[0]]), { kind: 'unavailable' }, 'invoice order within one time');
+  assert.deepEqual(await read([mixed[2], mixed[1]]), { kind: 'unavailable' }, 'attempt order within one invoice');
+  for (const nibble of ['8', '9', 'a', 'b']) {
+    const key = KEY.replace('-9c8d-', `-${nibble}c8d-`);
+    const { calls, client } = scripted(refused(503, 'service_unavailable'));
+    assert.equal((await client.registerPayment(STORE, INVOICE, key, REGISTER_BODY, CSRF)).kind, 'unknown', `variant ${nibble}`);
+    assert.equal(calls.length, 1, `variant ${nibble} sent`);
+  }
+  for (const [i, reply] of [refused(409, 'not_found'), refused(409, 'idempotency_key_reused'), refused(400, 'rate_limited'), refused(401, 'forbidden'),
+    refused(413, 'invalid_request'), refused(429, 'unauthenticated'), refused(404, 'request_in_progress')].entries()) {
+    assert.deepEqual(await scripted(reply).client.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF), { kind: 'unknown', responded: true }, `row ${i}`);
+  }
+  // R2 R3: a 422 whatever its body is key-reused, and a record 404 whatever its body unmatched.
+  assert.deepEqual(await scripted(json(422, { x: 1 })).client.settlePayment(STORE, INVOICE, KEY, SETTLE_BODY(1), CSRF), { kind: 'key-reused' });
+  assert.deepEqual(await scripted(new Response('nope', { status: 404 })).client.recordPayment(STORE, INVOICE, KEY, RECORD_BODY, CSRF), { kind: 'unmatched' });
+  // R3-9: a register 422 in no envelope (and in the sealed one) is key-reused too — never undecided.
+  for (const [i, reply] of [new Response('busy', { status: 422 }), json(422, { error: 'idempotency_key_reused' }), json(422, { x: 1 })].entries()) {
+    assert.deepEqual(await scripted(reply).client.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF), { kind: 'key-reused' }, `register 422 row ${i}`);
+  }
 });

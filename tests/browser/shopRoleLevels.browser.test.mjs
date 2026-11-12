@@ -550,6 +550,12 @@
 //          waiting gives the confirmation back at once (no void POST, no login); the held answer released late changes
 //          nothing (no login, no read, the same confirmation and focus); a timely sign-in still re-reads and needs a new
 //          press. The 30 s deadline itself is component-layer evidence only (SII-142, a controlled clock).
+//   M7B-PAYMENTS-P2B — RECORDING A PAYMENT (register -> proof -> record -> Confirm; the proof only in memory, never printed):
+//   SIS-25 end to end with the database (one payment, its registration confirmed, register/record/settle audits, 4 reads per
+//          open); SIS-26 a double press records one payment, and Confirm pressed while the post-record session check or
+//          payments re-read is out still settles once; SIS-27 a lost record answer, Check again replays the same key and
+//          bytes; SIS-28 a reload after a lost answer: write_conflict, the lookup, Confirm of the lost attempt; SIS-29 a
+//          technician gets the eligibility 403 and no Record payment; SIS-30 the form and its result at 320 px (larger text).
 //   QA-UI-01-P1 — THE LINE HEADINGS OVER THEIR COLUMNS:
 //   SLH-01 the reopen dialog's and the issued dialog's lines tables, in SIS-22's six cells (1440x900, 768x1024, 320x640,
 //          320x480, 768x1024 and 320x600 at a 24 px default text size): ONE header row of five column headings (scope col,
@@ -759,6 +765,12 @@ const ISSUE_TRIGGERS = [
 /** Literal, as above: the void's audit action (M7B-INVOICES-VOID-P1). Migration 035's row guard: a void record admits no delete. */
 const VOID_ACTION = 'store.invoice.void';
 const VOID_TRIGGERS = [['tmpos_invoice_void.issued_invoice_void', 'trg_issued_invoice_void_guard']];
+/** Literals, as above (M7B-PAYMENTS-P1/P2): migrations 036/037's payment tables, their row guards and audit actions. */
+const PAY_TABLE = 'tmpos_invoice_payment.invoice_payment';
+const REV_TABLE = 'tmpos_invoice_payment.invoice_payment_reversal';
+const REG_TABLE = 'tmpos_invoice_payment.invoice_payment_registration';
+const PAYMENT_TRIGGERS = [[PAY_TABLE, 'trg_invoice_payment_guard'], [REV_TABLE, 'trg_invoice_payment_reversal_guard']];
+const PAYMENT_ACTIONS = ['store.invoice_payment.record', 'store.invoice_payment.reverse', 'store.invoice_payment.register', 'store.invoice_payment.settle'];
 /**
  * M7B-INVOICES-ISSUE-P2: this file's tenants' issued lines and invoices, counters and settings, their issue and settings
  * audits, and every audit subject naming one of their issued invoices or stores, in ONE owner transaction with the guards
@@ -767,17 +779,37 @@ const VOID_TRIGGERS = [['tmpos_invoice_void.issued_invoice_void', 'trg_issued_in
  * the issue's and the void records (their ALWAYS guard lifted, then put back as found) before the issued invoices they hold.
  */
 async function cleanIssuing() {
-  const [{ present, voids }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present,
-    to_regclass('tmpos_invoice_void.issued_invoice_void') is not null as voids`;
+  const [{ present, voids, payments, registrations }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present,
+    to_regclass('tmpos_invoice_void.issued_invoice_void') is not null as voids,
+    to_regclass(${PAY_TABLE}) is not null as payments, to_regclass(${REG_TABLE}) is not null as registrations`;
   if (!present) return;
   await owner.begin('isolation level read committed', async (sql) => {
     await withTriggersLifted(sql, [['public.audit_event', 'trg_audit_event_reject_mutation']], async () => {
       await sql`delete from public.audit_event where action_id in (${ISSUE_ACTION}, ${SETTINGS_ACTION}) and tenant_id = any(${TENANTS}::uuid[])`;
       if (voids) await sql`delete from public.audit_event where action_id = ${VOID_ACTION} and tenant_id = any(${TENANTS}::uuid[])`;
+      // M7B-PAYMENTS-P2B: the payment, reversal, registration and settlement audits go with the issue's, and any other audit
+      // subject naming one of these tenants' payments or registrations is cleared (tests/db/invoicePaymentHttp cleanAll order).
+      if (payments) {
+        await sql`delete from public.audit_event where action_id = any(${PAYMENT_ACTIONS}::text[]) and tenant_id = any(${TENANTS}::uuid[])`;
+        await sql`update public.audit_event set subject_invoice_payment_id = null
+          where subject_invoice_payment_id in (select payment_id from tmpos_invoice_payment.invoice_payment where tenant_id = any(${TENANTS}::uuid[]))`;
+      }
+      if (registrations) await sql`update public.audit_event set subject_invoice_payment_registration_id = null
+        where tenant_id = any(${TENANTS}::uuid[]) and subject_invoice_payment_registration_id is not null`;
       await sql`update public.audit_event set subject_issued_invoice_id = null
         where subject_issued_invoice_id in (select invoice_id from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[]))`;
       await sql`update public.audit_event set subject_store_id = null
         where subject_store_id in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`;
+    });
+    // 037's registrations reference payments: they go first, every one of their own guards lifted inside this transaction;
+    // then reversals before payments, payments before void records (each foreign key restricts).
+    if (registrations) {
+      const guards = (await sql`select tgname::text as name from pg_catalog.pg_trigger where tgrelid = ${REG_TABLE}::regclass and not tgisinternal`).map((r) => [REG_TABLE, r.name]);
+      await withTriggersLifted(sql, guards, () => sql`delete from tmpos_invoice_payment.invoice_payment_registration where tenant_id = any(${TENANTS}::uuid[])`);
+    }
+    if (payments) await withTriggersLifted(sql, PAYMENT_TRIGGERS, async () => {
+      await sql`delete from tmpos_invoice_payment.invoice_payment_reversal where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_payment.invoice_payment where tenant_id = any(${TENANTS}::uuid[])`;
     });
     if (voids) await withTriggersLifted(sql, VOID_TRIGGERS, () => sql`delete from tmpos_invoice_void.issued_invoice_void where tenant_id = any(${TENANTS}::uuid[])`);
     await withTriggersLifted(sql, ISSUE_TRIGGERS, async () => {
@@ -1786,6 +1818,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-01', 'SIS-02', 'SIS-03', 'SIS-04', 'SIS-05', 'SIS-06', 'SIS-07', 'SIS-08', 'SIS-09',
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
+  'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30',
   'SLH-01', 'SLH-02',
 ]);
 const registered = new Set();
@@ -2875,7 +2908,7 @@ scenario('SCB-05', 'LOST REPLY AFTER THE COMMIT — the POST commits but its ans
   note('creates', posts.map(apiLine));
   assert.equal(posts.length, 2, 'the first send and one check');
   const second = posts[1];
-  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.ok(second.headers['idempotency-key'] === first.headers['idempotency-key'], 'the SAME Idempotency-Key');
   assert.match(first.headers['idempotency-key'] ?? '', UUID_V4_RE);
   assert.equal(second.body, first.body, 'the byte-identical body');
   assert.equal(first.body, JSON.stringify({ name }));
@@ -4372,7 +4405,7 @@ for (const [domain, { id, prefix, ready, isReadBack }] of Object.entries(LOST_RE
     assert.equal(puts2.length, 2, `exactly one more PUT, on the click (${puts2.map(apiLine).join('; ')})`);
     assert.ok(st.api.indexOf(replay) >= again, 'sent only after the click');
     assert.equal(JSON.parse(replay.body).domain, domain);
-    assert.equal(replay.headers['idempotency-key'], puts1[0].headers['idempotency-key'], 'the SAME Idempotency-Key');
+    assert.ok(replay.headers['idempotency-key'] === puts1[0].headers['idempotency-key'], 'the SAME Idempotency-Key');
     assert.equal(replay.body, puts1[0].body, 'the byte-identical body');
     assert.deepEqual([replay.status, replay.replied.headers['idempotent-replayed']], [200, 'true'], 'answered as a replay');
     assert.deepEqual(afterReplay.delta, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0, T: 0 }, 'the replay wrote nothing (NOTHING, and nothing unlisted)');
@@ -4893,7 +4926,7 @@ scenario('SDB-02', 'AC-14 LOST REPLY — the POST commits and its answer is drop
   const second = posts[1];
   assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
   assert.equal(second.path, first.path, 'to the attempt\'s own store');
-  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.ok(second.headers['idempotency-key'] === first.headers['idempotency-key'], 'the SAME Idempotency-Key');
   assert.equal(second.body, first.body, 'the byte-identical body');
   assert.deepEqual([second.status, second.replied.headers['idempotent-replayed']], [201, 'true'], 'answered as a replay');
   assert.deepEqual(JSON.parse(second.replied.text), { draft: { id: stored.id, status: 'draft', currency: 'USD', lineCount: 2, subtotalCents: subtotalOf(lines) } }, 'the sealed answer names the stored draft');
@@ -5146,7 +5179,7 @@ scenario('SDB-04', 'AC-14 LOST REQUEST — the first POST never reaches the entr
   const second = posts[1];
   assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
   assert.equal(second.path, first.path, 'to the attempt\'s own store');
-  assert.equal(second.headers['idempotency-key'], first.headers['idempotency-key'], 'the SAME Idempotency-Key');
+  assert.ok(second.headers['idempotency-key'] === first.headers['idempotency-key'], 'the SAME Idempotency-Key');
   assert.equal(second.body, first.body, 'the byte-identical body');
   assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'] ?? null], [201, null], 'the key\'s first create, not a replay');
   assert.equal(stored.length, 1, 'exactly ONE draft row');
@@ -6315,8 +6348,8 @@ scenario('SDB-13', 'AC-17 UNKNOWN OUTCOME — the PATCH commits and its answer i
   record('SDB-13', { phase: 'Check again', patches: patches.map(apiLine), replayed: second?.replied.headers['idempotent-replayed'] ?? null });
   assert.equal(patches.length, 2, 'exactly one more PATCH, on the press');
   assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
-  assert.deepEqual([second.path, second.headers['idempotency-key'], second.body], [first.path, first.headers['idempotency-key'], first.body], 'the SAME draft, key and byte-identical body');
-  assert.equal(second.headers[SESSION_CSRF], first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
+  assert.ok(second.path === first.path && second.headers['idempotency-key'] === first.headers['idempotency-key'] && second.body === first.body, 'the SAME draft, key and byte-identical body');
+  assert.ok(second.headers[SESSION_CSRF] === first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
   assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'], JSON.parse(second.replied.text)], [200, 'true', { draftId, version: 2, changed: true }], 'answered as a replay of the committed edit');
   assert.deepEqual(minus(await editCounts(tenant, draftId), eBefore), { E: 1, V: 1, W: 1 }, 'still ONE version step, one audit, one event');
   await assertDelta(mid, { C: 0, A: 0, E: 0, U: 0, K: 0, L: 0 }, 'the replay wrote nothing');
@@ -6879,8 +6912,8 @@ scenario('SDB-20', 'DSC-13 DSC-21 UNKNOWN DISCARD OUTCOME — the discard POST c
   record('SDB-20', { phase: 'Check again', posts: all.map(apiLine), replayed: second?.replied?.headers['idempotent-replayed'] ?? null });
   assert.equal(all.length, 2, `exactly one more POST, on the press: ${all.map(apiLine).join('; ')}`);
   assert.ok(st.api.indexOf(second) >= again, 'sent only after the press');
-  assert.deepEqual([second.path, second.headers['idempotency-key'], second.body], [first.path, first.headers['idempotency-key'], first.body], 'the SAME draft, key and byte-identical body');
-  assert.equal(second.headers[SESSION_CSRF], first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
+  assert.ok(second.path === first.path && second.headers['idempotency-key'] === first.headers['idempotency-key'] && second.body === first.body, 'the SAME draft, key and byte-identical body');
+  assert.ok(second.headers[SESSION_CSRF] === first.headers[SESSION_CSRF], 'under the attempt\'s own session token');
   assert.deepEqual([second.status, second.replied.headers['idempotent-replayed'], JSON.parse(second.replied.text)], [200, 'true', { draftId: gone, version: 2, status: 'discarded' }], 'answered as the sealed replay');
   await page.waitFor(`!${q('draft-view')} && ${q('drafts-notice')}?.textContent.trim() === ${JSON.stringify(DISCARDED)}`, 15_000, '"Draft discarded." once the replay was validated, both dialogs closed');
   await waitDraftRows(page, [kept], 'page one read again, without the discarded draft');
@@ -8025,7 +8058,7 @@ scenario('SIS-05', 'AC-02 LOST ANSWER, MANUAL RECOVERY — a settings PUT commit
   assert.equal(puts.length, 2, `two PUTs in all: the lost one and Check again (${puts.map(apiLine).join('; ')})`);
   assert.equal(puts[1].body, puts[0].body, 'the byte-identical body');
   assert.equal(puts[0].body, settingsBodyFor(tenant, 0, values));
-  assert.equal(puts[1].headers['idempotency-key'], puts[0].headers['idempotency-key'], 'the SAME key');
+  assert.ok(puts[1].headers['idempotency-key'] === puts[0].headers['idempotency-key'], 'the SAME key');
   assert.equal(puts[1].headers['x-tmpos-session-csrf'], puts[0].headers['x-tmpos-session-csrf'], 'under the session token it was sent with');
   assert.equal(puts[1].status, 200);
   assert.equal(puts[1].replied.headers['idempotent-replayed'], 'true', 'the entry replays the one completion');
@@ -8075,8 +8108,23 @@ const isVoidPost = (store, id) => (r) => r.method === 'POST' && r.path === `${is
 /** The payments read of any store: GET …/invoices/{id}/payments (any query). */
 const isPaymentsRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payments$/.test(r.path);
 const isPaymentsOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payments`;
-/** An issued read that is no void route and no payments read: a list page or one invoice's detail. */
-const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r) && !isPaymentsRead(r);
+// M7B-PAYMENTS-P2B: the Issued section's dialog of an ISSUED invoice also reads its payment eligibility ONCE per open (beside
+// the void eligibility; a voided invoice's open sends none, the drafts card's View invoice none), and the owner records a
+// payment through register -> proof -> record (+ settle; the attempts lookup sits under the store, not the invoice). Every
+// one of those invoice routes starts …/invoices/{id}/payment, so the issued-read matcher sees them: the pins count them apart.
+/** Any payments-family route under one invoice: payments (read or record), payment-eligibility, registrations, proof, settlement. */
+const isPaymentRoute = (r) => /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payment/.test(r.path);
+const isPaymentEligibilityRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payment-eligibility$/.test(r.path);
+const isPaymentEligibilityOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payment-eligibility`;
+const isPaymentRegister = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/payment-registrations`;
+const isPaymentProof = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payment-registration-proof`;
+const isPaymentRecord = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/payments`;
+const isPaymentSettle = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/payment-settlement`;
+const isPaymentAttemptsRead = (store) => (r) => r.method === 'GET' && r.path === `${STORES}/${store}/payment-attempts`;
+/** Any payment write of any store (register, record, settle, reversal). */
+const isPaymentWrite = (r) => r.method === 'POST' && (isPaymentRoute(r) || /^\/api\/v1\/stores\/[^/]+\/payment/.test(r.path));
+/** An issued read that is no void route and no payments-family route: a list page or one invoice's detail. */
+const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r) && !isPaymentRoute(r);
 /** The shop's own void trigger (ServerIssuedInvoices.tsx VOID_TEXT.open). */
 const VOID_OPEN = 'Void invoice…';
 /**
@@ -8090,6 +8138,12 @@ async function eligibilityAnswered(page, store, id, from) {
   await page.waitFor(() => sentBy(page, isVoidEligibility(store, id), from).some((r) => r.status !== null), 30_000, `the void eligibility of ${id} answered`);
   // P2A: every caller opened a dialog whose detail answered, so its ONE payments read follows; it is part of the barrier.
   await page.waitFor(() => sentBy(page, isPaymentsOf(store, id), from).some((r) => r.status !== null), 30_000, `the payments read of ${id} answered`);
+  // P2B: an ISSUED invoice's open also reads its payment eligibility (a voided one's none): waited for explicitly, by the
+  // status the detail answered, so each pin counts it exactly.
+  const [detail] = sentBy(page, (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}` && r.status !== null, from);
+  let status = null;
+  try { status = JSON.parse(detail?.replied?.text ?? 'null')?.invoice?.status ?? null; } catch { /* not JSON: no status */ }
+  if (status === 'issued') await page.waitFor(() => sentBy(page, isPaymentEligibilityOf(store, id), from).some((r) => r.status !== null), 30_000, `the payment eligibility of ${id} answered`);
   await quiet(page, from);
   await page.settle();
 }
@@ -8270,6 +8324,10 @@ scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES 
     assert.deepEqual(sentBy(page, isVoidRoute, from).map((r) => `${readLine(r)} ${r.replied.text}`), [`${issuedPath(main.id)}/${row.id}/void-eligibility 200 {"eligibility":"allowed"}`],
       `invoice ${row.number}: ONE void eligibility GET, allowed for the owner, and no void POST`);
     assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${row.id}/payments 200`], `invoice ${row.number}: ONE payments GET, page one (D4)`);
+    // P2B: the open's fourth and last read, ONE payment eligibility GET (allowed: the owner); nothing else of the payment routes.
+    assert.deepEqual(sentBy(page, isPaymentRoute, from).filter((r) => !isPaymentsRead(r)).map((r) => `${readLine(r)} ${r.replied.text}`),
+      [`${issuedPath(main.id)}/${row.id}/payment-eligibility 200 {"eligibility":"allowed"}`], `invoice ${row.number}: ONE payment eligibility GET, allowed for the owner`);
+    assert.equal(sentBy(page, isIssuedRead, from).length, 4, `invoice ${row.number}: the open's budget is 4 reads (detail, void eligibility, payments, payment eligibility)`);
     assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
     const { text, buttons, shell, ...content } = view;
     assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
@@ -8382,6 +8440,7 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   // VOID-P2: Invoices View may read but not void (void_issued_invoices needs Invoices Approve): the eligibility is the 403
   // and the dialog offers Close only — no Void invoice…, nothing said about voiding.
   assert.deepEqual(buttons, ['Close'], 'Invoices View: the dialog offers Close only, no Void invoice…');
+  assert.equal(await has(page, 'issued-payments-record'), false, 'P2B: no Record payment at Invoices View (its eligibility is the 403)');
   assert.equal(await textOf(page, 'issued-view-void-row'), '', 'the reserved void row stays empty');
   await page.click(by('issued-view-close'));
   await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
@@ -8391,6 +8450,10 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   assert.deepEqual(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(main.id)}?limit=20 200`, `${issuedPath(main.id)}/${invoiceId} 200`]);
   assert.deepEqual(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/void-eligibility 403 forbidden`], 'ONE void eligibility read, refused for Invoices View');
   assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payments 200`], 'P2A D4: ONE payments read for the open, at Invoices View');
+  // P2B: ONE payment eligibility read, refused at Invoices View (record_invoice_payments needs Invoices Approve); never retried.
+  assert.deepEqual(sentBy(page, isPaymentEligibilityRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payment-eligibility 403 forbidden`], 'ONE payment eligibility read, refused for Invoices View');
+  assert.deepEqual(sentBy(page, isPaymentWrite, from).map(readLine), [], 'no payment write');
+  assert.equal(sentBy(page, (r) => isIssuedRead(r) && r.path.startsWith(`${issuedPath(main.id)}/${invoiceId}`), from).length, 4, 'the open\'s budget: detail, void eligibility, payments, payment eligibility — 4 reads');
 
   // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
   await levelVia(direct, 'manager', 'customers', 'none');
@@ -8564,7 +8627,9 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   // "Void invoice…" in the row under the header — Tab from Close reaches it before the lines — and a VOIDED one (SIS-16)
   // offers nothing there, its Tab order unchanged since P1.
   const voidable = shown.status === 'Issued';
-  const tabOrder = voidable ? ['issued-view-void', 'issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'] : ['issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'];
+  // P2B: an issued invoice with a remaining amount, opened by the owner (payment eligibility allowed), also offers Record payment
+  // in its Payments section, after the lines; a voided one reads no payment eligibility and offers no recording.
+  const tabOrder = voidable ? ['issued-view-void', 'issued-view-id-copy', 'issued-view-lines-scroll', 'issued-payments-record', 'issued-view-close'] : ['issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'];
   for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
     await page.setViewport(width, height);
     if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
@@ -8630,6 +8695,9 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     check(same(sentBy(page, isIssuedDetailOrList, from).map(readLine), [`${issuedPath(store)}/${invoiceId} 200`]), `${cell}: not ONE GET per open`);
     check(same(sentBy(page, isVoidRoute, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/void-eligibility 200`]), `${cell}: not ONE void eligibility GET per open (and no void POST)`);
     check(same(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/payments 200`]), `${cell}: not ONE payments GET per open (D4)`);
+    // P2B: ONE payment eligibility GET per open of an issued invoice (the owner: allowed), none for a voided one: 4 reads / 3.
+    check(same(sentBy(page, isPaymentEligibilityRead, from).map(readLine), voidable ? [`${issuedPath(store)}/${invoiceId}/payment-eligibility 200`] : []), `${cell}: not ${voidable ? 'ONE' : 'no'} payment eligibility GET per open`);
+    check(sentBy(page, isIssuedRead, from).length === (voidable ? 4 : 3), `${cell}: the open's read budget is not ${voidable ? 4 : 3} (${sentBy(page, isIssuedRead, from).map(readLine)})`);
     check(voidable ? trigger !== null && trigger.inView && trigger.onTop : trigger === null, `${cell}: the Void invoice… trigger ${voidable ? 'is not in view and on top' : 'is offered on a voided invoice'} ${JSON.stringify(trigger)}`);
     check(same(tabs, tabOrder), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
     await alsoOpen(cell, check);
@@ -8894,7 +8962,7 @@ scenario('SIS-12', 'AC-06 ISS-19 A LOST BROWSER RESPONSE AFTER A REAL COMMITTED 
   record('SIS-12', { phase: 'check again', posts: posts.map(apiLine), replayed: posts[1]?.replied?.headers['idempotent-replayed'] ?? null });
   assert.equal(posts.length, 2, `two POSTs in all: the lost one and Check again (${posts.map(apiLine).join('; ')})`);
   assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
-  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.ok(posts[1].headers['idempotency-key'] === posts[0].headers['idempotency-key'], 'the SAME key');
   assert.equal(posts[1].headers['x-tmpos-session-csrf'], posts[0].headers['x-tmpos-session-csrf'], 'under the session token it was sent with');
   assert.equal(posts[1].status, 201);
   assert.equal(posts[1].replied.headers['idempotent-replayed'], 'true', 'the entry replays the one completion');
@@ -9246,6 +9314,10 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
     assert.deepEqual(reads.map(readLine), [`${issuedPath(main.id)}/${stored.id} 200`], `${label}: ONE GET of the invoice`);
     assert.deepEqual(sentBy(page, isVoidRoute, since).map(readLine), eligibility ? [`${issuedPath(main.id)}/${stored.id}/void-eligibility 200`] : [],
       `${label}: ${eligibility ? 'ONE void eligibility GET' : 'no void route'}`);
+    // P2B: a voided invoice's open reads no payment eligibility (budget 3 from the list's Open; the drafts card's View invoice: 1).
+    assert.deepEqual(sentBy(page, isPaymentEligibilityRead, since).map(readLine), [], `${label}: no payment eligibility GET for a voided invoice`);
+    assert.equal(sentBy(page, isIssuedRead, since).length, eligibility ? 3 : 1, `${label}: the open's read budget (${sentBy(page, isIssuedRead, since).map(readLine)})`);
+    assert.equal(await has(page, 'issued-payments-record'), false, `${label}: no Record payment on a voided invoice`);
     const answer = JSON.parse(reads[0].replied.text).invoice;
     assert.deepEqual([answer.status, Object.keys(answer).at(-1), JSON.stringify(answer.void)], ['voided', 'void', JSON.stringify({ voidedAt, reasonCode: 'duplicate' })], `${label}: the answer's lifecycle, \`void\` last`);
     const { text, buttons, shell, ...content } = await issuedViewOf(page);
@@ -9707,6 +9779,9 @@ scenario('SIS-19', 'VOID-12 AC-03 A STALE SIGN-IN, AN EXPLICIT SIGN-IN, A FRESH 
     'exactly the one explicit re-authentication at the identity provider, and nothing after it on its own');
   assert.deepEqual([renewed.filter(isIssuedDetailOrList).map(readLine), renewed.filter(isVoidRoute).map(readLine)], [[`${issuedPath(main.id)}/${id} 200`], [`${issuedPath(main.id)}/${id}/void-eligibility 200`]],
     'a fresh review: ONE detail GET and ONE eligibility GET under the new session');
+  // P2B: the step-up renewal re-reads only the detail and the void eligibility; the payment eligibility is read once per
+  // open (D4) and a renewal is not an open, so it sends no payment route.
+  assert.deepEqual(renewed.filter(isPaymentRoute).map(readLine), [], 'the renewal reads no payment route: the open\'s payment eligibility stands (one per open)');
   assert.deepEqual(unprompted, [`POST ${LOGIN}`], 'the only POST since the refusal is the sign-in\'s own login: no void on its own, across a focus');
   assert.deepEqual({ checked: fresh.reasons.checked, disabled: fresh.reasons.disabled, buttons: fresh.buttons, attempt: fresh.attempt, view: await has(page, 'issued-view') },
     { checked: null, disabled: false, buttons: ['Keep invoice', 'Void invoice'], attempt: 'none', view: true }, 'the confirmation kept for a new press: its reason cleared, the invoice still open');
@@ -9803,8 +9878,8 @@ scenario('SIS-20', 'VOID-07 VOID-09 AC-06 AC-07 AN ACKNOWLEDGED VOID WHOSE DETAI
   assert.equal(posts.length, 2, `two POSTs: the lost answer's and Check again (${posts.map(apiLine).join('; ')})`);
   assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
   assert.equal(posts[1].body, voidBodyFor(tenant, 'other'));
-  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
-  assert.equal(posts[1].headers[SESSION_CSRF], posts[0].headers[SESSION_CSRF], 'under the session token it was sent with');
+  assert.ok(posts[1].headers['idempotency-key'] === posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.ok(posts[1].headers[SESSION_CSRF] === posts[0].headers[SESSION_CSRF], 'under the session token it was sent with');
   assert.deepEqual([posts[1].status, posts[1].replied.text, posts[1].replied.headers['idempotent-replayed']], [200, voidedReply(second), 'true'], 'the entry\'s replay of the sealed 200');
   assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]).sort(), [[first, 'wrong_seller_details'], [second, 'other']].sort(), 'ONE void for each invoice');
   assert.deepEqual((await voidAudits(tenant)).map((a) => [a.invoice, a.reason]).sort(), [[first, 'invoice_void_wrong_seller_details'], [second, 'invoice_void_other']].sort(), 'ONE void audit each, naming its invoice'); // B-7
@@ -9906,8 +9981,8 @@ scenario('SIS-21', 'VOID-09 VOID-11 AC-09 AC-11 THE HELD ATTEMPT ACROSS CLOSE, N
   assert.deepEqual(checked, { posts: ['0 request', '200 delivered'], voidRoutes: [`POST ${issuedPath(main.id)}/${second}/void`], card: VOIDING_SAID.cardVoided(2, main.name), notice: null, mainList: 0 },
     'Check again goes to the ORIGINAL store and invoice while another is chosen; no notice and no list read for the store not chosen (R23)');
   assert.equal(posts[1].body, posts[0].body, 'the byte-identical body');
-  assert.equal(posts[1].headers['idempotency-key'], posts[0].headers['idempotency-key'], 'the SAME key');
-  assert.equal(posts[1].headers[SESSION_CSRF], posts[0].headers[SESSION_CSRF], 'the same session token');
+  assert.ok(posts[1].headers['idempotency-key'] === posts[0].headers['idempotency-key'], 'the SAME key');
+  assert.ok(posts[1].headers[SESSION_CSRF] === posts[0].headers[SESSION_CSRF], 'the same session token');
   assert.deepEqual([posts[1].replied.text, posts[1].replied.headers['idempotent-replayed'] ?? null], [voidedReply(second), null], 'the first to reach the entry: the sealed 200');
   assert.deepEqual((await storedVoids(main.id)).map((v) => [v.id, v.reason]), [[second, 'wrong_seller_details']]);
   await page.click(by('issued-void-dismiss'));
@@ -10516,6 +10591,9 @@ scenario('SIS-24', 'R1 AC-05 AC-06 AC-08 A STALLED SIGN-IN, STOPPED, ITS LATE AN
   assert.deepEqual(st.idp.slice(idpRenew), [`POST ${IDP_HOST}/v1/accounts:signInWithPassword`, `POST ${IDP_HOST}/v1/accounts:lookup`, `POST ${STS_HOST}/v1/token`], 'its one re-authentication at the provider');
   assert.deepEqual([renewed.filter(isIssuedDetailOrList).map(readLine), renewed.filter(isVoidRoute).map(readLine)], [[`${issuedPath(main.id)}/${id} 200`], [`${issuedPath(main.id)}/${id}/void-eligibility 200`]],
     'a fresh review: ONE detail GET and ONE eligibility GET under the new session');
+  // P2B: the step-up renewal re-reads only the detail and the void eligibility; the payment eligibility is read once per
+  // open (D4) and a renewal is not an open, so it sends no payment route.
+  assert.deepEqual(renewed.filter(isPaymentRoute).map(readLine), [], 'the renewal reads no payment route: the open\'s payment eligibility stands (one per open)');
   assert.deepEqual({ checked: fresh.reasons.checked, buttons: fresh.buttons, alert: fresh.alert }, { checked: null, buttons: ['Keep invoice', 'Void invoice'], alert: '' }, 'the reason cleared, for a new press');
   assert.equal(sentBy(page, (r) => r.method === 'POST' && isVoidRoute(r)).length, 1, 'ONE void POST in all: the press that met the step-up');
   assert.deepEqual([await storedVoids(main.id), (await voidAudits(tenant)).length], [[], 0], 'nothing voided');
@@ -10723,4 +10801,395 @@ scenario('SLH-02', 'QA-UI-02 VISIBLE RECORD IDS — a draft saved and an invoice
     await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the issued dialog`);
   }
   assert.deepEqual(problems, [], 'the record IDs in every cell');
+}, 300_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-PAYMENTS-P2B: recording a payment from the issued dialog (register -> proof -> record -> Confirm, settle v2), through
+// the REAL tenant entry over the disposable PostgreSQL (its payment proof key installed by setupDatabase()). The proof the
+// entry answers is compared by equality only and added to st.secrets (assertNoLeak): it is never printed, recorded or put
+// in an assertion message; record bodies (which carry it) are compared as booleans for the same reason.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** ServerIssuedInvoices.tsx P2B wording (SPEC "Wording", exact). */
+const PAY_SAID = Object.freeze({
+  recorded: (amount, method) => `Payment recorded: ${amount}, ${method}.`,
+  confirmed: 'Payment confirmed.',
+  uncertain: "We couldn't confirm whether this payment was recorded. Nothing is sent again unless you press Check again.",
+  conflict: 'You have an unfinished payment attempt on this invoice. Finish it before recording another payment.',
+});
+const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** The amount INPUT (P2A's history items carry a span with the same test id). */
+const PAY_AMOUNT = 'input[data-testid="issued-payments-amount-input"]';
+const RECORD_KEYS = ['expectedTenant', 'registrationId', 'attemptId', 'amountCents', 'method', 'registrationProof'];
+/** One invoice's payments and registrations as the database owner reads them (state derived as 037 defines it). */
+async function storedPaymentsOf(invoice) {
+  const payments = await owner`select attempt_id, amount_cents::text as amount, method from tmpos_invoice_payment.invoice_payment where invoice_id = ${invoice} order by recorded_at, payment_id`;
+  const registrations = await owner`select attempt_id, payment_id is not null as paid, acknowledged_at is not null as settled
+    from tmpos_invoice_payment.invoice_payment_registration where invoice_id = ${invoice} order by registered_at, registration_id`;
+  return {
+    payments: Array.from(payments, (p) => ({ attempt: p.attempt_id, amount: Number(p.amount), method: p.method })),
+    registrations: Array.from(registrations, (r) => ({ attempt: r.attempt_id, state: r.paid ? (r.settled ? 'confirmed' : 'recorded') : (r.settled ? 'withdrawn' : 'open') })),
+  };
+}
+/** One tenant's payment audit actions, oldest first (the action's last word). */
+async function paymentAuditsOf(tenant) {
+  const rows = await owner`select action_id from public.audit_event where action_id = any(${PAYMENT_ACTIONS}::text[]) and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => r.action_id.split('.').at(-1));
+}
+/** The proof the entry answered for a proof GET (null when unreadable): for equality checks only, kept as a secret. */
+const proofOf = (rec) => {
+  try { const proof = JSON.parse(rec.replied.text).proof; if (typeof proof === 'string') st.secrets.add(proof); return proof ?? null; } catch { return null; }
+};
+/** A payment route of invoice `id` as `METHOD /suffix status`: the chain's order, nothing secret. */
+const payLine = (store, id) => (r) => `${r.method} ${r.path.startsWith(`${issuedPath(store)}/${id}`) ? r.path.slice(`${issuedPath(store)}/${id}`.length) : r.path} ${answered(r)}${r.lost ? ` (${r.lost} lost)` : ''}`;
+const isPaymentChain = (store, id) => (r) => (isPaymentRoute(r) && r.path.startsWith(`${issuedPath(store)}/${id}/`) && !isPaymentEligibilityRead(r)) || isPaymentAttemptsRead(store)(r);
+/** The Payments section's whole text (its recording flow included). */
+const paySectionOf = (page) => page.evaluate(`${q('issued-payments')}?.innerText ?? ''`);
+/** Record payment pressed, the amount typed and the method chosen as a user does; the form left open, nothing sent yet. */
+async function fillPaymentForm(page, dollars, method) {
+  await page.waitFor(`!!${q('issued-payments-record')}`, 30_000, 'Record payment offered');
+  await page.click(by('issued-payments-record'));
+  await page.waitFor(`!!${q('issued-payments-form')} && !!document.querySelector(${JSON.stringify(PAY_AMOUNT)})`, 10_000, 'the recording form').catch(async (err) => {
+    const state = await page.evaluate(`(() => { const b = ${q('issued-payments-record')}; return { record: b === null ? null : { disabled: b.getAttribute('aria-disabled'), text: b.textContent.trim() }, form: !!${q('issued-payments-form')}, section: ${q('issued-payments')}?.innerText.slice(0, 600) ?? null }; })()`);
+    throw new Error(`${err.message} ${JSON.stringify(state)}`);
+  });
+  await page.fill(PAY_AMOUNT, dollars);
+  await page.click(by(`issued-payments-method-${method}`));
+  await page.waitFor(`${q(`issued-payments-method-${method}`)}?.checked === true && document.querySelector(${JSON.stringify(PAY_AMOUNT)})?.value === ${JSON.stringify(dollars)}`, 5_000, 'the amount and the method entered');
+}
+/** Wait until invoice `id`'s payments read sent from `from` on is answered (the post-record re-read), then every request. */
+async function rereadAnswered(page, store, id, from) {
+  await page.waitFor(() => sentBy(page, isPaymentsOf(store, id), from).some((r) => r.status !== null), 30_000, `the payments re-read of ${id} answered`);
+  await quiet(page, from);
+  await page.settle();
+}
+/** Wait for the recorded result with its Confirm payment, then press Confirm and wait for "Payment confirmed." */
+async function confirmRecorded(page, label) {
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, `${label}: Confirm payment offered`);
+  // Pressed as soon as it shows, as a user may: also while the record's payments re-read is still out (FIXES-R1 S12; SIS-26
+  // pins that window deterministically).
+  await page.click(by('issued-payments-confirm'));
+  await page.waitFor(async () => (await paySectionOf(page)).includes(PAY_SAID.confirmed), 30_000, `${label}: Payment confirmed.`).catch(async (err) => {
+    const state = await page.evaluate(`(() => { const b = ${q('issued-payments-confirm')}; if (b === null) return { confirm: null, section: ${q('issued-payments')}?.innerText.slice(0, 600) ?? null };
+      b.scrollIntoView({ block: 'center', inline: 'center' }); const r = b.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { disabled: b.getAttribute('aria-disabled'), rect: [r.left, r.top, r.width, r.height], onTop: hit !== null && b.contains(hit), hit: hit?.dataset?.testid ?? hit?.tagName ?? null, focus: document.activeElement?.dataset?.testid ?? null, section: ${q('issued-payments')}?.innerText.slice(0, 600) ?? null }; })()`);
+    throw new Error(`${err.message} ${JSON.stringify(state)}`);
+  });
+}
+/** The register/proof/record checks every recorded chain shares: exact bytes, key order, three distinct v4 keys; the proof never printed. */
+function assertChainBytes(tenant, { reg, proof, rec }, { amountCents, method }) {
+  const attemptId = JSON.parse(reg.body).attemptId;
+  assert.ok(V4.test(attemptId), 'the attempt id is a v4 UUID minted by the page');
+  assert.ok(reg.body === JSON.stringify({ expectedTenant: tenant, attemptId }), 'the register body, exactly (compared, never printed)');
+  const registrationId = JSON.parse(reg.replied.text).registration.id;
+  assert.equal(proof.query, `?registration=${registrationId}`, 'the proof GET names the registration the entry answered');
+  const proofText = proofOf(proof);
+  const body = JSON.parse(rec.body);
+  assert.deepEqual(Object.keys(body), RECORD_KEYS, 'the record body\'s keys, in the fixed order');
+  const { registrationProof, ...rest } = body;
+  assert.deepEqual(rest, { expectedTenant: tenant, registrationId, attemptId, amountCents, method }, 'the record body\'s values');
+  assert.ok(typeof proofText === 'string' && /^[0-9a-f]{64}$/.test(proofText) && registrationProof === proofText, 'the record carries exactly the proof the entry answered (compared, never printed)');
+  assert.ok(rec.body === JSON.stringify(body), 'the record bytes are compact JSON in that order (compared, never printed)');
+  const keys = [reg, rec].map((r) => r.headers['idempotency-key']);
+  assert.ok(keys.every((k) => V4.test(k)) && keys[0] !== keys[1] && !keys.includes(attemptId), 'register and record carry distinct v4 keys, neither the attempt id');
+  return { attemptId, registrationId };
+}
+
+scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner opens an issued invoice ($42.00): the open reads detail, void eligibility, payments and payment eligibility (allowed), 4 in all; Record payment, $12.50 by Cash, Record: ONE register (201), ONE proof GET (200), ONE record (201) with the exact bytes and three distinct v4 keys (the proof only in memory), then ONE payments re-read ($29.50 remaining) and "Payment recorded: $12.50, Cash."; Confirm payment is ONE settle (expectedVersion 2, 200) and "Payment confirmed."; the database holds ONE payment and its registration confirmed, and the register, record and settle audits; no detail or eligibility re-read, nothing else sent', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i25', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  assert.deepEqual(sentBy(page, isIssuedRead, opened).map(readLine).sort(), [
+    `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility — 4 reads');
+  await fillPaymentForm(page, '12.50', 'cash');
+  const from = st.api.length;
+  await page.click(by('issued-payments-submit'));
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, 'recorded: Confirm payment offered');
+  await rereadAnswered(page, main.id, id, from);
+  const chain = sentBy(page, isPaymentChain(main.id, id), from);
+  record('SIS-25', { phase: 'recorded', chain: chain.map(payLine(main.id, id)) });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 201', 'GET /payments 200'], 'register, proof, record, then ONE payments re-read');
+  const [reg, proof, rec] = chain;
+  const { attemptId } = assertChainBytes(tenant, { reg, proof, rec }, { amountCents: 1250, method: 'cash' });
+  assert.ok([reg, rec].every((r) => r.headers[SESSION_CSRF] === reg.headers[SESSION_CSRF] && typeof r.headers[SESSION_CSRF] === 'string'), 'register and record under the page\'s session token');
+  const section = await paySectionOf(page);
+  assert.ok(section.includes(PAY_SAID.recorded('$12.50', 'Cash')), `the recorded result is said: ${section}`);
+  assert.equal(await textOf(page, 'issued-payments-remaining'), '$29.50', 'the payments re-read shows $29.50 remaining');
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'ONE payment, its registration recorded (not yet confirmed)');
+
+  const confirmFrom = st.api.length;
+  await confirmRecorded(page, 'SIS-25');
+  await quiet(page, confirmFrom);
+  const settles = sentBy(page, isPaymentChain(main.id, id), confirmFrom);
+  record('SIS-25', { phase: 'confirmed', chain: settles.map(payLine(main.id, id)) });
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], 'Confirm is ONE settle, and no extra read');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle body, exactly (version 2: seen recorded; compared, never printed)');
+  assert.ok(V4.test(settles[0].headers['idempotency-key']) && ![reg, rec].some((r) => r.headers['idempotency-key'] === settles[0].headers['idempotency-key']), 'a third distinct v4 key');
+  assert.deepEqual(JSON.parse(settles[0].replied.text), { settlement: { invoiceId: id, attemptId, state: 'confirmed' } }, 'the entry confirmed it');
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, its registration confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'the register, record and settle audits, once each');
+  assert.deepEqual([sentBy(page, isIssuedDetailOrList, from), sentBy(page, isVoidRoute, from), sentBy(page, isPaymentEligibilityRead, from)].map((l) => l.map(readLine)), [[], [], []], 'no detail, void or eligibility re-read');
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), opened).map((r) => `${r.method} ${r.path.slice(issuedPath(main.id).length)}`),
+    [`POST /${id}/payment-registrations`, `POST /${id}/payments`, `POST /${id}/payment-settlement`], 'three POSTs in all');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-26', 'M7B-PAYMENTS-P2B A DOUBLE PRESS RECORDS ONE PAYMENT — the owner fills $10.00 by Card and Record is pressed twice in the same task (two synchronous clicks, before any re-render): ONE register, ONE proof, ONE record, ONE payments re-read; Confirm payment; the database holds ONE payment and ONE registration, confirmed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i26', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await fillPaymentForm(page, '10.00', 'card');
+  const from = st.api.length;
+  await page.evaluate(`(() => { const b = ${q('issued-payments-submit')}; b.click(); b.click(); })()`);
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, 'recorded: Confirm payment offered');
+  await page.click(by('issued-payments-submit')).catch(() => {}); // a third, late press on whatever is there now
+  await rereadAnswered(page, main.id, id, from);
+  const chain = sentBy(page, isPaymentChain(main.id, id), from);
+  record('SIS-26', { phase: 'double press', chain: chain.map(payLine(main.id, id)) });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 201', 'GET /payments 200'], 'ONE chain for the double press');
+  const { attemptId } = assertChainBytes(tenant, { reg: chain[0], proof: chain[1], rec: chain[2] }, { amountCents: 1000, method: 'external_card_terminal' });
+  assert.ok((await paySectionOf(page)).includes(PAY_SAID.recorded('$10.00', 'Card on a separate terminal')), 'the recorded result is said');
+  await confirmRecorded(page, 'SIS-26');
+  await quiet(page, from);
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1000, method: 'external_card_terminal' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
+  assert.equal(sentBy(page, isPaymentWrite, from).length, 3, 'register, record and settle: three payment POSTs in all');
+
+  // A second payment, its Confirm pressed while the record's payments re-read is still out (its answer parked at the front):
+  // a Confirm payment that is shown and not aria-disabled must not swallow the press — the press settles (now or once the
+  // re-read is answered), or the control is held back until then.
+  // Two windows: the session check the re-read starts with, then the payments GET itself (each parked at the front).
+  for (const [i, [window, parks]] of [['the session check', isSessionRead], ['the payments re-read', isPaymentsOf(main.id, id)]].entries()) {
+    await fillPaymentForm(page, `${i + 1}.00`, 'cash');
+    const early = st.api.length;
+    let armed = false;
+    const recorded = gate((r) => r.frameId === page.frameId && isPaymentRecord(main.id, id)(r), 'response');
+    await page.click(by('issued-payments-submit'));
+    await recorded.reached;
+    const parked = gate((r) => r.frameId === page.frameId && armed && parks(r), 'request');
+    armed = true;
+    recorded.release();
+    const reached = await Promise.race([parked.reached.then(() => true), delay(30_000).then(() => false)]);
+    assert.equal(reached, true, `${window} was sent after the record and parked`);
+    // Hard: Confirm payment is offered, enabled, and pressed WHILE the window is parked — no fallback after the release.
+    await page.waitFor(`${q('issued-payments-confirm')}?.getAttribute('aria-disabled') === 'false'`, 30_000, `Confirm payment offered and enabled while ${window} is parked`);
+    assert.ok(!(await paySectionOf(page)).includes(PAY_SAID.confirmed), `"Payment confirmed." is not shown before the Confirm during ${window}`);
+    await page.click(by('issued-payments-confirm'));
+    const pressedParked = sentBy(page, (r) => parks(r) && r.status === null, early).length > 0;
+    parked.release();
+    await page.waitFor(() => sentBy(page, isPaymentSettle(main.id, id), early).some((r) => r.status !== null), 30_000, `the settle answered after the Confirm pressed during ${window}`);
+    await quiet(page, early);
+    await page.settle();
+    const settles = sentBy(page, isPaymentSettle(main.id, id), early);
+    record('SIS-26', { phase: `confirm during ${window}`, reached, pressedParked, settles: settles.map(payLine(main.id, id)), section: (await paySectionOf(page)).slice(-160) });
+    assert.equal(pressedParked, true, `the press happened while ${window} was still parked`);
+    assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /payment-settlement 200'], `Confirm payment, pressed while ${window} was out, settled on its press (not swallowed)`);
+    assert.ok((await paySectionOf(page)).includes(PAY_SAID.confirmed), `"Payment confirmed." after the Confirm during ${window}`);
+    assert.deepEqual(sentBy(page, isPaymentSettle(main.id, id), early).map(payLine(main.id, id)), ['POST /payment-settlement 200'], `exactly ONE settle for the Confirm during ${window}`);
+  }
+  const stored = await storedPaymentsOf(id);
+  assert.deepEqual([stored.payments.length, stored.registrations.map((r) => r.state)], [3, ['confirmed', 'confirmed', 'confirmed']], 'three payments, every attempt confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), Array(3).fill(['register', 'record', 'settle']).flat(), 'register, record and settle audits, three of each');
+}, 240_000);
+
+scenario('SIS-27', 'M7B-PAYMENTS-P2B A LOST RECORD ANSWER, THEN CHECK AGAIN — the record\'s 201 is committed by the entry but lost at the front (st.lose): the section says it could not confirm the payment and offers Check again and Find this payment attempt; a focus or a tab return re-sends nothing; Check again is ONE record POST with the SAME key, the byte-identical body and the same session token, answered by the entry\'s sealed replay (201, idempotent-replayed), then ONE payments re-read and Confirm payment; the database holds ONE payment throughout, its registration confirmed at the end', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i27', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await fillPaymentForm(page, '12.50', 'cash');
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isPaymentRecord(main.id, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-payments-submit'));
+    await page.waitFor(`!!${q('issued-payments-check')}`, 30_000, 'unresolved: Check again offered');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, from);
+  await page.settle();
+  const first = sentBy(page, isPaymentChain(main.id, id), from);
+  const section = await paySectionOf(page);
+  record('SIS-27', { phase: 'answer lost', chain: first.map(payLine(main.id, id)) });
+  assert.deepEqual(first.map(payLine(main.id, id)), ['POST /payment-registrations 201', 'GET /payment-registration-proof 200', 'POST /payments 201 (response lost)'], 'the record committed, its answer lost: nothing re-read, nothing re-sent');
+  const { attemptId } = assertChainBytes(tenant, { reg: first[0], proof: first[1], rec: first[2] }, { amountCents: 1250, method: 'cash' });
+  assert.ok(section.includes(PAY_SAID.uncertain), `the uncertain text is said: ${section}`);
+  assert.deepEqual([await has(page, 'issued-payments-check'), await has(page, 'issued-payments-find'), await has(page, 'issued-payments-confirm')], [true, true, false], 'Check again and Find this payment attempt; never "recorded"');
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'the entry committed ONE payment');
+  const watch = postWatch(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual(watch.disarm(), [], 'nothing re-sent on a focus or a tab return');
+
+  const checkFrom = st.api.length;
+  await page.click(by('issued-payments-check'));
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, 'Check again: recorded, Confirm payment offered');
+  await rereadAnswered(page, main.id, id, checkFrom);
+  const again = sentBy(page, isPaymentChain(main.id, id), checkFrom);
+  record('SIS-27', { phase: 'check again', chain: again.map(payLine(main.id, id)), replayed: again[0]?.replied?.headers['idempotent-replayed'] ?? null });
+  assert.deepEqual(again.map(payLine(main.id, id)), ['POST /payments 201', 'GET /payments 200'], 'Check again: ONE record POST, then ONE payments re-read');
+  const [lostRec, replay] = [first[2], again[0]];
+  assert.ok(replay.body === lostRec.body, 'the byte-identical record body (compared, never printed)');
+  assert.ok(replay.headers['idempotency-key'] === lostRec.headers['idempotency-key'], 'the SAME key');
+  assert.ok(replay.headers[SESSION_CSRF] === lostRec.headers[SESSION_CSRF], 'under the session token it was sent with');
+  assert.equal(replay.replied.headers['idempotent-replayed'], 'true', 'the entry\'s replay of the sealed 201');
+  assert.ok((await paySectionOf(page)).includes(PAY_SAID.recorded('$12.50', 'Cash')), 'recorded, from the replayed answer');
+  await confirmRecorded(page, 'SIS-27');
+  await quiet(page, checkFrom);
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'still ONE payment, its registration confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'ONE record audit: the replay added none');
+  assert.deepEqual(sentBy(page, isPaymentWrite, from).map(payLine(main.id, id)), ['POST /payment-registrations 201', 'POST /payments 201 (response lost)', 'POST /payments 201', 'POST /payment-settlement 200'], 'four payment POSTs in all, one key for both records');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-28', 'M7B-PAYMENTS-P2B A RELOAD AFTER A LOST RECORD ANSWER — the record\'s answer is lost at the front, then the page is reloaded (its in-memory attempt gone): the invoice offers Record payment again; a new $5.00 attempt is ONE register answered by the sealed 409 write_conflict (the entry\'s unsettled slot), nothing more of that chain; the section says the unfinished attempt and looks it up (payment-attempts, to the end); the lost attempt is listed as recorded and its Confirm payment is ONE settle of THAT attempt (version 2, 200) then ONE payments re-read; the database holds ONE payment and ONE registration, confirmed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i28', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  await fillPaymentForm(page, '12.50', 'cash');
+  const from = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isPaymentRecord(main.id, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-payments-submit'));
+    await page.waitFor(`!!${q('issued-payments-check')}`, 30_000, 'unresolved: Check again offered');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, from);
+  const first = sentBy(page, isPaymentChain(main.id, id), from);
+  const { attemptId } = assertChainBytes(tenant, { reg: first[0], proof: first[1], rec: first[2] }, { amountCents: 1250, method: 'cash' });
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'recorded' }] }, 'the entry committed ONE payment');
+
+  // The reload: a fresh document, the held attempt gone with the page's memory.
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the invoice listed after the reload');
+  await openVoidable(page, main.id, id, 1);
+  assert.equal(await has(page, 'issued-payments-check'), false, 'after the reload nothing is held in the page');
+  await fillPaymentForm(page, '5.00', 'card');
+  const retry = st.api.length;
+  await page.click(by('issued-payments-submit'));
+  await page.waitFor(`!!document.querySelector('[data-testid="issued-payments-attempt"][data-attempt-state="recorded"]')`, 30_000, 'the lookup lists the lost attempt as recorded');
+  await quiet(page, retry);
+  await page.settle();
+  const blocked = sentBy(page, isPaymentChain(main.id, id), retry);
+  const section = await paySectionOf(page);
+  record('SIS-28', { phase: 'write conflict', chain: blocked.map(payLine(main.id, id)).map((l) => l.replace(/after=[^ ]+/, 'after=…')) });
+  assert.deepEqual(blocked.map(payLine(main.id, id)).filter((l) => !l.startsWith('GET /api/v1/stores/')), ['POST /payment-registrations 409 write_conflict'], 'ONE register, the sealed write_conflict: no proof, no record');
+  const lookups = blocked.filter(isPaymentAttemptsRead(main.id));
+  assert.ok(lookups.length === 1 && lookups[0].status === 200 && JSON.parse(lookups[0].replied.text).nextCursor === null, `the lookup is exactly ONE payment-attempts read, a single page to its end (${lookups.length} sent)`);
+  const newAttempt = JSON.parse(blocked[0].body).attemptId;
+  assert.ok(V4.test(newAttempt) && newAttempt !== attemptId, 'the new submission minted a NEW attempt id');
+  assert.ok(section.includes(PAY_SAID.conflict), `the unfinished attempt is said: ${section}`);
+  const rows = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-attempt"]')].map((r) => r.dataset.attemptState)`);
+  assert.deepEqual(rows, ['recorded'], 'exactly the lost attempt, recorded');
+
+  const confirmFrom = st.api.length;
+  await page.click(by('issued-payments-attempt-confirm'));
+  await page.waitFor(() => sentBy(page, isPaymentSettle(main.id, id), confirmFrom).some((r) => r.status !== null), 30_000, 'the settle answered');
+  await page.waitFor(() => sentBy(page, isPaymentsOf(main.id, id), confirmFrom).some((r) => r.status !== null), 30_000, 'the payments re-read after the confirm');
+  await quiet(page, confirmFrom);
+  await page.settle();
+  const settled = sentBy(page, isPaymentChain(main.id, id), confirmFrom);
+  record('SIS-28', { phase: 'confirmed', chain: settled.map(payLine(main.id, id)) });
+  assert.deepEqual(settled.map(payLine(main.id, id)), ['POST /payment-settlement 200', 'GET /payments 200'], 'ONE settle, then ONE payments re-read');
+  const after = { remaining: await textOf(page, 'issued-payments-remaining'), confirmed: (await paySectionOf(page)).includes(PAY_SAID.confirmed) };
+  record('SIS-28', { phase: 'on screen', ...after });
+  assert.ok(after.confirmed || after.remaining === '$29.50', `the result is on screen after the lookup's Confirm: "Payment confirmed." or $29.50 remaining ${JSON.stringify(after)}`);
+  assert.equal(after.remaining, '$29.50', 'the re-read shows the remaining after the one payment');
+  assert.ok(settled[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settle confirms THE LOST attempt, seen recorded (compared, never printed)');
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [{ attempt: attemptId, amount: 1250, method: 'cash' }], registrations: [{ attempt: attemptId, state: 'confirmed' }] }, 'ONE payment, ONE registration, confirmed');
+  assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'the refused register wrote nothing');
+  assert.equal(sentBy(page, isPaymentRecord(main.id, id), retry).length, 0, 'no record POST after the reload');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-29', 'M7B-PAYMENTS-P2B NO PERMISSION, NO RECORD PAYMENT — a technician (Invoices View by default, Customers View set by the owner) opens the store\'s issued invoice: the payment eligibility is ONE GET answered 403 forbidden (never retried), the void eligibility 403 too; the Payments section shows, but no Record payment; nothing is written', async () => {
+  const { tenant, main, boss, direct, ids: [id] } = await voidShop('i29', 1);
+  await levelVia(direct, 'technician', 'customers', 'view');
+  const tech = await actor('i29-tech', [grant(tenant, 'technician'), storeGrant(tenant, main.id, 'technician')], { role: 'technician' });
+  void boss;
+  const page = await voidPage(tech, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await page.settle();
+  record('SIS-29', { phase: 'open', reads: sentBy(page, isIssuedRead, opened).map(readLine) });
+  assert.deepEqual(sentBy(page, isPaymentEligibilityRead, opened).map(readLine), [`${issuedPath(main.id)}/${id}/payment-eligibility 403 forbidden`], 'ONE payment eligibility GET, refused');
+  assert.deepEqual(sentBy(page, isVoidRoute, opened).map(readLine), [`${issuedPath(main.id)}/${id}/void-eligibility 403 forbidden`], 'ONE void eligibility GET, refused');
+  assert.deepEqual(sentBy(page, isIssuedDetailOrList, opened).map(readLine), [`${issuedPath(main.id)}/${id} 200`], 'ONE detail GET');
+  assert.deepEqual(sentBy(page, isPaymentsRead, opened).map(readLine), [`${issuedPath(main.id)}/${id}/payments 200`], 'ONE payments GET');
+  assert.equal(await has(page, 'issued-payments'), true, 'the Payments section is shown');
+  assert.deepEqual([await has(page, 'issued-payments-record'), await has(page, 'issued-payments-form')], [false, false], 'no Record payment, no form');
+  assert.deepEqual((await issuedViewOf(page)).buttons, ['Close'], 'the dialog offers Close only');
+  await focusAndSettle(page, 'focus');
+  assert.equal(sentBy(page, isPaymentEligibilityRead, opened).length, 1, 'the refused eligibility is never retried');
+  assert.deepEqual(sentBy(page, isPaymentWrite, opened).map(readLine), [], 'no payment write');
+  assert.deepEqual(await storedPaymentsOf(id), { payments: [], registrations: [] }, 'nothing written');
+}, 240_000);
+
+scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s longest invoice ($90,071,992,547,409.91 remaining) opened by the owner at 320x640 and 320x480 (16 px default text) and 320x600 with a 24 px default text size: in the two 16 px cells, with the recording form open and again with the recorded result and Confirm payment, the dialog never overflows sideways (nor the page) and every box of the Payments section (P2A\'s summary included) lies inside the dialog; in the 24 px cell only P2B\'s own boxes (the form, amount, methods, Record/Cancel, the flow line, Confirm payment, the attempts block) are asserted inside the dialog and reachable, while P2A\'s summary at that size (its nowrap amounts) is recorded, not asserted; in every cell the amount, methods, Record and Confirm payment are in view once scrolled to (CI fonts are wider: the suite\'s tolerance; every measurement recorded)', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('i30', 1, { long: true });
+  void tenant;
+  const page = await voidPage(boss, main.id, 1);
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  const measure = () => page.evaluate(`(() => {
+    const p = ${q('issued-view')}, s = ${q('issued-payments')};
+    if (p === null || s === null) return null;
+    const pr = p.getBoundingClientRect();
+    const outside = [...s.querySelectorAll('*')].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (r.left < pr.left - ${HOLD_TOLERANCE} || r.right > pr.right + ${HOLD_TOLERANCE}); })
+      .map((e) => e.dataset.testid || e.tagName.toLowerCase()).slice(0, 8);
+    // P2B's own boxes (by test id): each present one inside the dialog's box, measured before anything is scrolled.
+    const mine = ['issued-payments-form', 'issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit', 'issued-payments-cancel', 'issued-payments-flow', 'issued-payments-confirm', 'issued-payments-attempts']
+      .flatMap((id) => [...s.querySelectorAll('[data-testid="' + id + '"]')].map((e) => [id, e.getBoundingClientRect()]))
+      .filter(([, r]) => r.width > 0 && r.height > 0 && (r.left < pr.left - ${HOLD_TOLERANCE} || r.right > pr.right + ${HOLD_TOLERANCE})).map(([id]) => id);
+    const seen = ['issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit', 'issued-payments-confirm'].map((id) => {
+      const t = document.querySelector('[data-testid="' + id + '"]');
+      if (t === null) return [id, null];
+      t.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const r = t.getBoundingClientRect();
+      return [id, r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5];
+    });
+    return { panel: { scrollWidth: p.scrollWidth, clientWidth: p.clientWidth, scrollLeft: p.scrollLeft, left: pr.left, right: pr.right }, page: { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }, outside, mine, seen: Object.fromEntries(seen) };
+  })()`);
+  // SIS-22's 320 px cells, the 24 px default text size LAST (font sizes are never reset): CI fonts are wider than local ones.
+  for (const [cell, width, height, font] of [['N320', 320, 640, null], ['S320', 320, 480, null], ['S320H600', 320, 600, 24]]) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    await openVoidable(page, main.id, id, 1);
+    await fillPaymentForm(page, '1.00', 'cash');
+    await page.settle();
+    const open = await measure();
+    record('SIS-30', { cell, phase: 'form open', ...open });
+    const fits = (m, phase) => {
+      check(m !== null, `${cell} ${phase}: the dialog or its Payments section is missing`);
+      if (m === null) return;
+      check(m.panel.left >= -HOLD_TOLERANCE && m.panel.right <= width + HOLD_TOLERANCE, `${cell} ${phase}: the dialog lies outside the viewport ${JSON.stringify(m.panel)}`);
+      check(m.page.scrollWidth <= m.page.clientWidth + HOLD_TOLERANCE, `${cell} ${phase}: the page scrolls sideways ${JSON.stringify(m.page)}`);
+      check(m.mine.length === 0, `${cell} ${phase}: P2B boxes reach past the dialog ${JSON.stringify(m.mine)}`);
+      if (font === null) {
+        check(m.panel.scrollWidth <= m.panel.clientWidth + HOLD_TOLERANCE && m.panel.scrollLeft === 0, `${cell} ${phase}: the dialog overflows sideways ${JSON.stringify(m.panel)}`);
+        check(m.outside.length === 0, `${cell} ${phase}: boxes reach past the dialog ${JSON.stringify(m.outside)}`);
+      } else {
+        // Out of P2B's scope: P2A's merged summary (nowrap amounts) at 24 px — recorded so it stays visible, not asserted.
+        record('SIS-30', { cell, phase, p2aOverflow: { scrollWidth: m.panel.scrollWidth, clientWidth: m.panel.clientWidth, outside: m.outside } });
+      }
+    };
+    fits(open, 'form open');
+    if (open !== null) for (const k of ['issued-payments-amount-input', 'issued-payments-method-cash', 'issued-payments-method-card', 'issued-payments-submit']) check(open.seen[k] === true, `${cell}: ${k} is not in view once scrolled to (${open.seen[k]})`);
+    await page.click(by('issued-payments-submit'));
+    await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, `${cell}: recorded`);
+    await page.settle();
+    const recorded = await measure();
+    record('SIS-30', { cell, phase: 'recorded', ...recorded });
+    fits(recorded, 'recorded');
+    if (recorded !== null) check(recorded.seen['issued-payments-confirm'] === true, `${cell}: Confirm payment is not in view once scrolled to`);
+    await confirmRecorded(page, cell);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the dialog`);
+  }
+  assert.deepEqual(problems, [], 'the recording form and its result fit 320 px');
+  assert.equal((await storedPaymentsOf(id)).payments.length, 3, 'one payment per cell');
 }, 300_000);
