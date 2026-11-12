@@ -7765,4 +7765,151 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect(server.regs[0].state).toBe('open');
     expect(screen.queryByTestId('issued-payments-record'), 'no Record on its invoice').toBeNull();
   });
+
+  it('SII-227. R8 (G1): a record that committed with its answer lost, whose Check again is answered the sealed already_recorded (037 answers it only for the caller\'s registration of THIS attempt once it has its payment), is recorded with its payment id unnamed; detached by a sign-out, a CAPPED read decides nothing, and a COMPLETE read that no longer lists it (confirmed over 24 h ago) decides it confirmed — "Payment confirmed.", no settlement sent, Record returns', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.record.push('lose'); // committed: the registration has its payment; the answer is lost
+    await recordWith('1.00');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'record', body: 'held' }));
+    expect(server.regs.map((g) => g.state).join(','), 'the record committed').toBe('recorded');
+    const key = rawHeld(r)?.key;
+    const recordKey = keyOf(posts(server, 'payments')[0]) ?? '';
+    // Its sealed 201 is gone (retention is 24 h, idempotency.ts IDEMPOTENCY_POLICY, longer than the 23 h a hold keeps its bytes,
+    // so only a lost idempotency record does this), and the record runs again on a registration that has its payment: 037's
+    // sealed already_recorded. Whenever 037 answers it, the client must take it as this attempt's payment, its id unnamed.
+    expect(server.keys.delete(recordKey), 'its sealed 201 was held').toBe(true);
+    await click('issued-payments-check');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'recorded', stage: 'record', body: '', proof: null }));
+    expect(posts(server, 'payments').length, 'the Check again: one more record').toBe(2);
+    same(keyOf(posts(server, 'payments')[1]), recordKey, 'under its same key');
+    expect(server.keys.get(recordKey)?.status, 'answered 409').toBe(409);
+    expect((server.keys.get(recordKey)?.body as { error?: string } | undefined)?.error).toBe('already_recorded');
+    expect(rawHeld(r)?.payment, 'its payment known by its own amount, its id unnamed').toEqual({ id: null, amountCents: 100, method: 'cash' });
+    await signOutAndBack(r, 3);
+    expect(heldA(r)).toMatchObject({ state: 'recorded', say: 'detached', csrf: null });
+    expect(flow()).toBe(DETACHED);
+    // Settled ones (listed for 24 h) registered before it fill more than 20 pages: the read is capped before its row.
+    // Timeline: this capped read is on 10-17 between 08:30 and 12:00 (those rows settled within 24 h, its own still recorded); another tab confirms it at 12:00; the complete read below is over 24 h later, when all have aged out.
+    const own = server.regs[0];
+    server.regs.unshift(...Array.from({ length: 1001 }, (_, i) => reg(server, 2000 + i, { invoiceId: made[i % 2].id, number: made[i % 2].number, state: 'withdrawn', settledAt: '2026-10-17T08:30:00.000001Z' })));
+    const sent = recordingSent(server);
+    const reads = attemptsReads(server).length;
+    await click('issued-payments-find');
+    await waitFor(() => expect(tid('issued-payments-attempts')).toHaveAttribute('data-phase', 'cap'));
+    expect(attemptsReads(server).length, '20 full pages').toBe(reads + 20);
+    expect(tid('issued-payments-attempts')).toHaveTextContent('There are too many payment attempts to check here.');
+    expect(screen.queryAllByTestId('issued-payments-attempt').length, 'none listing it').toBe(0);
+    expect(heldA(r), 'a capped read decides nothing').toMatchObject({ state: 'recorded', say: 'detached', csrf: null });
+    same(rawHeld(r)?.key, key, 'its own hold, kept');
+    expect(flow()).toBe(DETACHED);
+    await settle();
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on its invoice').toBeNull();
+    expect(recordingSent(server), 'nothing sent').toBe(sent);
+    // Confirmed in another tab over 24 h ago: no longer listed, and the settled ones have aged out too.
+    own.state = 'confirmed';
+    own.settledAt = '2026-10-17T12:00:00.000001Z';
+    server.regs.splice(0);
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(attemptsReads(server).length, 'one complete read').toBe(reads + 21);
+    expect(heldA(r), 'decided confirmed by its absence').toMatchObject({ state: 'done', say: 'confirmed', body: '', proof: null });
+    same(rawHeld(r)?.key, key, 'its own hold');
+    expect(flow()).toBe('Payment confirmed.');
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record'), 'Record returns').not.toBeNull());
+    await settle();
+    expect(posts(server, 'payment-settlement').length, 'no settlement sent').toBe(0);
+    expect(recordingSent(server), 'nothing sent').toBe(sent);
+    expect((server.payments.get(made[2].id) ?? []).length, 'still ONE payment').toBe(1);
+  });
+
+  it('SII-228. R8 (G2, Decision 1): a register still out in transit when a sign-out begins (detached: unresolved, no token, no bytes) is retired past its 60 s by a COMPLETE read without its row — done, no line, "No unfinished…", Record back; when that register then commits late and its 201 arrives, it starts nothing: no proof GET, no record, the hold stays done and no line returns', async () => {
+    const { server, r, view } = await setup();
+    await openRecordable(3);
+    server.hold.register = 1; // held at the front: it reaches the fake only when released
+    await recordWith('1.00');
+    await waitFor(() => expect(server.held.map((h) => h.kind).join(',')).toBe('register'));
+    const key = rawHeld(r)?.key;
+    // In this section Find waits for its own chain (R3-4): the section is left while the register is out, and a second
+    // mount on the same hold store (the app's one store, SII-222b) finds it once the sign-out has detached it.
+    view.unmount(); // its chain stays out
+    render(<ServerIssuedInvoices {...r.props()} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await signOutAndBack(r, 3);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'register', say: 'detached', csrf: null, body: '', proof: null });
+    expect(server.regs.length, 'nothing registered yet').toBe(0);
+    quiet(r); // past REGISTER_QUIET_MS since its last send
+    const reads = attemptsReads(server).length;
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(attemptsReads(server).length, 'one complete read').toBe(reads + 1);
+    expect(heldA(r), 'retired').toMatchObject({ state: 'done', say: '', body: '', proof: null });
+    same(rawHeld(r)?.key, key, 'its own hold');
+    expect(flow(), 'no hold line').toBe('');
+    expect(tid('issued-payments-attempts')).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record'), 'Record is back').not.toBeNull());
+    await settle();
+    // The register commits late (a request delayed in transit), and its 201 arrives. Four layers stop it: after the await the
+    // hold-incarnation check (same stage and stage key, not done) and the token check; the loop's token and bytes check; and
+    // the hold store's refusal of bytes for a detached hold.
+    const mark = server.sent.length;
+    server.held.shift()!.release();
+    await settle();
+    await settle();
+    expect(server.regs.map((g) => g.state).join(','), 'the late registration committed').toBe('open');
+    same(server.regs[0].attemptId, key, 'its own attempt');
+    expect(server.payRequests('payment-registration-proof').length, 'no proof GET').toBe(0);
+    expect(posts(server, 'payments').length, 'no record').toBe(0);
+    expect(posts(server, 'payment-registrations').length, 'the one register').toBe(1);
+    expect(apart(server, mark).length, 'nothing sent').toBe(0);
+    expect(heldA(r), 'still retired').toMatchObject({ state: 'done', say: '', body: '', proof: null });
+    same(rawHeld(r)?.key, key, 'the same hold');
+    expect(flow(), 'no line returns').toBe('');
+    expect(screen.queryByTestId('issued-payments-record'), 'Record stays').not.toBeNull();
+  });
+
+  it('SII-229. R8: a late PROOF answer of a chain whose hold was detached by a store switch and then re-created by its own row\'s Withdraw in a second mount (the same attempt, the same token) never starts a record on that hold, and the old chain never unsticks its settle — the settlement withdraws it: "Attempt withdrawn. No payment was recorded.", zero payments', async () => {
+    const { server, made, r, view } = await setup();
+    await openRecordable(3);
+    server.hold.proof = 1; // the register commits; its proof GET is out, slow
+    await recordWith('1.00');
+    await waitFor(() => expect(server.held.map((h) => h.kind).join(',')).toBe('proof'));
+    expect(heldA(r)).toMatchObject({ state: 'sending', stage: 'proof' });
+    const key = rawHeld(r)?.key;
+    const token = rawHeld(r)?.csrf;
+    await close();
+    fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } }); // detached; the token is unchanged
+    await settle();
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', say: 'detached', csrf: null, body: '' });
+    view.unmount(); // the section left: its chain keeps awaiting the proof
+    render(<ServerIssuedInvoices {...r.props()} />); // the same hold store
+    await showAndChoose(STORE_1); // the store chosen back
+    await listReady();
+    await open(3);
+    expect(flow()).toBe(DETACHED);
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(screen.getByTestId('issued-payments-attempt')).toHaveAttribute('data-attempt-state', 'open');
+    server.hold.settle = 1;
+    await click('issued-payments-withdraw'); // its own attempt: the hold re-created under the same key and token
+    await waitFor(() => expect(server.held.map((h) => h.kind).join(',')).toBe('proof,settle'));
+    expect(heldA(r)).toMatchObject({ state: 'sending', stage: 'settle' });
+    same(rawHeld(r)?.key, key, 'the same attempt');
+    same(rawHeld(r)?.csrf, token, 'the same token: only the hold incarnation tells the two chains apart');
+    const proof = server.held.findIndex((h) => h.kind === 'proof');
+    server.held.splice(proof, 1)[0].release(); // the first mount's proof answer arrives
+    await settle();
+    await settle();
+    expect(posts(server, 'payments').length, 'no record POST').toBe(0);
+    expect(heldA(r), 'its settle still out').toMatchObject({ state: 'sending', stage: 'settle' });
+    same(rawHeld(r)?.key, key, 'the same hold');
+    server.held.shift()!.release(); // the settle
+    await waitFor(() => expect(flow()).toBe('Attempt withdrawn. No payment was recorded.'));
+    expect(heldA(r)).toMatchObject({ state: 'done', say: 'withdrawn' });
+    expect(server.regs.map((g) => g.state).join(','), 'withdrawn on the server').toBe('withdrawn');
+    expect((server.payments.get(made[2].id) ?? []).length, 'zero payments').toBe(0);
+    expect(posts(server, 'payment-settlement').length, 'one settlement').toBe(1);
+    expect(posts(server, 'payments').length, 'never a record').toBe(0);
+  });
 });

@@ -583,6 +583,8 @@ function IssuedSection({
   const lookupCtl = useRef<AbortController | null>(null);
   const paying = useRef(false);
   const confirming = useRef(false); // a Confirm press out (R1 S12)
+  /** R8: per attempt, the stage (and its key) this section's chain last sent — its own hold, not one re-created under that attempt. */
+  const sentStage = useRef(new Map<string, Pick<HeldPayment, 'stage' | 'stageKey'>>());
   // Whether a payment chain or Confirm is out (R2 N2): Find and row actions say so instead of ignoring a press.
   const [payOut, setPayOut] = useState(false);
   const setPaying = (on: boolean): void => { paying.current = on; setPayOut(on || confirming.current); };
@@ -758,6 +760,8 @@ function IssuedSection({
   function unstick(key: string): void {
     const h = payHolds.get(uid);
     if (h === undefined || h.key !== key || (h.state !== 'sending' && h.state !== 'checking')) return;
+    const sent = sentStage.current.get(key);
+    if (sent !== undefined && (h.stage !== sent.stage || h.stageKey !== sent.stageKey)) return; // R8: another chain's hold, its own send out
     payHolds.change(uid, key, h.csrf === null ? { state: 'unresolved', say: 'detached', body: '', proof: null } : { state: 'unresolved', say: 'uncertain' });
   }
   function coolPay(): void {
@@ -803,9 +807,14 @@ function IssuedSection({
       const csrf = h.csrf;
       const since = sessionEndsSoFar();
       payHolds.change(uid, attemptId, { lastSentAt: clock() }); // R4: the stage's LATEST send, for runLookup's quiet window
+      sentStage.current.set(attemptId, { stage: h.stage, stageKey: h.stageKey });
       const answer = await sendStage(h, csrf);
       const now = payHolds.get(uid);
       if (now === undefined || now.key !== attemptId) return;
+      // R8: an answer settles only the hold that sent it — the same stage under the same stage key, still undecided. A hold
+      // re-created under this attempt meanwhile (a row's settlement after a remount, the same token) or one already decided
+      // is never changed by it, so a late answer can never start the next stage (a record) on it.
+      if (now.stage !== h.stage || now.stageKey !== h.stageKey || now.state === 'done') return;
       if (now.csrf !== csrf || since !== sessionEndsSoFar()) return detachPay();
       if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
       const v = judgePayment(h.stage, answer, firstSend);
@@ -934,10 +943,10 @@ function IssuedSection({
       if (now === undefined || now.key !== h.key || now.state !== 'unresolved' || now.body === '' || paymentExpired(now, clock(), wall()) || !paySendable(now)) return;
       invalidateLookup();
       payHolds.change(uid, h.key, { state: 'checking' });
-      await runStage(h.key, false);
+      // R8: unstuck only by the press that set 'checking' — one that returned earlier never touches another mount's send.
+      try { await runStage(h.key, false); } finally { unstick(h.key); }
     } finally {
       setPaying(false);
-      unstick(h.key); // never left checking or sending
     }
   }
 
