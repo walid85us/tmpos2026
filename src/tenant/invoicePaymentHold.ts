@@ -88,7 +88,8 @@ export const isBlockingPayment = (held: HeldPayment | undefined): held is HeldPa
 /**
  * Held elsewhere (G3, R5): undecided at ANY stage, attached or not, and for another store or invoice — finished there first.
  * An open register-stage attempt's outcome is unknown too (a definite answer makes it done), so a press or a row's settlement
- * elsewhere never replaces it; on its own invoice Find decides it, by its row or by its absence (R3 L-M1, R4).
+ * elsewhere never replaces it; on its own invoice Find decides it by its row, or by its absence only while it never sent a
+ * record (R3 L-M1, R4, R7), and another row's settlement there never replaces it either (rowHeldBack, R7).
  */
 export const isPaymentHeldElsewhere = (held: HeldPayment | undefined, storeId: string, invoiceId: string): boolean =>
   isOpenPayment(held) && (held.storeId !== storeId || held.invoiceId !== invoiceId);

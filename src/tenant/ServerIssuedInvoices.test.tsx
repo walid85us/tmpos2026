@@ -6257,7 +6257,7 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
       `${STORES_PATH}/${STORE_1}/payment-attempts`, `${STORES_PATH}/${STORE_1}/payment-attempts?after=${made[1].id}.${uuid(0xaf00 + 49)}`,
       `${STORES_PATH}/${STORE_1}/payment-attempts?after=${made[1].id}.${uuid(0xaf00 + 99)}`,
     ]), 'the three attempts pages, cursor by cursor').toBe(true);
-    expect(tid('issued-payments-attempts')).toHaveTextContent('You have no unfinished payment attempts on this invoice.');
+    expect(tid('issued-payments-attempts')).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
     expect(screen.queryAllByTestId('issued-payments-attempt').length).toBe(0);
     // R3 (L-M1): a COMPLETE read lists every unsettled registration whatever its age; no row of it decides it, nothing sent.
     expect(heldA(r)).toMatchObject({ state: 'done', body: '', proof: null });
@@ -7028,7 +7028,7 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     await lookupReady();
     expect(heldA(r)?.state).toBe('done');
     expect(attemptsReads(server).length).toBe(2);
-    expect(tid('issued-payments-attempts')).toHaveTextContent('You have no unfinished payment attempts on this invoice.');
+    expect(tid('issued-payments-attempts')).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
     await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
     expect(posts(server, 'payment-registrations').length).toBe(4);
   });
@@ -7144,25 +7144,36 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect(tid('issued-payments-check')).toBeInTheDocument();
   });
 
-  it('SII-209. R3 L-M1: a registered attempt whose registration a COMPLETE lookup no longer lists (settled elsewhere, over 24 h ago) is decided by its absence — nothing sent, the lookup says none, payments page one once more and Record returns', async () => {
-    const { server, r } = await setup();
+  it('SII-209. R7 (Part B): once a record may have been sent, a COMPLETE lookup that no longer lists the registration (settled over 24 h ago: withdrawn OR confirmed, 037) decides nothing — the hold, its line and its key stay, the lookup says it can\'t tell, nothing is sent, no Record on its invoice and the other invoice names it', async () => {
+    const { server, made, r } = await setup();
     await openRecordable(3);
     server.payScripts.record.push(404);
     await recordWith('1.00');
     await lookupReady();
     expect(screen.getAllByTestId('issued-payments-attempt').length).toBe(1);
+    expect(heldA(r)).toMatchObject({ state: 'lookup', stage: 'record', say: 'record404', body: '', proof: null });
+    const key = rawHeld(r)?.key;
     server.regs.splice(0); // no longer listed
-    const reads = server.paymentReads().length;
-    const commands = () => posts(server, 'payment-registrations').length + posts(server, 'payments').length + posts(server, 'payment-settlement').length;
-    const sent = commands();
+    const count = () => ['payment-registrations', 'payments', 'payment-settlement', 'payment-registration-proof'].map((route) => server.payRequests(route as 'payments').length).join(',');
+    const sent = count();
+    const reads = attemptsReads(server).length;
     await click('issued-payments-find');
     await lookupReady();
-    expect(heldA(r)).toMatchObject({ state: 'done', body: '', proof: null });
-    expect(flow()).toBe('');
-    expect(tid('issued-payments-attempts')).toHaveTextContent('You have no unfinished payment attempts on this invoice.');
-    await waitFor(() => expect(server.paymentReads().length).toBe(reads + 1));
-    await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
-    expect(commands(), 'nothing sent').toBe(sent);
+    expect(attemptsReads(server).length, 'one complete read').toBe(reads + 1);
+    expect(heldA(r), 'decided by nothing').toMatchObject({ state: 'lookup', stage: 'record', say: 'record404', body: '', proof: null });
+    same(rawHeld(r)?.key, key, 'the same attempt, kept');
+    expect(flow()).toBe(RECORD_404);
+    expect(tid('issued-payments-attempts')).toHaveTextContent("This payment attempt is no longer listed, so it can't be finished from here. Check this invoice's payments.");
+    expect(tid('issued-payments-attempts')).not.toHaveTextContent('No unfinished payment attempts were found on this invoice.');
+    await settle();
+    expect(count(), 'nothing sent: no registration, proof, record or settlement').toBe(sent);
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on its invoice').toBeNull();
+    await close();
+    await open(2);
+    await settle();
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on another invoice').toBeNull();
+    expect(flow()).toBe(finishOn(made[2].number));
+    expect(count(), 'still nothing sent').toBe(sent);
   });
 
   it('SII-210. R3 M2: on another store the line names the store too — an attempt registered at Main Street holds an invoice of another store back: no Record, nothing minted', async () => {
@@ -7241,7 +7252,7 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
       await waitFor(() => expect(attempts(), at).toHaveAttribute('data-phase', 'failed'));
       expect(attemptsReads(server).length, `${at}: one complete read`).toBe(reads + 1);
       expect(attempts(), at).toHaveTextContent('This payment attempt may still be in progress. Try again in a minute.');
-      expect(attempts(), at).not.toHaveTextContent('You have no unfinished payment attempts on this invoice.');
+      expect(attempts(), at).not.toHaveTextContent('No unfinished payment attempts were found on this invoice.');
       expect(heldA(r), at).toMatchObject({ state: 'unresolved', stage: 'register', body: 'held' });
       await settle();
       expect(screen.queryByTestId('issued-payments-record'), `${at}: no Record beside its own undecided attempt`).toBeNull();
@@ -7249,7 +7260,7 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
       await click('issued-payments-attempts-retry');
       await lookupReady();
       expect(heldA(r), at).toMatchObject({ state: 'done', body: '', proof: null });
-      expect(attempts(), at).toHaveTextContent('You have no unfinished payment attempts on this invoice.');
+      expect(attempts(), at).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
       await waitFor(() => expect(screen.queryByTestId('issued-payments-record'), at).not.toBeNull());
       expect(sent(), `${at}: no new register`).toBe(regs);
     }
@@ -7411,5 +7422,347 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect(server.payRequests('payment-registration-proof').length, 'no proof read').toBe(0);
     expect(posts(server, 'payments').length, 'no record sent').toBe(0);
     expect(heldA(r)).toMatchObject({ state: 'done', say: 'withdrawn' });
+  });
+
+  const FINISH_FIRST = 'Finish the payment attempt above first.';
+  /** §12.7: a sign-out makes the held attempt unsendable (detached); sign in again (Reconnect) and reopen invoice `n`. */
+  async function signOutAndBack(r: Rig, n: number) {
+    await act(async () => { await r.props().session!.logout(); });
+    await waitFor(() => expect(heldA(r)?.csrf, 'detached by the sign-out').toBeNull());
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+    await listReady();
+    await open(n);
+  }
+  /**
+   * R7: another tab's open registration A of this user on invoice 3, and in THIS tab a Record on invoice 3 whose register
+   * the slot refuses (037: one unsettled registration per staff member and invoice) with its answer lost — B, at its
+   * register, nothing committed — then made unsendable by a sign-out and sign-in (§12.7: detached). Find's read is CAPPED
+   * (settled rows fill more than 20 pages; SII-181), so it never decides B and lists A on page one.
+   */
+  async function undecidedBesideListed() {
+    const { server, made, r, view } = await setup();
+    server.regs.push(reg(server, 1, { invoiceId: made[2].id, number: made[2].number }));
+    for (let i = 0; i < 1001; i++) server.regs.push(reg(server, 2000 + i, { invoiceId: made[i % 2].id, number: made[i % 2].number, state: 'withdrawn', settledAt: '2026-10-17T08:30:00.000001Z' }));
+    await openRecordable(3);
+    server.payScripts.register.push('lose');
+    await recordWith('1.00');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'register', body: 'held' }));
+    expect(server.regs.filter((g) => g.state === 'open').length, 'B registered nothing: the slot is A\'s').toBe(1);
+    await signOutAndBack(r, 3);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'register', say: 'detached', csrf: null, body: '' });
+    await click('issued-payments-find');
+    await waitFor(() => expect(tid('issued-payments-attempts')).toHaveAttribute('data-phase', 'cap'));
+    expect(heldA(r), 'a capped read decides nothing').toMatchObject({ state: 'unresolved', stage: 'register', say: 'detached', csrf: null });
+    expect(screen.getAllByTestId('issued-payments-attempt').length, 'A on page one').toBe(1);
+    return { server, made, r, view, key: rawHeld(r)?.key, a: server.regs[0].attemptId };
+  }
+
+  it('SII-219. R7: another tab\'s open attempt listed beside this tab\'s undecided attempt on the same invoice (unsendable, not decided by a capped read) — its Withdraw is held back with "Finish the payment attempt above first." and sends nothing; the undecided attempt is kept with its recording block: no Record on invoice 3, and invoice 2 names invoice 3', async () => {
+    const { server, made, r, key, a } = await undecidedBesideListed();
+    const withdraw = tid('issued-payments-withdraw');
+    const mark = server.sent.length;
+    await user().click(withdraw);
+    await settle();
+    expect(posts(server, 'payment-settlement').length, 'no settlement sent for A').toBe(0);
+    expect(apart(server, mark).length, 'nothing sent').toBe(0);
+    same(rawHeld(r)?.key, key, 'B is kept');
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'register', say: 'detached', csrf: null });
+    expect(server.regs[0].state).toBe('open');
+    expect(withdraw).toHaveAttribute('aria-disabled', 'true');
+    expect(withdraw.getAttribute('aria-describedby')?.split(' ').includes('issued-payments-attempt-note-0'), 'described by its note').toBe(true);
+    const note = document.getElementById('issued-payments-attempt-note-0');
+    expect(note?.textContent === FINISH_FIRST, 'describedby resolves to the note').toBe(true);
+    // "above": B's own line (the flow) comes before the list in the DOM.
+    expect(flow()).toBe(DETACHED);
+    expect(Boolean(note !== null && (tid('issued-payments-flow').compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING)), 'the held attempt\'s line is above the note').toBe(true);
+    expect(document.body.innerHTML.includes(key ?? '-') || document.body.innerHTML.includes(a), 'no attempt id in the DOM').toBe(false);
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on invoice 3').toBeNull();
+    await close();
+    await open(2);
+    await settle();
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on invoice 2').toBeNull();
+    expect(flow()).toBe(finishOn(made[2].number));
+    same(rawHeld(r)?.key, key, 'B is still kept');
+    expect(commands(server), 'B\'s one send only').toBe(1);
+  });
+
+  it('SII-220. R7: the undecided attempt stays recoverable — while it is undecided the listed row waits; once a COMPLETE read decides it by its own evidence (still at its register, past the 60 s), the row\'s Withdraw settles the listed attempt: ONE v1, "Attempt withdrawn. No payment was recorded.", nothing else sent', async () => {
+    const { server, r, a } = await undecidedBesideListed();
+    expect(tid('issued-payments-withdraw'), 'held back while B is undecided').toHaveAttribute('aria-disabled', 'true');
+    server.regs.splice(1); // the settled rows age out: the next read is complete
+    quiet(r);
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'B decided by its absence (it never registered)').toMatchObject({ state: 'done', body: '' });
+    const withdraw = tid('issued-payments-withdraw');
+    expect(withdraw).toHaveAttribute('aria-disabled', 'false');
+    expect(screen.queryByText(FINISH_FIRST)).toBeNull();
+    await settle();
+    const mark = server.sent.length;
+    await user().click(withdraw);
+    await waitFor(() => expect(flow()).toBe('Attempt withdrawn. No payment was recorded.'));
+    await settle();
+    same(JSON.stringify(apart(server, mark)), JSON.stringify([`POST ${STORES_PATH}/${STORE_1}/invoices/${server.regs[0].invoiceId}/payment-settlement`]), 'ONE settlement, nothing else (compared, never printed)');
+    const [v1] = posts(server, 'payment-settlement');
+    same(v1.body, `{"expectedTenant":"${TENANT_A}","attemptId":"${a}","expectedVersion":1}`, 'A\'s withdraw bytes');
+    expect(server.regs[0].state).toBe('withdrawn');
+    expect(heldA(r)).toMatchObject({ state: 'done', say: 'withdrawn' });
+    same(rawHeld(r)?.key, a, 'the hold is A\'s settlement');
+    expect(rawHeld(r)?.amountCents === 0, 'no amount from another attempt').toBe(true);
+  });
+
+  it('SII-221. R7: only a matching terminal answer clears a hold, and only its own — the held attempt\'s own listed row (its register committed, its answer lost, then detached by a sign-out) is not held back; a (synthetic) 200 naming another attempt or another invoice leaves it undecided (Check again, same key and bytes), the matching 200 decides it: "Attempt withdrawn. No payment was recorded."', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.register.push('lose');
+    await recordWith('1.00');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    expect(server.regs.length, 'its register committed').toBe(1);
+    await signOutAndBack(r, 3);
+    await click('issued-payments-find');
+    await lookupReady(); // its own open row is listed: no absence, nothing decided
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'register', say: 'detached', csrf: null, body: '' });
+    const key = rawHeld(r)?.key;
+    expect(screen.getAllByTestId('issued-payments-attempt').length).toBe(1);
+    expect(tid('issued-payments-withdraw'), 'its own row: never "another attempt"').toHaveAttribute('aria-disabled', 'false');
+    expect(screen.queryByText(FINISH_FIRST)).toBeNull();
+    // SYNTHETIC: the real 200 is built from the request (IP:588-596), so it always names the attempt and invoice sent;
+    // these two pin the client's identity check (invoiceIssuingClient settlePayment) and that a mismatch never decides a hold.
+    const settlement = (over: Record<string, string>) => new Response(JSON.stringify({ settlement: { invoiceId: made[2].id, attemptId: key, state: 'withdrawn', ...over } }),
+      { status: 200, headers: { 'content-type': 'application/json' } });
+    server.payScripts.settle.push(settlement({ attemptId: uuid(0xa221) }), settlement({ invoiceId: made[1].id }));
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'settle', say: 'uncertain', body: 'held' }));
+    same(rawHeld(r)?.key, key, 'another attempt\'s 200 never decides it');
+    expect(flow()).toBe(UNCERTAIN);
+    expect(tid('issued-payments-withdraw'), 'its own settlement is out: only Check again').toHaveAttribute('aria-disabled', 'true');
+    await click('issued-payments-check');
+    await waitFor(() => {
+      expect(posts(server, 'payment-settlement').length).toBe(2);
+      expect(heldA(r), 'another invoice\'s 200 never decides it').toMatchObject({ state: 'unresolved', stage: 'settle', say: 'uncertain' });
+    });
+    expect(server.regs[0].state).toBe('open');
+    await click('issued-payments-check');
+    await waitFor(() => expect(flow()).toBe('Attempt withdrawn. No payment was recorded.'));
+    expect(heldA(r)).toMatchObject({ state: 'done', say: 'withdrawn', body: '' });
+    same(rawHeld(r)?.key, key, 'its own hold, decided');
+    expect(server.regs[0].state).toBe('withdrawn');
+    const settles = posts(server, 'payment-settlement');
+    expect(settles.length).toBe(3);
+    expect(settles.every((s) => keyOf(s) === keyOf(settles[0]) && s.body === settles[0].body), 'Check again: the same key and bytes').toBe(true);
+    same(settles[0].body, `{"expectedTenant":"${TENANT_A}","attemptId":"${key}","expectedVersion":1}`, 'its own withdraw bytes');
+    expect(posts(server, 'payment-registrations').length, 'nothing registered again').toBe(1);
+  });
+
+  /** A settlement's 200 as the server words it (built per answer: a body is read once). */
+  const withdrawn200 = (invoiceId: string, attemptId: string) => new Response(JSON.stringify({ settlement: { invoiceId, attemptId, state: 'withdrawn' } }),
+    { status: 200, headers: { 'content-type': 'application/json' } });
+  /** Another tab's open attempt A on invoice 3, listed by a Record whose register the slot refuses (SII-218). */
+  async function listedOther() {
+    const { server, made, r, view } = await setup();
+    server.regs.push(reg(server, 1, { invoiceId: made[2].id, number: made[2].number }));
+    await openRecordable(3);
+    await recordWith('1.00');
+    await lookupReady();
+    expect(heldA(r)).toMatchObject({ state: 'done', say: 'writeConflict' });
+    return { server, made, r, view, a: server.regs[0].attemptId };
+  }
+
+  it('SII-222. R7: a listed attempt\'s settlement out when a sign-out begins — its late 200 never decides it: the attempt stays held, detached and undecided (only the lookup and a deliberate settlement finish it); nothing more is sent', async () => {
+    const { server, made, r, a } = await listedOther();
+    server.hold.settle = 1;
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(server.held.map((h) => h.kind).join(',')).toBe('settle'));
+    same(rawHeld(r)?.key, a, 'A\'s settlement is held');
+    await act(async () => { await r.props().session!.logout(); });
+    await waitFor(() => expect(heldA(r)).toMatchObject({ csrf: null, state: 'unresolved', say: 'detached', body: '' }));
+    // The server had withdrawn it before the sign-out reached it; its 200 arrives late.
+    server.regs[0].state = 'withdrawn';
+    server.regs[0].settledAt = '2026-10-17T12:00:00.000001Z';
+    const mark = server.sent.length;
+    server.held.shift()!.release(withdrawn200(made[2].id, a));
+    await settle();
+    expect(heldA(r), 'a late answer never decides it').toMatchObject({ csrf: null, state: 'unresolved', say: 'detached', body: '' });
+    same(rawHeld(r)?.key, a, 'the same attempt, kept');
+    expect(apart(server, mark).length, 'nothing more sent').toBe(0);
+    expect(posts(server, 'payment-settlement').length).toBe(1);
+  });
+
+  it('SII-222b. R7: a late settlement answer for an attempt no longer held changes nothing — the section left (navigation) while A\'s settlement was out; a second mount on the same hold store (the app\'s one store) finishes A and holds a new recording C; then A\'s first answer arrives: no hold removed or changed, nothing sent', async () => {
+    const { server, made, r, view, a } = await listedOther();
+    server.hold.settle = 1;
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(server.held.map((h) => h.kind).join(',')).toBe('settle'));
+    view.unmount(); // its chain stays out
+    render(<ServerIssuedInvoices {...r.props()} />); // the same hold store
+    await showAndChoose(STORE_1);
+    await listReady();
+    await act(async () => { await r.props().session!.logout(); }); // the session ends: A is detached here
+    await waitFor(() => expect(heldA(r)).toMatchObject({ csrf: null, state: 'unresolved', say: 'detached' }));
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+    await listReady();
+    await open(3);
+    await click('issued-payments-find');
+    await lookupReady(); // A is still open: its first settlement has not been decided
+    await click('issued-payments-withdraw'); // A's own row: a new settlement under a new key
+    await waitFor(() => expect(flow()).toBe('Attempt withdrawn. No payment was recorded.'));
+    expect(server.regs[0].state).toBe('withdrawn');
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+    await recordWith('1.00');
+    await waitFor(() => expect(heldA(r)?.state).toBe('recorded'));
+    const before = rawHeld(r);
+    expect(before !== undefined && before.key !== a, 'C is held, not A').toBe(true);
+    await settle();
+    const mark = server.sent.length;
+    server.held.shift()!.release(withdrawn200(made[2].id, a)); // A's first settlement answers at last
+    await settle();
+    expect(rawHeld(r) === before, 'no hold removed or changed').toBe(true);
+    expect(heldA(r)).toMatchObject({ state: 'recorded' });
+    expect(apart(server, mark).length, 'nothing sent').toBe(0);
+  });
+
+  it('SII-223. R7 (Part B): a PROOF-stage attempt (registered, its proof answered 404: lookup-only) never sent a record, so a COMPLETE read that no longer lists its registration decides it — done, the lookup says none, nothing sent, Record returns', async () => {
+    const { server, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.proof.push(404);
+    await recordWith('1.00');
+    await lookupReady();
+    expect(heldA(r)).toMatchObject({ state: 'lookup', stage: 'proof', say: 'detached', body: '', proof: null });
+    expect(screen.getAllByTestId('issued-payments-attempt').length).toBe(1);
+    server.regs.splice(0); // no longer listed (settled over 24 h ago)
+    const count = () => ['payment-registrations', 'payments', 'payment-settlement', 'payment-registration-proof'].map((route) => server.payRequests(route as 'payments').length).join(',');
+    const sent = count();
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'decided by its absence').toMatchObject({ state: 'done', body: '', proof: null });
+    expect(flow()).toBe('');
+    expect(tid('issued-payments-attempts')).toHaveTextContent('No unfinished payment attempts were found on this invoice.');
+    expect(posts(server, 'payments').length, 'no record ever sent').toBe(0);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+    expect(count(), 'nothing sent').toBe(sent);
+  });
+
+  it('SII-224. R7b: a RECORDED attempt (its payment known, Confirm not pressed) detached by a sign-out, whose registration a COMPLETE read no longer lists (confirmed elsewhere over 24 h ago: a registration with a payment is never withdrawn, 037), is decided confirmed — "Payment confirmed.", page one once more, nothing sent, Record returns', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    await recordWith('1.00');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'recorded', stage: 'record' }));
+    const key = rawHeld(r)?.key;
+    await act(async () => { await r.props().session!.logout(); });
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'recorded', csrf: null, say: 'detached' }));
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+    await listReady();
+    await open(3);
+    await settle();
+    expect(flow()).toBe(DETACHED);
+    expect(screen.queryByTestId('issued-payments-confirm'), 'detached: no Confirm from here').toBeNull();
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record beside it').toBeNull();
+    // Confirmed in another tab over 24 h ago: no longer listed.
+    server.regs[0].state = 'confirmed';
+    server.regs.splice(0);
+    const count = () => ['payment-registrations', 'payments', 'payment-settlement', 'payment-registration-proof'].map((route) => server.payRequests(route as 'payments').length).join(',');
+    const sent = count();
+    const reads = server.paymentReads().length;
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'decided confirmed by its absence').toMatchObject({ state: 'done', say: 'confirmed', body: '', proof: null });
+    same(rawHeld(r)?.key, key, 'its own hold');
+    expect(flow()).toBe('Payment confirmed.');
+    await waitFor(() => expect(server.paymentReads().length, 'page one once more').toBe(reads + 1));
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+    await settle();
+    expect(server.paymentReads().length, 'only once').toBe(reads + 1);
+    expect(count(), 'nothing sent').toBe(sent);
+    expect((server.payments.get(made[2].id) ?? []).length, 'still ONE payment').toBe(1);
+  });
+
+  const NOT_LISTED = "This payment attempt is no longer listed, so it can't be finished from here. Check this invoice's payments.";
+  /** Every recording request (registrations, proofs, records, settlements) so far, as one comparable value. */
+  const recordingSent = (server: Server) => ['payment-registrations', 'payments', 'payment-settlement', 'payment-registration-proof']
+    .map((route) => server.payRequests(route as 'payments').length).join(',');
+
+  it('SII-225a. R7 (Part B): a row Withdraw (v1) whose answer is lost, then a sign-out and sign-in (detached), whose registration a COMPLETE read no longer lists — at its settlement, with no payment known, absence proves nothing: Find keeps the hold undecided, says it is no longer listed and sends nothing', async () => {
+    const { server, r, a } = await listedOther();
+    server.payScripts.settle.push('lose'); // committed (withdrawn), the answer lost
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'settle', body: 'held' }));
+    same(rawHeld(r)?.key, a, 'A\'s settlement is held');
+    expect(rawHeld(r)?.payment === null, 'no payment known').toBe(true);
+    await signOutAndBack(r, 3);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'settle', say: 'detached', csrf: null, body: '' });
+    server.regs.splice(0); // settled over 24 h ago: no longer listed
+    const sent = recordingSent(server);
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'decided by nothing').toMatchObject({ state: 'unresolved', stage: 'settle', say: 'detached', csrf: null, body: '' });
+    same(rawHeld(r)?.key, a, 'the same attempt, kept');
+    expect(flow()).toBe(DETACHED);
+    expect(tid('issued-payments-attempts')).toHaveTextContent(NOT_LISTED);
+    await settle();
+    expect(recordingSent(server), 'nothing sent').toBe(sent);
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record beside it').toBeNull();
+  });
+
+  it('SII-225b. R7 (Part B): a row Confirm (v2) of a listed recorded attempt (its payment known) whose answer is lost, then a sign-out and sign-in (detached), whose registration a COMPLETE read no longer lists — a registration with a payment is never withdrawn (037), so Find decides it confirmed: "Payment confirmed.", page one once more, nothing sent', async () => {
+    const { server, made, r } = await setup();
+    server.regs.push(reg(server, 1, { invoiceId: made[2].id, number: made[2].number, state: 'recorded',
+      payment: { id: uuid(0x9c01), attemptId: uuid(0xac01), amountCents: 300, method: 'cash', recordedAt: '2026-10-17T07:30:00.000001Z', reversal: null } }));
+    await openRecordable(3);
+    await recordWith('1.00'); // the sealed write_conflict: the lookup lists the recorded attempt
+    await lookupReady();
+    const a = server.regs[0].attemptId;
+    server.payScripts.settle.push('lose'); // committed (confirmed), the answer lost
+    await click('issued-payments-attempt-confirm');
+    await waitFor(() => expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'settle', body: 'held' }));
+    same(rawHeld(r)?.key, a, 'A\'s settlement is held');
+    expect(rawHeld(r)?.payment !== null, 'its payment is known (the row\'s)').toBe(true);
+    await signOutAndBack(r, 3);
+    expect(heldA(r)).toMatchObject({ state: 'unresolved', stage: 'settle', say: 'detached', csrf: null });
+    expect(server.regs[0].state).toBe('confirmed');
+    server.regs.splice(0); // confirmed over 24 h ago: no longer listed
+    const sent = recordingSent(server);
+    const reads = server.paymentReads().length;
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'decided confirmed by its absence').toMatchObject({ state: 'done', say: 'confirmed', body: '' });
+    same(rawHeld(r)?.key, a, 'its own hold');
+    expect(flow()).toBe('Payment confirmed.');
+    await waitFor(() => expect(server.paymentReads().length, 'page one once more').toBe(reads + 1));
+    await settle();
+    expect(recordingSent(server), 'nothing sent').toBe(sent);
+  });
+
+  it('SII-226. R7 (Part B) — the FAIL-CLOSED LOCKOUT the owner accepts: a record-404 attempt whose registration is no longer listed (withdrawn in another tab over 24 h ago) stays undecided, so another tab\'s later open registration on the same invoice is listed but its Withdraw is held back ("Finish the payment attempt above first."); nothing sent, no Record — only the invoice\'s payments, outside this page, can tell', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.record.push(404);
+    await recordWith('1.00');
+    await lookupReady();
+    expect(heldA(r)).toMatchObject({ state: 'lookup', stage: 'record', say: 'record404' });
+    const key = rawHeld(r)?.key;
+    // Another tab withdrew it, it aged out of the list, and only then did another tab of this user register here (037).
+    server.regs.splice(0);
+    server.regs.push(reg(server, 1, { invoiceId: made[2].id, number: made[2].number }));
+    const sent = recordingSent(server);
+    await click('issued-payments-find');
+    await lookupReady();
+    expect(heldA(r), 'decided by nothing').toMatchObject({ state: 'lookup', stage: 'record', say: 'record404' });
+    same(rawHeld(r)?.key, key, 'the same attempt, kept');
+    expect(flow()).toBe(RECORD_404);
+    expect(tid('issued-payments-attempts')).toHaveTextContent(NOT_LISTED);
+    const withdraw = tid('issued-payments-withdraw');
+    expect(withdraw).toHaveAttribute('aria-disabled', 'true');
+    expect(document.getElementById('issued-payments-attempt-note-0')?.textContent === FINISH_FIRST, 'the finish-first note').toBe(true);
+    await user().click(withdraw);
+    await settle();
+    expect(recordingSent(server), 'nothing sent').toBe(sent);
+    expect(server.regs[0].state).toBe('open');
+    expect(screen.queryByTestId('issued-payments-record'), 'no Record on its invoice').toBeNull();
   });
 });

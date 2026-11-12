@@ -216,10 +216,12 @@ export const RECORD_TEXT = Object.freeze({
   openRow: (time: string) => `Attempt started ${time}: no payment recorded.`,
   recordedRow: (time: string, amount: string, method: string, at: string) => `Attempt started ${time}: ${amount}, ${method} recorded ${at}.`,
   withdraw: 'Withdraw attempt',
-  none: 'You have no unfinished payment attempts on this invoice.',
+  none: 'No unfinished payment attempts were found on this invoice.', // R7: what this read found, not a promise none exist
   failed: 'Your payment attempts could not be loaded.',
   /** R4: a complete read without the held register-stage attempt within REGISTER_QUIET_MS of its last send decides nothing. */
   stillRegistering: 'This payment attempt may still be in progress. Try again in a minute.',
+  /** R7: a complete read without a held attempt that may have sent its record and has no known payment: settled over 24 h ago, withdrawn or confirmed (037). */
+  notListed: "This payment attempt is no longer listed, so it can't be finished from here. Check this invoice's payments.",
   tryAgain: 'Try again',
   cap: 'There are too many payment attempts to check here.',
   withdrawn: 'Attempt withdrawn. No payment was recorded.',
@@ -832,7 +834,7 @@ function IssuedSection({
         // A confirmation from the lookup (no registration id here) reads page one once; the press's own Confirm reads nothing.
         payHolds.change(uid, attemptId, { state: 'done', say: v.state, body: '', proof: null, rereads: bump(v.state === 'confirmed' && h.registrationId === null) });
         const l = lookupRef.current;
-        if (l !== null && l.invoiceId === h.invoiceId) putLookup({ ...l, rows: l.rows.filter((r) => r.attemptId !== attemptId) });
+        if (l !== null && l.storeId === h.storeId && l.invoiceId === h.invoiceId) putLookup({ ...l, rows: l.rows.filter((r) => r.attemptId !== attemptId) });
       } else if (v.kind === 'final') {
         payHolds.change(uid, attemptId, { state: 'done', say: v.say, body: '', proof: null, rereads: bump(v.reread) });
         if (v.lookup) void runLookup(h.storeId, h.invoiceId); // this attempt wrote nothing: no hold blocks, the lookup shows the other one
@@ -965,7 +967,8 @@ function IssuedSection({
 
   /**
    * A lookup row's deliberate action (spec §6): withdraw (v1) an open attempt or confirm (v2) a recorded one, under a NEW
-   * key, held before it leaves (it replaces any attempt held here that is not out).
+   * key, held before it leaves. It acts only for the row captured at the press (R7): it replaces a decided hold or this
+   * row's own attempt, never another undecided one (rowHeldBack holds the row back instead).
    */
   async function settleRow(row: PaymentAttempt, version: 1 | 2): Promise<void> {
     const l = lookupRef.current;
@@ -989,12 +992,13 @@ function IssuedSection({
       if (body === null) return;
       const was = payHolds.get(uid);
       if (rowHeldBack(was, row) || isPaymentHeldElsewhere(was, store.id, row.invoiceId)) return;
-      if (was !== undefined) payHolds.remove(uid, was.key);
+      const own = was?.key === row.attemptId ? was : undefined; // R7: only this row's own attempt lends it anything
+      if (was !== undefined) payHolds.remove(uid, was.key); // decided, or this row's own attempt: every other undecided one returned above
       const held: HeldPayment = {
         key: row.attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: row.invoiceId, number: row.invoiceNumber, csrf, stage: 'settle', stageKey: nextKey(), body,
-        sentAt: clock(), sentWall: wall(), lastSentAt: clock(), registrationId: null, proof: null, amountCents: row.payment?.amountCents ?? was?.amountCents ?? 0,
+        sentAt: clock(), sentWall: wall(), lastSentAt: clock(), registrationId: null, proof: null, amountCents: row.payment?.amountCents ?? own?.amountCents ?? 0,
         method: row.payment?.method ?? null, payment: row.payment === null ? null : { id: row.payment.id, amountCents: row.payment.amountCents, method: row.payment.method },
-        settleVersion: version, state: 'sending', say: '', retryAfter: 0, rereads: was?.key === row.attemptId ? was.rereads : 0,
+        settleVersion: version, state: 'sending', say: '', retryAfter: 0, rereads: own?.rereads ?? 0,
       };
       if (!payHolds.put(uid, held)) return;
       // The lookup's rows stay shown; only an answer still out is dropped (R2 R5).
@@ -1009,10 +1013,10 @@ function IssuedSection({
   /**
    * "Find this payment attempt" (spec §6, G2): this user's attempts at the store, paged from the start to the end (at most
    * LOOKUP_PAGE_CAP pages), kept for THIS invoice in state open or recorded. A withdrawn or confirmed row for the held
-   * attempt decides it at any time; its absence from a COMPLETE read decides it too, except for a register-stage attempt
-   * whose last send is under REGISTER_QUIET_MS before the read started (R4): that register may still be committing, so
-   * the hold stays undecided and the lookup fails with Try again. Only for the open dialog's invoice; a later lookup or a
-   * close drops it.
+   * attempt decides it at any time; its absence from a COMPLETE read decides only an attempt that never sent a record, or
+   * one whose payment is known (confirmed) (R7), and a register-stage one only once its last send is REGISTER_QUIET_MS before the read started (R4): that
+   * register may still be committing, so the hold stays undecided and the lookup fails with Try again. Only for the open
+   * dialog's invoice; a later lookup or a close drops it.
    */
   async function runLookup(storeId: string, invoiceId: string): Promise<void> {
     const startedAt = clock(); // before the session check: an earlier start only widens the quiet window (R4)
@@ -1057,21 +1061,31 @@ function IssuedSection({
       after = answer.nextCursor;
     }
     const h = payHolds.get(uid);
+    let notListed = false;
     if (h !== undefined && h.state !== 'done' && h.storeId === storeId && h.invoiceId === invoiceId) {
       const row = rows.find((r) => r.attemptId === h.key);
       if (row?.state === 'withdrawn') payHolds.change(uid, h.key, { state: 'done', say: 'withdrawn', body: '', proof: null });
       if (row?.state === 'confirmed') payHolds.change(uid, h.key, { state: 'done', say: 'confirmed', body: '', proof: null, rereads: h.rereads + 1 });
       // R3 L-M1: a COMPLETE read lists every unsettled registration of this caller at the store whatever its age (037), so no
-      // row of it means it never registered or was settled over 24 h ago: decided, nothing sent. A capped, failed or dropped
-      // read (returned above) never decides it. R4 (R3-1): nor does one started within REGISTER_QUIET_MS of a register-stage
-      // attempt's last send — that register may still be committing (its row not yet visible, or behind the keyset already read).
+      // row of it means it never registered or was settled over 24 h ago. A capped, failed or dropped read (returned above)
+      // never decides it. R7: that absence decides only an attempt that never sent a record (stage register or proof) — a
+      // record needs its registration id and this session's proof (037 :1109-1128), so no payment came of it. Once a record
+      // may have been sent, a registration settled over 24 h ago is unlisted whether withdrawn or confirmed (037 :1328): unless
+      // its payment is known, the hold stays as it is and the lookup says so. R4 (R3-1): nor does a read started within REGISTER_QUIET_MS of
+      // a register-stage attempt's last send decide it — that register may still be committing.
       if (row === undefined && !capped && h.state !== 'sending' && h.state !== 'checking') {
-        if (h.stage === 'register' && startedAt - h.lastSentAt < REGISTER_QUIET_MS) return putLookup({ ...base, phase: 'failed', text: RECORD_TEXT.stillRegistering });
-        payHolds.change(uid, h.key, { state: 'done', say: '', body: '', proof: null, rereads: h.rereads + 1 });
+        if (h.stage === 'record' || h.stage === 'settle') {
+          // A payment known before it went unlisted was confirmed: v1 refuses a registration with a payment and settled is
+          // final (037 :1435-1446, :298-325). Otherwise withdrawn and confirmed both look like this: nothing decided.
+          if (h.payment !== null) payHolds.change(uid, h.key, { state: 'done', say: 'confirmed', body: '', proof: null, rereads: h.rereads + 1 });
+          else notListed = true;
+        } else if (h.stage === 'register' && startedAt - h.lastSentAt < REGISTER_QUIET_MS) return putLookup({ ...base, phase: 'failed', text: RECORD_TEXT.stillRegistering });
+        else payHolds.change(uid, h.key, { state: 'done', say: '', body: '', proof: null, rereads: h.rereads + 1 });
       }
     }
     const unsettled = rows.filter((r) => r.state === 'open' || r.state === 'recorded');
-    putLookup({ ...base, rows: unsettled, phase: capped ? 'cap' : 'ready', text: capped ? RECORD_TEXT.cap : unsettled.length === 0 ? RECORD_TEXT.none : '' });
+    const text = capped ? RECORD_TEXT.cap : notListed ? RECORD_TEXT.notListed : unsettled.length === 0 ? RECORD_TEXT.none : '';
+    putLookup({ ...base, rows: unsettled, phase: capped ? 'cap' : 'ready', text });
   }
 
   /** The dialog's recording eligibility (spec §1): 'allowed' only for the exact allowed; a 403 is 'not' and never retried. */
@@ -3206,7 +3220,9 @@ export function lookupListsUnsettled(lookup: PaymentLookup | null, storeId: stri
  */
 export function rowHeldBack(held: HeldPayment | undefined, row: Pick<PaymentAttempt, 'attemptId'>): boolean {
   if (held === undefined || held.state === 'done') return false;
-  if (held.key !== row.attemptId) return isBlockingPayment(held); // on its own invoice an unsendable one holds no other row back (R2 N1); elsewhere isPaymentHeldElsewhere does (R5)
+  // R7 (replaces R2 N1): another undecided attempt, attached or not, sendable or not, holds every other row back — a row's
+  // settlement never drops it (settleRow), so it stays recoverable and keeps its recording block.
+  if (held.key !== row.attemptId) return true;
   return held.stage === 'settle' && held.csrf !== null && held.body !== '';
 }
 
