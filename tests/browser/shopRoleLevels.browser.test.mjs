@@ -1823,6 +1823,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-10', 'SIS-11', 'SIS-12', 'SIS-13', 'SIS-14', 'SIS-15', 'SIS-16',
   'SIS-17', 'SIS-18', 'SIS-19', 'SIS-20', 'SIS-21', 'SIS-22', 'SIS-23', 'SIS-24',
   'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30', 'SIS-31', 'SIS-32', 'SIS-33', 'SIS-34',
+  'SIS-35', 'SIS-36', 'SIS-37', 'SIS-38', 'SIS-39',
   'SLH-01', 'SLH-02',
 ]);
 const registered = new Set();
@@ -8119,6 +8120,8 @@ const isPaymentsOf = (store, id) => (r) => r.method === 'GET' && r.path === `${i
 /** Any payments-family route under one invoice: payments (read or record), payment-eligibility, registrations, proof, settlement. */
 const isPaymentRoute = (r) => /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payment/.test(r.path);
 const isPaymentEligibilityRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payment-eligibility$/.test(r.path);
+/** M7B-PAYMENTS-P2C: GET …/invoices/{id}/payment-reversal-eligibility of any store (one per issued open, R1). */
+const isReversalEligibilityRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/invoices\/[^/]+\/payment-reversal-eligibility$/.test(r.path);
 const isPaymentEligibilityOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payment-eligibility`;
 const isPaymentRegister = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/payment-registrations`;
 const isPaymentProof = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payment-registration-proof`;
@@ -8329,9 +8332,11 @@ scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES 
       `invoice ${row.number}: ONE void eligibility GET, allowed for the owner, and no void POST`);
     assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${row.id}/payments 200`], `invoice ${row.number}: ONE payments GET, page one (D4)`);
     // P2B: the open's fourth and last read, ONE payment eligibility GET (allowed: the owner); nothing else of the payment routes.
-    assert.deepEqual(sentBy(page, isPaymentRoute, from).filter((r) => !isPaymentsRead(r)).map((r) => `${readLine(r)} ${r.replied.text}`),
-      [`${issuedPath(main.id)}/${row.id}/payment-eligibility 200 {"eligibility":"allowed"}`], `invoice ${row.number}: ONE payment eligibility GET, allowed for the owner`);
-    assert.equal(sentBy(page, isIssuedRead, from).length, 4, `invoice ${row.number}: the open's budget is 4 reads (detail, void eligibility, payments, payment eligibility)`);
+    assert.deepEqual(sentBy(page, isPaymentRoute, from).filter((r) => !isPaymentsRead(r)).map((r) => `${readLine(r)} ${r.replied.text}`).sort(),
+      // M7B-PAYMENTS-P2C (R1): plus ONE payment reversal eligibility GET per issued open (allowed: the owner).
+      [`${issuedPath(main.id)}/${row.id}/payment-eligibility 200 {"eligibility":"allowed"}`, `${issuedPath(main.id)}/${row.id}/payment-reversal-eligibility 200 {"eligibility":"allowed"}`].sort(),
+      `invoice ${row.number}: ONE payment eligibility GET and ONE reversal eligibility GET, both allowed for the owner`);
+    assert.equal(sentBy(page, isIssuedRead, from).length, 5, `invoice ${row.number}: the open's budget is 5 reads (detail, void eligibility, payments, payment eligibility, reversal eligibility)`);
     assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
     const { text, buttons, shell, ...content } = view;
     assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
@@ -8456,8 +8461,10 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   assert.deepEqual(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payments 200`], 'P2A D4: ONE payments read for the open, at Invoices View');
   // P2B: ONE payment eligibility read, refused at Invoices View (record_invoice_payments needs Invoices Approve); never retried.
   assert.deepEqual(sentBy(page, isPaymentEligibilityRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payment-eligibility 403 forbidden`], 'ONE payment eligibility read, refused for Invoices View');
+  // M7B-PAYMENTS-P2C (R1): ONE payment reversal eligibility read, refused at Invoices View (reverse_invoice_payments needs Approve).
+  assert.deepEqual(sentBy(page, isReversalEligibilityRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payment-reversal-eligibility 403 forbidden`], 'ONE reversal eligibility read, refused for Invoices View');
   assert.deepEqual(sentBy(page, isPaymentWrite, from).map(readLine), [], 'no payment write');
-  assert.equal(sentBy(page, (r) => isIssuedRead(r) && r.path.startsWith(`${issuedPath(main.id)}/${invoiceId}`), from).length, 4, 'the open\'s budget: detail, void eligibility, payments, payment eligibility — 4 reads');
+  assert.equal(sentBy(page, (r) => isIssuedRead(r) && r.path.startsWith(`${issuedPath(main.id)}/${invoiceId}`), from).length, 5, 'the open\'s budget: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
 
   // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
   await levelVia(direct, 'manager', 'customers', 'none');
@@ -8701,7 +8708,9 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     check(same(sentBy(page, isPaymentsRead, from).map(readLine), [`${issuedPath(store)}/${invoiceId}/payments 200`]), `${cell}: not ONE payments GET per open (D4)`);
     // P2B: ONE payment eligibility GET per open of an issued invoice (the owner: allowed), none for a voided one: 4 reads / 3.
     check(same(sentBy(page, isPaymentEligibilityRead, from).map(readLine), voidable ? [`${issuedPath(store)}/${invoiceId}/payment-eligibility 200`] : []), `${cell}: not ${voidable ? 'ONE' : 'no'} payment eligibility GET per open`);
-    check(sentBy(page, isIssuedRead, from).length === (voidable ? 4 : 3), `${cell}: the open's read budget is not ${voidable ? 4 : 3} (${sentBy(page, isIssuedRead, from).map(readLine)})`);
+    // M7B-PAYMENTS-P2C (R1): ONE payment reversal eligibility GET per open of an issued invoice (the owner: allowed), none for a voided one: 5 reads / 3.
+    check(same(sentBy(page, isReversalEligibilityRead, from).map(readLine), voidable ? [`${issuedPath(store)}/${invoiceId}/payment-reversal-eligibility 200`] : []), `${cell}: not ${voidable ? 'ONE' : 'no'} reversal eligibility GET per open`);
+    check(sentBy(page, isIssuedRead, from).length === (voidable ? 5 : 3), `${cell}: the open's read budget is not ${voidable ? 5 : 3} (${sentBy(page, isIssuedRead, from).map(readLine)})`);
     check(voidable ? trigger !== null && trigger.inView && trigger.onTop : trigger === null, `${cell}: the Void invoice… trigger ${voidable ? 'is not in view and on top' : 'is offered on a voided invoice'} ${JSON.stringify(trigger)}`);
     check(same(tabs, tabOrder), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
     await alsoOpen(cell, check);
@@ -10905,13 +10914,15 @@ function assertChainBytes(tenant, { reg, proof, rec }, { amountCents, method }) 
   return { attemptId, registrationId };
 }
 
-scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner opens an issued invoice ($42.00): the open reads detail, void eligibility, payments and payment eligibility (allowed), 4 in all; Record payment, $12.50 by Cash, Record: ONE register (201), ONE proof GET (200), ONE record (201) with the exact bytes and three distinct v4 keys (the proof only in memory), then ONE payments re-read ($29.50 remaining) and "Payment recorded: $12.50, Cash."; Confirm payment is ONE settle (expectedVersion 2, 200) and "Payment confirmed."; the database holds ONE payment and its registration confirmed, and the register, record and settle audits; no detail or eligibility re-read, nothing else sent', async () => {
+scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner opens an issued invoice ($42.00): the open reads detail, void eligibility, payments, payment eligibility (allowed) and, since P2C, the payment reversal eligibility, 5 in all; Record payment, $12.50 by Cash, Record: ONE register (201), ONE proof GET (200), ONE record (201) with the exact bytes and three distinct v4 keys (the proof only in memory), then ONE payments re-read ($29.50 remaining) and "Payment recorded: $12.50, Cash."; Confirm payment is ONE settle (expectedVersion 2, 200) and "Payment confirmed."; the database holds ONE payment and its registration confirmed, and the register, record and settle audits; no detail or eligibility re-read, nothing else sent', async () => {
   const { tenant, main, boss, ids: [id] } = await voidShop('i25', 1);
   const page = await voidPage(boss, main.id, 1);
   const opened = await openVoidable(page, main.id, id, 1);
   assert.deepEqual(sentBy(page, isIssuedRead, opened).map(readLine).sort(), [
     `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
-  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility — 4 reads');
+    // M7B-PAYMENTS-P2C (R1): an issued open also reads the payment reversal eligibility ONCE (the owner: allowed).
+    `${issuedPath(main.id)}/${id}/payment-reversal-eligibility 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
   await fillPaymentForm(page, '12.50', 'cash');
   const from = st.api.length;
   await page.click(by('issued-payments-submit'));
@@ -11428,7 +11439,7 @@ scenario('SIS-33', 'M7B-PAYMENTS-P2B A RECORD ANSWERED 404 BY A SESSION MISMATCH
   await assertNoLeak(page);
 }, 240_000);
 
-scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOAD BEFORE CONFIRM — the owner records the whole $42.00 by Cash and is offered Confirm payment; the page is reloaded before it is pressed (the in-memory attempt gone; the registration recorded in the database; nothing remaining): the reopened invoice reads its 4 reads and no payment-attempts, shows its one payment and $0.00 remaining with NO Record payment, NO Confirm payment and no pending line, and offers "Find an unfinished payment attempt"; pressed, it is ONE payment-attempts read listing the attempt as recorded, whose Confirm payment is ONE settle of THAT attempt (version 2, 200) then ONE payments re-read, "Payment confirmed."; after the reload no register, proof or record is sent; the database holds ONE payment and ONE registration, confirmed', async () => {
+scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOAD BEFORE CONFIRM — the owner records the whole $42.00 by Cash and is offered Confirm payment; the page is reloaded before it is pressed (the in-memory attempt gone; the registration recorded in the database; nothing remaining): the reopened invoice reads its 5 reads (P2C: the reversal eligibility too) and no payment-attempts, shows its one payment and $0.00 remaining with NO Record payment, NO Confirm payment and no pending line, and offers "Find an unfinished payment attempt"; pressed, it is ONE payment-attempts read listing the attempt as recorded, whose Confirm payment is ONE settle of THAT attempt (version 2, 200) then ONE payments re-read, "Payment confirmed."; after the reload no register, proof or record is sent; the database holds ONE payment and ONE registration, confirmed', async () => {
   const { tenant, main, boss, ids: [id] } = await voidShop('i34', 1);
   const page = await voidPage(boss, main.id, 1);
   await openVoidable(page, main.id, id, 1);
@@ -11454,7 +11465,9 @@ scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOA
   await page.settle();
   assert.deepEqual(sentBy(page, isIssuedRead, opened).map(readLine).sort(), [
     `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
-  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility — 4 reads');
+    // M7B-PAYMENTS-P2C (R1): an issued open also reads the payment reversal eligibility ONCE (the owner: allowed).
+    `${issuedPath(main.id)}/${id}/payment-reversal-eligibility 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
   assert.equal(st.api.slice(reloaded).filter(isPaymentAttemptsRead(main.id)).length, 0, 'no lookup on open: only on a press');
   const shown = {
     remaining: await textOf(page, 'issued-payments-remaining'), items: await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-item"]').length`),
@@ -11488,3 +11501,369 @@ scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOA
   assert.deepEqual(await paymentAuditsOf(tenant), ['register', 'record', 'settle'], 'register, record and settle audits: nothing more');
   await assertNoLeak(page);
 }, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-PAYMENTS-P2C: reversing a recorded payment from the issued dialog's payment history (Reverse payment -> review reads
+// -> confirmation with a required reason -> ONE POST …/payments/{paymentId}/reversal), through the REAL tenant entry over
+// the disposable PostgreSQL. A reversal returns no money: it records that the payment was entered in error. Payment ids
+// are compared, never printed.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** ServerIssuedInvoices.tsx REVERSE_TEXT (exact; SIS-35..39 read the wording the component has now). */
+const REVERSE_SAID = Object.freeze({
+  consequence: 'Reversing records that this payment was entered in error. It does not return any money.',
+  reversed: 'Payment reversed.',
+  alreadyReversed: 'This payment has already been reversed.',
+  stepUp: 'Not reversed: confirm your sign-in to reverse this payment.',
+  labels: ['Recorded by mistake', 'Wrong amount', 'Wrong method', 'Wrong invoice', 'Payment recorded twice', 'Other reason'],
+  codes: ['recorded_in_error', 'wrong_amount', 'wrong_method', 'wrong_invoice', 'duplicate', 'other'],
+});
+const isReversalEligibilityOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/payment-reversal-eligibility`;
+/** POST …/invoices/{id}/payments/{any payment}/reversal. */
+const isReversalPost = (store, id) => (r) => r.method === 'POST' && r.path.startsWith(`${issuedPath(store)}/${id}/payments/`) && r.path.endsWith('/reversal');
+const revBy = (pid) => `[data-testid="issued-payments-reverse"][data-id="${pid}"]`;
+/** One payment's reversal rows and reverse audits as the database owner reads them (no id returned). */
+async function storedReversalOf(paymentId) {
+  const rows = await owner`select reason_code from tmpos_invoice_payment.invoice_payment_reversal where payment_id = ${paymentId}`;
+  const audits = await owner`select count(*)::int as n from public.audit_event where action_id = 'store.invoice_payment.reverse' and subject_invoice_payment_id = ${paymentId}`;
+  return { reversals: Array.from(rows, (r) => r.reason_code), audits: audits[0].n };
+}
+/** A shop with one issued $42.00 invoice and a manager of its store at Invoices Approve, Customers View (record and reverse). */
+async function reversalShop(label) {
+  const shop = await voidShop(label, 1);
+  await levelVia(shop.direct, 'manager', 'customers', 'view');
+  await levelVia(shop.direct, 'manager', 'invoices', 'approve');
+  const manager = await actor(`${label}-manager`, [grant(shop.tenant, 'manager'), storeGrant(shop.tenant, shop.main.id, 'manager')], { role: 'manager' });
+  return { ...shop, id: shop.ids[0], manager };
+}
+/** A payment recorded and confirmed through the page (as SIS-25); the new history row's payment id once Reverse payment shows on it. */
+async function recordConfirmedPayment(page, store, id, dollars, method) {
+  const before = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-item"]')].map((r) => r.dataset.id)`);
+  await fillPaymentForm(page, dollars, method);
+  const from = st.api.length;
+  await page.click(by('issued-payments-submit'));
+  await page.waitFor(`!!${q('issued-payments-confirm')}`, 30_000, 'recorded: Confirm payment offered');
+  await rereadAnswered(page, store, id, from);
+  await confirmRecorded(page, 'reversal setup');
+  await quiet(page, from);
+  await page.settle();
+  const pid = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-item"]')].map((r) => r.dataset.id).find((x) => !${JSON.stringify(before)}.includes(x)) ?? null`);
+  assert.ok(typeof pid === 'string' && V4.test(pid), 'the recorded payment is listed in the history');
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(revBy(pid))})`, 30_000, 'Reverse payment offered on the confirmed payment');
+  return pid;
+}
+/** Reverse payment pressed on row `pid` (a click, or focus and Enter): the confirmation open on its review reads, Keep payment focused. */
+async function openReverseConfirm(page, pid, { keyboard = false } = {}) {
+  await page.waitFor(`(() => { const b = document.querySelector(${JSON.stringify(revBy(pid))}); return b !== null && b.getAttribute('aria-disabled') !== 'true'; })()`, 30_000, 'Reverse payment is pressable');
+  const from = st.api.length;
+  if (keyboard) await page.press('Enter');
+  else await page.click(revBy(pid));
+  await page.waitFor(`!!${q('issued-reverse-confirm')}`, 30_000, 'the reversal confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-reverse-keep', 10_000, 'Keep payment has the first focus');
+  await quiet(page, from);
+  await page.settle();
+  return from;
+}
+/** The reversal confirmation as shown (nothing secret). */
+const reverseConfirmOf = (page) => page.evaluate(`(() => {
+  const t = (id) => document.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  const d = document.querySelector('[data-testid="issued-reverse-confirm"]');
+  if (d === null) return null;
+  const set = d.querySelector('[data-testid="issued-reverse-reasons"]');
+  const radios = [...d.querySelectorAll('input[type="radio"]')];
+  return {
+    role: d.getAttribute('role'), name: document.getElementById(d.getAttribute('aria-labelledby'))?.textContent.trim() ?? null,
+    number: t('issued-reverse-number'), store: d.querySelector('bdi[data-testid="issued-reverse-store"]')?.textContent ?? null,
+    amount: t('issued-reverse-amount'), method: t('issued-reverse-method'), at: d.querySelector('time[data-testid="issued-reverse-recorded-at"]')?.getAttribute('datetime') ?? null,
+    consequence: t('issued-reverse-consequence'),
+    reasons: { role: set?.getAttribute('role') ?? null, required: set?.getAttribute('aria-required') ?? null, codes: radios.map((r) => r.value), labels: radios.map((r) => r.parentElement.textContent.trim()), checked: radios.find((r) => r.checked)?.value ?? null },
+    status: t('issued-reverse-confirm-status'), alert: t('issued-reverse-confirm-alert'), reauth: !!d.querySelector('[data-testid="issued-reverse-reauth-group"]'),
+    buttons: [...d.querySelectorAll('button')].map((b) => b.textContent.trim()),
+  };
+})()`);
+/** History row `pid` as shown: Reversed and its reason, and whether Reverse payment is on it. */
+const reverseRowOf = (page, pid) => page.evaluate(`(() => {
+  const li = document.querySelector('[data-testid="issued-payments-item"][data-id="${pid}"]');
+  if (li === null) return null;
+  const t = (id) => li.querySelector('[data-testid="' + id + '"]')?.textContent.trim() ?? null;
+  return { amount: t('issued-payments-amount'), method: t('issued-payments-method'), reversed: t('issued-payments-reversed'), reason: t('issued-payments-reason'), reverse: !!li.querySelector('[data-testid="issued-payments-reverse"]'), at: li.querySelector('time[data-testid="issued-payments-recorded-at"]')?.getAttribute('datetime') ?? null };
+})()`);
+/** The amounts of the last payments page the entry answered (cents). */
+function lastPaymentAmounts(page, store, id) {
+  const [last] = sentBy(page, isPaymentsOf(store, id)).filter((r) => r.status === 200).slice(-1);
+  return jsonOf(last.replied.text, 'the payments answer').amounts;
+}
+/** The reason radio chosen as a user does, then Reverse payment pressed; resolves once that POST is answered. */
+async function sendReversal(page, store, id, code) {
+  await page.click(by(`issued-reverse-reason-${code}`));
+  await page.waitFor(`${q(`issued-reverse-reason-${code}`)}?.checked === true`, 5_000, `the reason ${code} chosen`);
+  const from = st.api.length;
+  await page.click(by('issued-reverse-send'));
+  await page.waitFor(() => sentBy(page, isReversalPost(store, id), from).some((r) => r.status !== null), 30_000, 'the reversal POST answered');
+  return from;
+}
+
+scenario('SIS-35', 'M7B-PAYMENTS-P2C REVERSE A PAYMENT END TO END — a manager (Invoices Approve, Customers View) records and confirms $12.50 by Cash on an issued $42.00 invoice; Reverse payment on its history row reads the invoice, the reversal eligibility and the payments again and opens the confirmation (alertdialog, Keep payment focused) naming invoice 1, the store, $12.50, Cash, the recorded instant and "It does not return any money.", with the six required reasons and none chosen; Wrong amount and Reverse payment: ONE POST …/reversal (200) with the exact bytes and a v4 key; the confirmation closes, "Payment reversed.", the row shows Reversed and its reason, and Recorded/Remaining are the server\'s re-read ($0.00 / $42.00: remaining up by $12.50); the database holds exactly ONE reversal row (wrong_amount) and ONE store.invoice_payment.reverse audit for that payment', async () => {
+  const { tenant, main, id, manager } = await reversalShop('i35');
+  const page = await voidPage(manager, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  assert.deepEqual(sentBy(page, isReversalEligibilityOf(main.id, id), opened).map(answered), ['200'], 'the open reads the reversal eligibility once: allowed');
+  const pid = await recordConfirmedPayment(page, main.id, id, '12.50', 'cash');
+  const recorded = { recorded: await textOf(page, 'issued-payments-recorded'), remaining: await textOf(page, 'issued-payments-remaining') };
+  assert.deepEqual(recorded, { recorded: '$12.50', remaining: '$29.50' }, 'the confirmed payment: $12.50 recorded, $29.50 remaining');
+  const row = await reverseRowOf(page, pid);
+  assert.deepEqual({ amount: row.amount, method: row.method, reversed: row.reversed, reason: row.reason, reverse: row.reverse }, { amount: '$12.50', method: 'Cash', reversed: null, reason: null, reverse: true }, 'the row: $12.50 Cash, not reversed, Reverse payment offered');
+
+  const reviewFrom = await openReverseConfirm(page, pid);
+  record('SIS-35', { phase: 'review', reads: sentBy(page, () => true, reviewFrom).map((r) => `${r.method} ${r.path.replace(pid, '{payment}')}${r.query} ${answered(r)}`) });
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET', reviewFrom).filter((r) => !isLogin(r)).length, 0, 'the review sends no write');
+  assert.deepEqual([isIssuedDetailOrList, isReversalEligibilityOf(main.id, id), isPaymentsOf(main.id, id)].map((m) => sentBy(page, m, reviewFrom).filter((r) => r.status === 200).length > 0), [true, true, true], 'the review re-read the invoice, the reversal eligibility and the payments');
+  const shown = await reverseConfirmOf(page);
+  assert.deepEqual(shown, {
+    role: 'alertdialog', name: 'Reverse this payment?', number: '1', store: main.name, amount: '$12.50', method: 'Cash', at: row.at, consequence: REVERSE_SAID.consequence,
+    reasons: { role: 'radiogroup', required: 'true', codes: REVERSE_SAID.codes, labels: REVERSE_SAID.labels, checked: null },
+    status: '', alert: '', reauth: false, buttons: ['Keep payment', 'Reverse payment'],
+  }, 'the confirmation: exact amount, method and invoice, the no-money text, six reasons, none chosen');
+  assert.ok((await textOf(page, 'issued-reverse-description')).includes('It does not return any money.'), 'the description says no money is returned');
+  assert.equal(await storedReversalOf(pid).then((s) => s.reversals.length), 0, 'nothing reversed by the review');
+
+  const sendFrom = await sendReversal(page, main.id, id, 'wrong_amount');
+  await page.waitFor(`!${q('issued-reverse-confirm')}`, 30_000, 'the confirmation closed');
+  await page.waitFor(async () => (await textOf(page, 'issued-reverse-status')) === REVERSE_SAID.reversed, 30_000, '"Payment reversed." said');
+  await page.waitFor(async () => (await reverseRowOf(page, pid))?.reversed === 'Reversed', 30_000, 'the row shows Reversed');
+  await quiet(page, sendFrom);
+  await page.settle();
+  const posts = sentBy(page, isReversalPost(main.id, id), sendFrom);
+  record('SIS-35', { phase: 'reversed', sent: sentBy(page, () => true, sendFrom).map((r) => `${r.method} ${r.path.replace(pid, '{payment}')}${r.query} ${answered(r)}`) });
+  assert.deepEqual(posts.map(answered), ['200'], 'ONE reversal POST, 200');
+  assert.ok(posts[0].path === `${issuedPath(main.id)}/${id}/payments/${pid}/reversal`, 'the POST names THIS payment (compared, never printed)');
+  assert.ok(posts[0].body === JSON.stringify({ expectedTenant: tenant, reasonCode: 'wrong_amount' }), 'the reversal body, exactly (compared, never printed)');
+  st.secrets.add(posts[0].headers['idempotency-key']);
+  const [recordPost] = sentBy(page, isPaymentRecord(main.id, id));
+  assert.ok(V4.test(posts[0].headers['idempotency-key']) && typeof posts[0].headers[SESSION_CSRF] === 'string' && posts[0].headers[SESSION_CSRF] === recordPost?.headers[SESSION_CSRF], 'a v4 idempotency key, under the page\'s session token (the record\'s; compared, never printed)');
+  assert.ok(sentBy(page, isPaymentsOf(main.id, id), sendFrom).some((r) => r.status === 200), 'the payments are read again from the server after the reversal');
+  const after = await reverseRowOf(page, pid);
+  assert.deepEqual({ reversed: after.reversed, reason: after.reason, reverse: after.reverse }, { reversed: 'Reversed', reason: 'Wrong amount', reverse: false }, 'the row: Reversed, Wrong amount, no Reverse payment');
+  const amounts = lastPaymentAmounts(page, main.id, id);
+  const shownAmounts = { recorded: await textOf(page, 'issued-payments-recorded'), remaining: await textOf(page, 'issued-payments-remaining') };
+  record('SIS-35', { phase: 'amounts', shownAmounts, server: { applied: amounts.appliedCents, remaining: amounts.remainingCents } });
+  assert.deepEqual(shownAmounts, { recorded: usd(amounts.appliedCents), remaining: usd(amounts.remainingCents) }, 'Recorded and Remaining are the server\'s re-read');
+  assert.deepEqual(shownAmounts, { recorded: '$0.00', remaining: '$42.00' }, 'remaining rises by $12.50, recorded falls by it');
+  assert.deepEqual(await storedReversalOf(pid), { reversals: ['wrong_amount'], audits: 1 }, 'exactly ONE reversal row (wrong_amount) and ONE reverse audit for that payment');
+  assert.ok((await paymentAuditsOf(tenant)).filter((a) => a === 'reverse').length === 1, 'ONE reverse audit in the tenant');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SIS-36', 'M7B-PAYMENTS-P2C NO PERMISSION, NO REVERSE PAYMENT — a manager records and confirms $12.50 by Cash; a technician (Invoices View by default, Customers View set by the owner) and a sales_staff account (Invoices Create by default) of the store each open the invoice: the payment history lists the payment (not reversed), the reversal eligibility is ONE GET answered 403 (never retried on a focus), and NO Reverse payment is rendered on any row; nothing is reversed', async () => {
+  const { tenant, main, direct, id, manager } = await reversalShop('i36');
+  await levelVia(direct, 'technician', 'customers', 'view');
+  const tech = await actor('i36-tech', [grant(tenant, 'technician'), storeGrant(tenant, main.id, 'technician')], { role: 'technician' });
+  const staff = await actor('i36-staff', [grant(tenant, 'sales_staff'), storeGrant(tenant, main.id, 'sales_staff')], { role: 'sales_staff' });
+  const mpage = await voidPage(manager, main.id, 1);
+  await openVoidable(mpage, main.id, id, 1);
+  const pid = await recordConfirmedPayment(mpage, main.id, id, '12.50', 'cash');
+  await mpage.close(); // its browser context disposed (idempotent in the scenario's cleanup): one live shop page at a time
+  for (const [who, label] of [[tech, 'technician'], [staff, 'sales_staff']]) {
+    const page = await voidPage(who, main.id, 1);
+    const opened = await openVoidable(page, main.id, id, 1);
+    await page.waitFor(() => sentBy(page, isReversalEligibilityOf(main.id, id), opened).some((r) => r.status !== null), 30_000, `${label}: the reversal eligibility answered`);
+    await quiet(page, opened);
+    await page.settle();
+    await focusAndSettle(page, 'focus');
+    const seen = {
+      eligibility: sentBy(page, isReversalEligibilityOf(main.id, id), opened).map(answered),
+      items: await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-item"]').length`),
+      row: await reverseRowOf(page, pid).then((r) => r === null ? null : { amount: r.amount, method: r.method, reversed: r.reversed, reverse: r.reverse }),
+      anyReverse: await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-reverse"]').length`),
+      confirm: await has(page, 'issued-reverse-confirm'),
+    };
+    record('SIS-36', { phase: label, ...seen });
+    assert.deepEqual(seen, { eligibility: ['403 forbidden'], items: 1, row: { amount: '$12.50', method: 'Cash', reversed: null, reverse: false }, anyReverse: 0, confirm: false },
+      `${label}: the history shows the payment, the reversal eligibility is ONE 403, and no Reverse payment anywhere`);
+    assert.deepEqual(sentBy(page, isReversalPost(main.id, id), opened).length, 0, `${label}: no reversal POST`);
+    await quiet(page, opened);
+    await page.close();
+  }
+  assert.deepEqual(await storedReversalOf(pid), { reversals: [], audits: 0 }, 'nothing reversed');
+}, 300_000);
+
+/**
+ * SIS-37's measurement (SIS-22's technique): with the history row's Reverse payment, the row, the issued dialog and the page;
+ * with the confirmation open, each reversal control inside the confirmation's content box (sr-only text not counted), the
+ * panel not scrolling sideways, and each control on top once scrolled into view.
+ */
+const reverseFitOf = (page, pid) => page.evaluate(`(() => {
+  const el = (id) => document.querySelector('[data-testid="' + id + '"]');
+  const T = ${HOLD_TOLERANCE};
+  const seen = (n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const r = n.getBoundingClientRect(), hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return r.left >= -T && r.top >= -T && r.right <= innerWidth + T && r.bottom <= innerHeight + T && hit !== null && (hit === n || n.contains(hit)); };
+  const page = { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth, rootFont: getComputedStyle(document.documentElement).fontSize };
+  const confirm = el('issued-reverse-confirm');
+  if (confirm === null) {
+    const view = el('issued-view'), li = document.querySelector('[data-testid="issued-payments-item"][data-id="${pid}"]'), b = li?.querySelector('[data-testid="issued-payments-reverse"]') ?? null;
+    if (view === null || li === null || b === null) return { page, row: null };
+    view.scrollLeft = 0;
+    const v = view.getBoundingClientRect(), lo = v.left + view.clientLeft, hi = lo + view.clientWidth, l = li.getBoundingClientRect(), r = b.getBoundingClientRect();
+    return { page, row: { inRow: r.left >= l.left - T && r.right <= l.right + T, inDialog: r.left >= lo - T && r.right <= hi + T, rowInDialog: l.left >= lo - T && l.right <= hi + T, button: [Math.round(r.left), Math.round(r.right)], seen: seen(b) } };
+  }
+  const hidden = (n) => { for (let m = n; m !== null && m !== confirm; m = m.parentElement) { const c = getComputedStyle(m), r = m.getBoundingClientRect();
+    if (c.clip === 'rect(0px, 0px, 0px, 0px)' || c.clipPath === 'inset(50%)' || (c.position === 'absolute' && c.overflow === 'hidden' && r.width <= 1 && r.height <= 1)) return true; } return false; };
+  const p = confirm.getBoundingClientRect(), cs = getComputedStyle(confirm);
+  const content = { left: p.left + confirm.clientLeft + parseFloat(cs.paddingLeft), right: p.left + confirm.clientLeft + confirm.clientWidth - parseFloat(cs.paddingRight) };
+  const outside = [...confirm.querySelectorAll('*')].filter((n) => !hidden(n) && n.getBoundingClientRect().width > 0 && (n.getBoundingClientRect().right > content.right + T || n.getBoundingClientRect().left < content.left - T))
+    .map((n) => (n.dataset && n.dataset.testid) || n.tagName.toLowerCase()).slice(0, 8);
+  const controls = ['issued-reverse-keep', 'issued-reverse-amount', 'issued-reverse-consequence', ...${JSON.stringify(REVERSE_SAID.codes)}.map((c) => 'issued-reverse-reason-' + c), 'issued-reverse-send'];
+  const inView = Object.fromEntries(controls.map((id) => { const n = el(id); return [id, n === null ? null : seen(n)]; }));
+  // Owner QA (320x309): each action label on ONE line — its text's line boxes, and the button no taller than one line plus padding.
+  const labels = Object.fromEntries(['issued-reverse-keep', 'issued-reverse-send'].map((id) => { const n = el(id); if (n === null) return [id, null];
+    const range = document.createRange(); range.selectNodeContents(n);
+    const tops = (rg) => new Set([...rg.getClientRects()].filter((x) => x.width > 0).map((x) => Math.round(x.top))).size;
+    const lines = tops(range), broken = [];
+    for (const t of [...n.childNodes].filter((x) => x.nodeType === 3)) for (const m of t.data.matchAll(/\\S+/g)) {
+      const w = document.createRange(); w.setStart(t, m.index); w.setEnd(t, m.index + m[0].length); if (tops(w) > 1) broken.push(m[0]); }
+    const c = getComputedStyle(n), r = n.getBoundingClientRect();
+    const was = n.style.whiteSpace; n.style.whiteSpace = 'nowrap'; const need = n.scrollWidth; n.style.whiteSpace = was; // its one-line width, recorded
+    const oneLine = parseFloat(c.lineHeight) + parseFloat(c.paddingTop) + parseFloat(c.paddingBottom) + parseFloat(c.borderTopWidth) + parseFloat(c.borderBottomWidth);
+    return [id, { text: n.textContent, lines, broken, height: Math.round(r.height * 10) / 10, oneLine: Math.round(oneLine * 10) / 10, width: Math.round(r.width), need, room: Math.round(content.right - content.left), right: Math.round(r.right) }]; }));
+  confirm.scrollTop = 0;
+  return { page, confirm: { left: Math.round(p.left), right: Math.round(p.right), scrollWidth: confirm.scrollWidth, clientWidth: confirm.clientWidth, scrollLeft: confirm.scrollLeft }, outside, inView, labels };
+})()`);
+
+scenario('SIS-37', 'M7B-PAYMENTS-P2C KEYBOARD ONLY AND 320 PX — a manager\'s confirmed $12.50 payment: from the Payments heading, Tab reaches the row\'s Reverse payment, Enter opens the confirmation with focus on Keep payment, Escape closes it (nothing sent) and focus returns to that row\'s Reverse payment; then at 320x640 and 320x309 (16 px default text) and 320x600 and 320x309 with a 24 px default text size (LAST: font sizes are never reset; 320x309 is the owner\'s measured QA viewport), Reverse payment lies inside its history row and the dialog and is on top once scrolled to, the page never scrolls sideways, and with the confirmation open every reversal control (Keep payment, the facts, the six reasons, Reverse payment) lies inside its content box, the confirmation does not scroll sideways and each control is on top once scrolled to, Keep payment\'s and Reverse payment\'s labels each on ONE line (their text\'s line boxes; the button no taller than one line plus padding) inside the viewport, and Escape returns focus to the row\'s Reverse payment (every measurement recorded); nothing is ever reversed', async () => {
+  const { main, id, manager } = await reversalShop('i37');
+  const page = await voidPage(manager, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  const pid = await recordConfirmedPayment(page, main.id, id, '12.50', 'cash');
+  const watch = postWatch(page, isReversalPost(main.id, id));
+
+  // Keyboard only: from the Payments heading, Tab until the row's Reverse payment has focus.
+  await page.call('#issued-payments-title', function () { this.focus(); });
+  const stops = [];
+  for (let i = 0; i < 25 && !(await page.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(revBy(pid))})`)); i += 1) {
+    await page.press('Tab');
+    stops.push(await focusOf(page));
+  }
+  record('SIS-37', { phase: 'tab', stops });
+  assert.equal(await page.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(revBy(pid))})`), true, `Tab reaches the row's Reverse payment (stops: ${stops.join(', ')})`);
+  await openReverseConfirm(page, pid, { keyboard: true });
+  assert.equal(await focusOf(page), 'issued-reverse-keep', 'Enter opened the confirmation, Keep payment focused');
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-reverse-confirm')}`, 10_000, 'Escape closed the confirmation');
+  await page.waitFor(`document.activeElement === document.querySelector(${JSON.stringify(revBy(pid))})`, 10_000, 'focus back on the row\'s Reverse payment').catch(async (err) => { throw new Error(`${err.message}: focus on ${await focusOf(page)}`); });
+  assert.equal(await has(page, 'issued-view'), true, 'Escape closed only the confirmation');
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-view')}`, 5_000, 'Escape closed the issued dialog');
+
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  // Owner manual QA measured 320x309 (Keep payment broke "payment"): that height at 16 px and at 24 px text, 24 px cells LAST.
+  for (const [cell, width, height, font] of [['N320', 320, 640, null], ['Q320H309', 320, 309, null], ['S320H600', 320, 600, 24], ['Q320H309F24', 320, 309, 24]]) {
+    await page.setViewport(width, height);
+    if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
+    await page.settle();
+    await openVoidable(page, main.id, id, 1);
+    await page.waitFor(`!!document.querySelector(${JSON.stringify(revBy(pid))})`, 30_000, `${cell}: Reverse payment offered`);
+    await page.settle();
+    const row = await reverseFitOf(page, pid);
+    record('SIS-37', { cell, phase: 'row', ...row });
+    check(row.row !== null && row.row.inRow && row.row.inDialog && row.row.rowInDialog && row.row.seen, `${cell}: Reverse payment does not fit its row ${JSON.stringify(row.row)}`);
+    check(row.page.scrollWidth <= row.page.clientWidth + HOLD_TOLERANCE, `${cell}: the page scrolls sideways (row) ${JSON.stringify(row.page)}`);
+    await openReverseConfirm(page, pid);
+    await page.settle();
+    const open = await reverseFitOf(page, pid);
+    record('SIS-37', { cell, phase: 'confirm', ...open });
+    check(open.confirm.left >= -HOLD_TOLERANCE && open.confirm.right <= width + HOLD_TOLERANCE, `${cell}: the confirmation lies outside the viewport ${JSON.stringify(open.confirm)}`);
+    check(open.confirm.scrollWidth <= open.confirm.clientWidth + HOLD_TOLERANCE && open.confirm.scrollLeft === 0, `${cell}: the confirmation scrolls sideways ${JSON.stringify(open.confirm)}`);
+    check(open.outside.length === 0, `${cell}: boxes reach past the confirmation ${JSON.stringify(open.outside)}`);
+    check(Object.values(open.inView).every((v) => v === true), `${cell}: a reversal control is not on top in view ${JSON.stringify(open.inView)}`);
+    check(open.page.scrollWidth <= open.page.clientWidth + HOLD_TOLERANCE, `${cell}: the page scrolls sideways (confirmation) ${JSON.stringify(open.page)}`);
+    // ONE line wherever its one-line width fits the panel; wider (24 px text: Reverse payment needs ~220 px of 168) it wraps
+    // between words only. Never a word broken across lines (the owner's "paymen|t").
+    for (const [id, l] of Object.entries(open.labels)) {
+      check(l !== null && l.broken.length === 0 && l.right <= width + HOLD_TOLERANCE, `${cell}: ${id}'s label breaks a word or leaves the viewport ${JSON.stringify(l)}`);
+      check(l === null || l.need > l.room + HOLD_TOLERANCE || (l.lines === 1 && l.height <= l.oneLine + HOLD_TOLERANCE), `${cell}: ${id}'s label fits one line but is not on one ${JSON.stringify(l)}`);
+    }
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-reverse-confirm')}`, 10_000, `${cell}: Escape closed the confirmation`);
+    const back = await page.waitFor(`document.activeElement === document.querySelector(${JSON.stringify(revBy(pid))})`, 10_000, `${cell}: focus back on the row's Reverse payment`).then(() => true, () => false);
+    check(back, `${cell}: Escape did not return focus to the row's Reverse payment (focus on ${await focusOf(page)})`);
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-view')}`, 5_000, `${cell}: Escape closed the issued dialog`);
+  }
+  assert.deepEqual(problems, [], 'every reversal control fits 320 px, at 16 px and at 24 px text');
+  assert.deepEqual(watch.disarm(), [], 'no reversal POST');
+  assert.deepEqual(await storedReversalOf(pid), { reversals: [], audits: 0 }, 'nothing reversed');
+}, 300_000);
+
+scenario('SIS-38', 'M7B-PAYMENTS-P2C TWO USERS, TWO BROWSERS, ONE PAYMENT — a manager records and confirms $12.50 by Cash; the manager and the owner (each in a browser of their own) open the invoice and both review the same payment\'s reversal (both confirmations open); the manager reverses it first (Recorded by mistake): ONE POST 200, "Payment reversed."; the owner then presses Reverse payment (Wrong method) on the confirmation reviewed before: ONE POST answered 409 (the sealed refusal), the confirmation closes, a fresh payments read follows and the owner\'s page says "This payment has already been reversed." (never "Payment reversed.") and shows the row Reversed with the manager\'s reason; the database holds exactly ONE reversal row (recorded_in_error) and ONE reverse audit for that payment', async () => {
+  const { tenant, main, boss, id, manager } = await reversalShop('i38');
+  const a = await voidPage(manager, main.id, 1);
+  await openVoidable(a, main.id, id, 1);
+  const pid = await recordConfirmedPayment(a, main.id, id, '12.50', 'cash');
+  const b = await voidPage(boss, main.id, 1);
+  await openVoidable(b, main.id, id, 1);
+  await b.waitFor(`!!document.querySelector(${JSON.stringify(revBy(pid))})`, 30_000, 'the owner is offered Reverse payment');
+  await openReverseConfirm(a, pid);
+  await openReverseConfirm(b, pid);
+  assert.deepEqual([(await reverseConfirmOf(a)).amount, (await reverseConfirmOf(b)).amount], ['$12.50', '$12.50'], 'both confirmations review the same $12.50 payment');
+
+  const aFrom = await sendReversal(a, main.id, id, 'recorded_in_error');
+  await a.waitFor(async () => (await textOf(a, 'issued-reverse-status')) === REVERSE_SAID.reversed, 30_000, 'the manager: "Payment reversed."');
+  await quiet(a, aFrom);
+  const aPosts = sentBy(a, isReversalPost(main.id, id), aFrom);
+  for (const r of aPosts) st.secrets.add(r.headers['idempotency-key']);
+  assert.deepEqual(aPosts.map(answered), ['200'], 'the manager: ONE reversal POST, 200');
+  assert.deepEqual(await storedReversalOf(pid), { reversals: ['recorded_in_error'], audits: 1 }, 'reversed once, by the manager');
+
+  const bFrom = await sendReversal(b, main.id, id, 'wrong_method');
+  await b.waitFor(`!${q('issued-reverse-confirm')}`, 30_000, 'the owner\'s confirmation closed on the refusal');
+  await b.waitFor(async () => (await textOf(b, 'issued-reverse-status')) === REVERSE_SAID.alreadyReversed, 30_000, 'the owner: already reversed')
+    .catch(async (err) => { throw new Error(`${err.message}: status ${JSON.stringify(await textOf(b, 'issued-reverse-status'))} alert ${JSON.stringify(await textOf(b, 'issued-reverse-alert'))}`); });
+  await b.waitFor(async () => (await reverseRowOf(b, pid))?.reversed === 'Reversed', 30_000, 'the owner\'s row shows Reversed');
+  await quiet(b, bFrom);
+  await b.settle();
+  const bPosts = sentBy(b, isReversalPost(main.id, id), bFrom);
+  record('SIS-38', { phase: 'second press', sent: sentBy(b, () => true, bFrom).map((r) => `${r.method} ${r.path.replace(pid, '{payment}')}${r.query} ${answered(r)}`) });
+  for (const r of bPosts) st.secrets.add(r.headers['idempotency-key']);
+  assert.equal(bPosts.length, 1, 'the owner: ONE reversal POST');
+  assert.equal(answered(bPosts[0]), '409 invalid_state', 'the owner\'s POST is the sealed refusal: 409 invalid_state');
+  assert.ok(bPosts[0].path === `${issuedPath(main.id)}/${id}/payments/${pid}/reversal` && bPosts[0].body === JSON.stringify({ expectedTenant: tenant, reasonCode: 'wrong_method' }), 'the owner\'s POST names THIS payment with Wrong method, exactly (compared, never printed)');
+  assert.ok(V4.test(bPosts[0].headers['idempotency-key']) && bPosts[0].headers['idempotency-key'] !== aPosts[0].headers['idempotency-key'], 'a v4 key of its own');
+  assert.ok(sentBy(b, isPaymentsOf(main.id, id), bFrom).some((r) => r.status === 200 && st.api.indexOf(r) > st.api.indexOf(bPosts[0])), 'a fresh payments read follows the refusal');
+  const row = await reverseRowOf(b, pid);
+  assert.deepEqual({ reversed: row.reversed, reason: row.reason, reverse: row.reverse, alert: await textOf(b, 'issued-reverse-alert') }, { reversed: 'Reversed', reason: 'Recorded by mistake', reverse: false, alert: '' }, 'the owner\'s row: Reversed with the manager\'s reason, no Reverse payment, no alert');
+  assert.deepEqual(await storedReversalOf(pid), { reversals: ['recorded_in_error'], audits: 1 }, 'still exactly ONE reversal row and ONE reverse audit');
+  assert.equal((await paymentAuditsOf(tenant)).filter((x) => x === 'reverse').length, 1, 'ONE reverse audit in the tenant');
+  await assertNoLeak(a);
+  await assertNoLeak(b);
+}, 300_000);
+
+scenario('SIS-39', 'M7B-PAYMENTS-P2C A STALE SIGN-IN (PAST THE 10-MINUTE RECENT SIGN-IN) — the manager\'s page signed in "long ago" (the harness\'s staleOnce, as SIS-19): recording and confirming $12.50 needs no recent sign-in and works; the reversal eligibility (no recent sign-in needed) offers Reverse payment; the confirmed press (Wrong amount) is ONE POST answered 403 step_up_required, the confirmation stays open with its sign-in group (named, the password field focused) and the step-up said, no held reversal card, and a window focus and a tab return send nothing; the database holds NO reversal row and no reverse audit', async () => {
+  const { main, id, manager } = await reversalShop('i39');
+  ACCOUNTS.get(manager.email).staleOnce = true;
+  const page = await voidPage(manager, main.id, 1);
+  await openVoidable(page, main.id, id, 1);
+  const pid = await recordConfirmedPayment(page, main.id, id, '12.50', 'cash');
+  await openReverseConfirm(page, pid);
+  const sendFrom = await sendReversal(page, main.id, id, 'wrong_amount');
+  await page.waitFor(`!!${q('issued-reverse-reauth-group')}`, 30_000, 'the sign-in group in the confirmation');
+  await page.waitFor(`document.activeElement === ${q('issued-reverse-reauth-password')}`, 10_000, 'the password field has focus');
+  await quiet(page, sendFrom);
+  await page.settle();
+  const shown = await reverseConfirmOf(page);
+  record('SIS-39', { phase: 'step-up', sent: sentBy(page, () => true, sendFrom).map((r) => `${r.method} ${r.path.replace(pid, '{payment}')}${r.query} ${answered(r)}`), buttons: shown?.buttons });
+  for (const r of sentBy(page, isReversalPost(main.id, id), sendFrom)) st.secrets.add(r.headers['idempotency-key']);
+  assert.deepEqual(sentBy(page, isReversalPost(main.id, id), sendFrom).map(answered), ['403 step_up_required'], 'ONE POST, refused for the recent sign-in');
+  assert.equal((await page.axNodes({ role: 'group', name: REVERSE_SAID.stepUp })).length, 1, 'the sign-in is a labelled group');
+  assert.deepEqual({ open: shown !== null, reauth: shown?.reauth, alert: shown?.alert, card: await has(page, 'issued-reverse-card'), status: await textOf(page, 'issued-reverse-status') },
+    { open: true, reauth: true, alert: REVERSE_SAID.stepUp, card: false, status: '' }, 'the confirmation kept with the sign-in group; nothing held, nothing reversed said');
+  const watch = postWatch(page);
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  assert.deepEqual(watch.disarm(), [], 'no sign-in and no POST on a focus or a tab return');
+  assert.equal(sentBy(page, isLogin, sendFrom).length, 0, 'no tenant login on its own');
+  const row = await reverseRowOf(page, pid);
+  assert.equal(row.reversed, null, 'the row is not reversed');
+  assert.deepEqual(await storedReversalOf(pid), { reversals: [], audits: 0 }, 'NO reversal row and no reverse audit');
+  await assertNoLeak(page);
+}, 300_000);

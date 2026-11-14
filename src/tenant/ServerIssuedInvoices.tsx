@@ -85,7 +85,7 @@ import { onSessionEnd, sessionEndsSoFar, tenantSession, type SessionResult, type
 import { invoiceDrafts as draftsClient, formatCents, type InvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import {
   INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_PAYMENT_STATUSES, INVOICE_VOID_REASONS, VOID_REASON_CODES, invoiceIssuing as issuingClient, isVoidTarget, issuingSettingsBody, rateDigits, rateText, sameSettingsValues, utcText, voidBodyOf,
-  paymentAmountOf, recordBodyOf, registerBodyOf, settleBodyOf, type InvoicePaymentMethod, type PaymentAttempt, type ProofResult, type RecordResult, type RegisterResult, type SettleResult,
+  paymentAmountOf, recordBodyOf, registerBodyOf, reverseBodyOf, settleBodyOf, type InvoicePaymentReversalReason, type ReverseResult, type InvoicePaymentMethod, type PaymentAttempt, type ProofResult, type RecordResult, type RegisterResult, type SettleResult,
   type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoicePayment, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
   type IssuedStatus, type IssuingSettingsFields, type PaymentsPage, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
 } from './invoiceIssuingClient';
@@ -93,6 +93,9 @@ import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels'
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
 import { button, columnHeadClass, DialogFrame, focusRing, hintClass, inputClass, labelClass, quiet, RecordId, recordIdText, storeLabel } from './ServerInvoiceDrafts';
+import {
+  isLiveReversal, reversalExpired, reversalHolds as shopReversalHolds, seeReversal, settleReversal, type HeldReversal, type ReversalHoldStore,
+} from './invoiceReversalHold';
 import { VOID_NOTE_TEXT, isLiveVoid, settleVoid, voidExpired, voidHolds as shopVoidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import {
   isBlockingPayment, isOpenPayment, isPaymentHeldElsewhere, judgePayment, paymentExpired, paymentHolds as shopPaymentHolds, type HeldPayment, type PaymentHoldStore, type PaymentSay,
@@ -103,6 +106,9 @@ const DEFAULT_WAIT_SECONDS = 60;
 const IN_PROGRESS_WAIT_MS = 5_000;
 /** The attempts lookup reads at most this many pages (50 each) from the start (G2). */
 const LOOKUP_PAGE_CAP = 20;
+/** R7: the exact-payment lookup reads at most this many history pages (50 each) from the start. */
+// shortcut: 20 pages = 1000 payments per invoice; past it a lookup says "couldn't confirm", raise it if invoices ever carry more.
+const REVERSAL_LOOKUP_PAGE_CAP = 20;
 /**
  * How long after a register's LAST send a lookup's absence may decide it (R4): far past the server's 2 s command transaction
  * deadline (server/runtime/commandTransaction.ts COMMAND_TRANSACTION_DEADLINE_MS) and this client's 15 s request timeout
@@ -123,6 +129,9 @@ const waitable = 'aria-disabled:opacity-50 aria-disabled:cursor-not-allowed';
  * so a row never runs past its card or dialog. A flex row still wraps whole controls first; text, order and names unchanged.
  */
 const fitsRow = 'min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]';
+/** The reversal confirmation's two actions (owner QA, 320x309): never squeezed, so one line wherever it fits (its row wraps
+ *  instead); wider than the panel (24 px text at 320 px) it wraps between words, never inside one. */
+const actionFit = 'shrink-0 max-w-full whitespace-normal break-normal';
 /** An issued invoice's current state as the server's read says it (never which request made it so). */
 export const STATUS_TEXT: Readonly<Record<IssuedStatus, string>> = Object.freeze({ issued: 'Issued', voided: 'Voided' });
 
@@ -379,6 +388,65 @@ export const VOID_TEXT = Object.freeze({
   waiting: 'Too many requests: this comes back once the wait has passed.',
 });
 
+/** The shop's payment reversal (M7B-PAYMENTS-P2C). A reversal is never called a refund: it returns no money. */
+export const REVERSE_TEXT = Object.freeze({
+  open: 'Reverse payment',
+  openLabel: (amount: string) => `Reverse payment of ${amount}`,
+  reviewing: 'Checking this payment…',
+  voided: 'This invoice was voided.',
+  gone: 'This invoice is no longer available.',
+  notAllowed: 'You can no longer reverse payments at this store.',
+  missing: 'This payment is no longer listed for this invoice.',
+  alreadyReversed: 'This payment has already been reversed.',
+  unconfirmed: "This payment couldn't be confirmed right now. Try again.",
+  title: 'Reverse this payment?',
+  consequence: 'Reversing records that this payment was entered in error. It does not return any money.',
+  keep: 'Keep payment',
+  close: 'Close',
+  reasonLegend: 'Reason for reversing (required)',
+  chooseReason: 'Choose a reason first.',
+  send: 'Reverse payment',
+  sending: 'Reversing…',
+  sendWhyReason: 'Choose a reason first.',
+  sendWhyBusy: 'A request is out: wait for its answer.',
+  pending: 'Another request is waiting to be confirmed.',
+  voidFirst: 'A void of this invoice is being reviewed. Close it first, then press Reverse payment again.',
+  signingIn: 'Not sent: a sign-in is in progress.',
+  noLongerAllowed: 'Not sent: you can no longer reverse payments at this store.',
+  notSendable: 'Not sent: this store could not be confirmed. Close this and choose the store again.',
+  staleReview: 'Not sent: this payment was reviewed before the session changed. Press Reverse payment to review it again.',
+  rateLimited: (seconds: number) => `Not reversed: too many requests. Wait ${seconds} second${seconds === 1 ? '' : 's'}, then try again.`,
+  denied: 'Not reversed: the server refused this request.',
+  notRun: 'Not reversed: the server did not accept this request.',
+  stepUp: 'Not reversed: confirm your sign-in to reverse this payment.',
+  stepUpNoMethod: 'Not reversed: your sign-in is too old to reverse payments here.',
+  renewing: 'Signed in again. Checking this payment with the server…',
+  renewed: 'Signed in again. Choose a reason, then press Reverse payment.',
+  reversed: 'Payment reversed.',
+  refreshFailed: 'The payments could not be loaded again right now.',
+  cannotNow: "This payment can't be reversed now.",
+  closeWarning: 'Closing does not cancel the reversal; the server may have reversed it anyway.',
+  cardTitle: 'Payment reversal not confirmed',
+  cardSending: 'Reversing the payment on the server…',
+  cardUnresolved: (amount: string, n: number) => `The reversal of the ${amount} payment on invoice ${n} was not confirmed. The server may have reversed it anyway.`,
+  /** A Check payment read begun while the attempt was attached whose attempt detached before it answered (fix3 req 4). */
+  checkDetached: "This check began under an earlier sign-in, so its answer isn't used. Press Check payment again.",
+  cardDetached: 'This reversal can no longer be retried here: your session or store changed. Check payment shows what the server holds.',
+  cardReversed: 'Payment reversed.',
+  cardSeenReversed: 'This payment shows as reversed now. This does not show which request reversed it.',
+  /** A refused attempt's title: this request reversed nothing — never "reversed" (fix3 E1). */
+  cardRefusedTitle: 'Reversal request refused',
+  cardRefused: "Not reversed: this payment can't be reversed now.",
+  seenNotReversed: 'This payment is not reversed as of this read. That does not mean the reversal failed: the request may still be processed.',
+  seenUnconfirmed: "The payment couldn't be confirmed right now.",
+  retry: 'Retry reversal',
+  check: 'Check payment',
+  checking: 'Checking the payment…',
+  dismiss: 'Dismiss',
+  dismissWarning: 'Dismissing only stops tracking it here. It does not cancel the request, which may still reverse the payment.',
+  coolDown: 'The server is busy: Retry reversal comes back in a moment.',
+});
+
 /** What a refused void attempt says: this request did not void the invoice — never "rolled back", never another request's outcome. */
 export const VOID_REFUSED_TEXT: Readonly<Record<VoidRefusal, string>> = Object.freeze({
   'already-void': 'Not voided: this invoice is already void.',
@@ -452,6 +520,8 @@ export interface ServerIssuedInvoicesProps {
   readonly voidHolds?: VoidHoldStore;
   /** The payment hold (default the shop's one, invoicePaymentHold.ts): tests give each rig its own. */
   readonly paymentHolds?: PaymentHoldStore;
+  /** The reversal hold (default the shop's one, invoiceReversalHold.ts): tests give each rig its own. */
+  readonly reversalHolds?: ReversalHoldStore;
 }
 
 /** One section per signed-in user (keyed by UID): nothing a previous user's reads answer ever reaches it. */
@@ -460,9 +530,10 @@ export function ServerIssuedInvoices(props: ServerIssuedInvoicesProps) {
   // Another user (or none): every other user's void attempt is detached before anything of this one runs (design R12; a
   // layout effect, so before a late answer of the previous section's request).
   const payHolds = props.paymentHolds ?? shopPaymentHolds;
-  useLayoutEffect(() => { holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); }, [holds, payHolds, props.uid]);
+  const revHolds = props.reversalHolds ?? shopReversalHolds;
+  useLayoutEffect(() => { holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); revHolds.detachOthers(props.uid); }, [holds, payHolds, revHolds, props.uid]);
   if (props.uid === null) return null;
-  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} />;
+  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} reversalHolds={revHolds} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -528,6 +599,7 @@ function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
 
 function IssuedSection({
   uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds, paymentHolds: payHolds = shopPaymentHolds,
+  reversalHolds: revHolds = shopReversalHolds,
 }: ServerIssuedInvoicesProps & { readonly uid: string }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -576,6 +648,18 @@ function IssuedSection({
   // The attempt whose first-send 403 the one fresh check confirmed: only it says "you can no longer void…" (iam 3).
   const [voidDenied, setVoidDenied] = useState<string | null>(null);
   const voidCardHeading = useRef<HTMLHeadingElement | null>(null);
+  const revSectionHeading = useRef<HTMLHeadingElement | null>(null);
+  // The reversal attempt (M7B-PAYMENTS-P2C): held in the reversal hold for this uid, outside every dialog (the void's model).
+  const revHeld = useSyncExternalStore(revHolds.subscribe, () => revHolds.get(uid));
+  const [revCheck, setRevCheck] = useState<{ readonly key: string; readonly text: string } | null>(null);
+  const [revFinding, setRevFinding] = useState<string | null>(null);
+  const [revCool, setRevCool] = useState<string | null>(null);
+  const revCoolRef = useRef<string | null>(null);
+  const revCoolTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revSending = useRef(false);
+  const revChecking = useRef<string | null>(null);
+  const revReading = useRef<string | null>(null);
+  const revFindCtl = useRef<AbortController | null>(null);
   // The payment attempt (M7B-PAYMENTS-P2B): held in the payment hold for this uid; the lookup the section ran for the open
   // dialog's invoice; a ref that holds every second payment press back while one chain is out (one chain per press).
   const payHeld = useSyncExternalStore(payHolds.subscribe, () => payHolds.get(uid));
@@ -637,6 +721,10 @@ function IssuedSection({
     const closing = viewRef.current;
     // R3-12: only the closing dialog's own invoice's decided attempt goes.
     if (done !== undefined && done.state === 'done' && closing !== null && done.storeId === closing.storeId && done.invoiceId === closing.invoiceId) payHolds.remove(uid, done.key);
+    // The same for a settled reversal attempt of the closing invoice (P2C): an unresolved one stays (its card).
+    const rev = revHolds.get(uid);
+    if (rev !== undefined && (rev.state === 'reversed' || rev.state === 'refused') && closing !== null && rev.storeId === closing.storeId && rev.invoiceId === closing.invoiceId) revHolds.remove(uid, rev.key);
+    revFindCtl.current?.abort();
     viewRef.current = null;
     setViewState(null);
   };
@@ -715,6 +803,22 @@ function IssuedSection({
     if (h !== undefined && h.csrf !== null && h.csrf !== csrf) holds.detach(uid);
     const p = payHolds.get(uid);
     if (p !== undefined && p.csrf !== null && p.csrf !== csrf) detachPay(); // a payment attempt too (spec §7)
+    const r = revHolds.get(uid);
+    if (r !== undefined && r.csrf !== null && r.csrf !== csrf) detachRev(); // and a reversal attempt (P2C)
+  }
+  /** Detach the reversal attempt for good (token change, sign-out, store switch): one still out is never left sending. */
+  function detachRev(): void {
+    const h = revHolds.get(uid);
+    if (h === undefined) return;
+    if (h.csrf !== null) revHolds.detach(uid);
+    if (h.state === 'sending' || h.state === 'checking') revHolds.change(uid, h.key, { state: 'unresolved', note: '' });
+  }
+  /** After an in-progress answer (5 s) or a Retry's 429 (its Retry-After), Retry reversal waits; the timer only gives it back. */
+  function coolReversal(key: string, ms: number): void {
+    if (revCoolTimer.current !== null) clearTimeout(revCoolTimer.current);
+    revCoolRef.current = key;
+    setRevCool(key);
+    revCoolTimer.current = setTimeout(() => { revCoolTimer.current = null; revCoolRef.current = null; setRevCool(null); }, ms);
   }
   /** Past the cutoff, the bytes go (a focus, a tab return; the hold's own timer too). Never a send. */
   function scrubVoid(): void {
@@ -722,6 +826,8 @@ function IssuedSection({
     if (h !== undefined && h.body !== '' && voidExpired(h, clock(), wall())) holds.change(uid, h.key, { body: '' });
     const p = payHolds.get(uid);
     if (p !== undefined && p.body !== '' && paymentExpired(p, clock(), wall())) payHolds.change(uid, p.key, { body: '', proof: null });
+    const r = revHolds.get(uid);
+    if (r !== undefined && r.body !== '' && reversalExpired(r, clock(), wall())) revHolds.change(uid, r.key, { body: '' });
   }
   /** After an in-progress answer Check again waits a moment; the timer only gives it back. */
   function coolVoid(key: string): void {
@@ -875,6 +981,9 @@ function IssuedSection({
     // this invoice holds its slot, so a new press would only be refused again (R5 B).
     const gate = (h: HeldPayment | undefined): string | null => {
       if (lookupListsUnsettled(lookupRef.current, store.id, press.invoiceId)) return RECORD_TEXT.writeConflict;
+      // R8 (review F3): never a payment on an invoice while a reversal of one of its payments is unresolved.
+      const r = revHolds.get(uid);
+      if (isLiveReversal(r) && r.storeId === store.id && r.invoiceId === press.invoiceId) return REVERSE_TEXT.pending;
       if (h === undefined || !isOpenPayment(h)) return null;
       if (isPaymentHeldElsewhere(h, store.id, press.invoiceId)) return finishOnText(h, store.id);
       if (isBlockingPayment(h) && h.storeId === store.id) return SETTINGS_TEXT.busy;
@@ -983,7 +1092,9 @@ function IssuedSection({
    */
   async function settleRow(row: PaymentAttempt, version: 1 | 2): Promise<void> {
     const l = lookupRef.current;
-    if (paying.current || waitRef.current || l === null || l.invoiceId !== row.invoiceId || storeRef.current !== l.storeId) return;
+    // R8 (fix2 item 3): no attempt on an invoice is settled while a reversal of one of its payments is unresolved.
+    const reversingHere = (storeId: string): boolean => { const r = revHolds.get(uid); return isLiveReversal(r) && r.storeId === storeId && r.invoiceId === row.invoiceId; };
+    if (paying.current || waitRef.current || l === null || l.invoiceId !== row.invoiceId || storeRef.current !== l.storeId || reversingHere(l.storeId)) return;
     const store = storesRef.current.stores.find((entry) => entry.id === l.storeId);
     if (store === undefined) return;
     const cur = payHolds.get(uid);
@@ -1002,7 +1113,7 @@ function IssuedSection({
       const body = settleBodyOf(store.tenantId, row.attemptId, version);
       if (body === null) return;
       const was = payHolds.get(uid);
-      if (rowHeldBack(was, row) || isPaymentHeldElsewhere(was, store.id, row.invoiceId)) return;
+      if (rowHeldBack(was, row) || isPaymentHeldElsewhere(was, store.id, row.invoiceId) || reversingHere(store.id)) return;
       const own = was?.key === row.attemptId ? was : undefined; // R7: only this row's own attempt lends it anything
       if (was !== undefined) payHolds.remove(uid, was.key); // decided, or this row's own attempt: every other undecided one returned above
       const held: HeldPayment = {
@@ -1171,7 +1282,7 @@ function IssuedSection({
 
   /** A refusal of the session clears every view (Reconnect then). */
   function failSession(failure: Failure): void {
-    if (failure.kind === 'signed-out') { holds.detach(uid); detachPay(); } // design R12: a sent void can never be checked again under a later session
+    if (failure.kind === 'signed-out') { holds.detach(uid); detachPay(); detachRev(); } // design R12: a sent void can never be checked again under a later session
     abortReads();
     setChanged(false);
     putStores({ phase: failure.kind, text: failure.text, stores: [] });
@@ -1269,6 +1380,7 @@ function IssuedSection({
     dropPanel(); // a store change takes the panel, its values and any attempt with it
     // A store switch disables a payment attempt's replay for good, even back to its own store (owner decision, spec §7).
     if (payHolds.get(uid)?.storeId !== id) detachPay();
+    if (revHolds.get(uid)?.storeId !== id) detachRev(); // the same rule for a reversal attempt (P2C)
     closeView();
     // The previous store's pages go (a read still out for it is cancelled; its late page finds another store).
     ctl.current.list?.abort();
@@ -1503,6 +1615,9 @@ function IssuedSection({
     if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
     const voidedHere = (): boolean => { const h = holds.get(uid); return voidedBy(h) && h.storeId === store.id && h.invoiceId === press.invoiceId; };
     if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided);
+    // R8 (review F3): never a void of an invoice while a reversal of one of its payments is unresolved.
+    const reversingHere = (): boolean => { const r = revHolds.get(uid); return isLiveReversal(r) && r.storeId === store.id && r.invoiceId === press.invoiceId; };
+    if (reversingHere()) return notSent(REVERSE_TEXT.pending);
     voidSending.current = true; // a ref: a second activation in the same task sends nothing
     try {
       const mine = gen.current.n;
@@ -1523,6 +1638,7 @@ function IssuedSection({
       if (signingIn.current !== null) return notSent(VOID_TEXT.signingIn);
       if (isLiveVoid(holds.get(uid))) return notSent(VOID_TEXT.pending);
       if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided); // settled voided meanwhile (F1): never a second key for it
+      if (reversingHere()) return notSent(REVERSE_TEXT.pending);
       const body = voidBodyOf(store.tenantId, press.reasonCode);
       if (body === null || !isVoidTarget(press.invoiceId)) return notSent(VOID_TEXT.notSendable); // nothing held for what cannot go (R1)
       const key = nextKey();
@@ -1746,7 +1862,7 @@ function IssuedSection({
       return releaseSignIn(t, { kind: 'failed', text: failure.seconds !== undefined ? `Not signed in: ${pickerWaitText(startWait(failure.seconds))}` : VOID_TEXT.reauthUnconfirmed });
     }
     renewKeepingView(renewed.csrf);
-    releaseSignIn(t, { kind: 'renewed' });
+    releaseSignIn(t, { kind: 'renewed', gen: gen.current.n });
   }
   /** End the wait for `t` with its one answer — only while `t` owns it: a released or older attempt never touches a newer one's. */
   function releaseSignIn(t: VoidSignInOwner, out: VoidSignIn | null): void {
@@ -1760,6 +1876,218 @@ function IssuedSection({
   function dropSignIn(out: VoidSignIn | null, viewId?: number): void {
     const t = signingIn.current;
     if (t !== null && (viewId === undefined || t.viewId === viewId)) releaseSignIn(t, out);
+  }
+
+  // ---- reversing a payment (M7B-PAYMENTS-P2C) ----
+
+  /** R8: any unresolved record, reversal or void attempt of this user, for any invoice — Reverse shows nowhere then. */
+  const reverseBlockedNow = (): boolean => isLiveVoid(holds.get(uid)) || isLiveReversal(revHolds.get(uid)) || isOpenPayment(payHolds.get(uid));
+
+  /** The dialog's reversal eligibility (R1): 'allowed' only for the exact allowed; every other answer 'not'. */
+  async function readReversalEligibility(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<'allowed' | 'not' | null> {
+    if (waitRef.current) return 'not';
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || mine !== gen.current.n || storeId !== storeRef.current || since !== sessionEndsSoFar()
+      || viewRef.current?.id !== viewId || viewRef.current.storeId !== storeId || viewRef.current.invoiceId !== invoiceId;
+    const csrf = await payConnect(() => !stale());
+    if (csrf === null) return stale() ? null : 'not';
+    if (adopt(csrf)) return null;
+    const answer = await issuing.reversalEligibility(storeId, invoiceId, csrf, signal);
+    if (stale()) return null;
+    if (answer.kind === 'allowed') return 'allowed';
+    if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+    if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+    return 'not';
+  }
+
+  /**
+   * R7: the exact payment, read-only — the history from its start following nextCursor, each page decoded and validated by
+   * the client and joined by paymentsJoin, all under one generation, store and invoice (`stands`). At most
+   * REVERSAL_LOOKUP_PAGE_CAP pages. Found: that row as read; `missing` only after a complete traversal; anything else
+   * (a refusal, a failure, the cap, a stale context mid-way) `unconfirmed`. Null when the context that asked is gone.
+   */
+  async function findReversalPayment(storeId: string, invoiceId: string, paymentId: string, stands: () => boolean, signal: AbortSignal): Promise<PaymentFind | null> {
+    const unconfirmed: PaymentFind = { kind: 'unconfirmed' };
+    if (waitRef.current) return unconfirmed;
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || !stands() || mine !== gen.current.n || since !== sessionEndsSoFar() || storeRef.current !== storeId;
+    const csrf = await payConnect(() => !stale());
+    if (csrf === null) return stale() ? null : unconfirmed;
+    if (adopt(csrf)) return null;
+    let joined: PaymentsView | null = null;
+    let after: string | null = null;
+    for (let n = 0; n < REVERSAL_LOOKUP_PAGE_CAP; n += 1) {
+      const answer = await issuing.getPayments(storeId, invoiceId, after, csrf, signal);
+      if (stale()) return null;
+      if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+      if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return unconfirmed; }
+      if (answer.kind !== 'ok' || answer.page.invoice.id !== invoiceId) return unconfirmed;
+      const { page } = answer;
+      if (joined !== null && !paymentsJoin(joined, page)) return unconfirmed;
+      joined = { phase: 'ready', text: '', page, rows: [...(joined?.rows ?? []), ...page.payments], next: page.nextCursor, more: false };
+      const hit = page.payments.find((p) => p.id === paymentId);
+      if (hit !== undefined) return { kind: 'found', payment: hit, status: page.invoice.status };
+      if (page.nextCursor === null) return { kind: 'missing' };
+      after = page.nextCursor;
+    }
+    return unconfirmed; // the cap: never a guess past it
+  }
+
+  /**
+   * One press of the confirmation's "Reverse payment" (R4): ONE POST under ONE new key, held BEFORE it leaves. The guards
+   * run before and again after the session check: the review's generation, the confirmation open on the same payment, its
+   * eligibility, no wait, no sign-in out, no live attempt of this user (R8). No AbortSignal: closing never cancels it.
+   */
+  async function sendReversal(viewId: number, store: StoreEntry, press: ReversePress): Promise<ReverseSendOutcome | null> {
+    const notSent = (text: string): ReverseSendOutcome => ({ kind: 'not-sent', text });
+    if (revSending.current) return notSent(REVERSE_TEXT.pending);
+    if (signingIn.current !== null) return notSent(REVERSE_TEXT.signingIn);
+    if (press.reviewGen !== gen.current.n) return { kind: 'stale' };
+    if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+    if (reverseBlockedNow()) return notSent(REVERSE_TEXT.pending);
+    revSending.current = true;
+    try {
+      const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      const viewStands = (): boolean => alive.current && viewRef.current?.id === viewId && viewRef.current.invoiceId === press.invoiceId && storeRef.current === store.id;
+      const s = await connect();
+      if (!viewStands() || since !== sessionEndsSoFar()) return null;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') { failSession(failure); return null; }
+        return notSent(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : ISSUED_TEXT.unavailable}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== mine) return null;
+      if (press.reviewGen !== gen.current.n) return { kind: 'stale' };
+      if (!press.open()) return null;
+      if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+      if (!press.allowed()) return notSent(REVERSE_TEXT.noLongerAllowed);
+      if (signingIn.current !== null) return notSent(REVERSE_TEXT.signingIn);
+      if (reverseBlockedNow()) return notSent(REVERSE_TEXT.pending);
+      const body = reverseBodyOf(store.tenantId, press.reasonCode);
+      if (body === null || !isVoidTarget(press.invoiceId) || !isVoidTarget(press.payment.id)) return notSent(REVERSE_TEXT.notSendable);
+      const key = nextKey();
+      const attempt: HeldReversal = {
+        key, body, storeId: store.id, storeLabel: storeLabel(store), invoiceId: press.invoiceId, number: press.number, paymentId: press.payment.id,
+        amountCents: press.payment.amountCents, reasonCode: press.reasonCode, csrf: s.csrf, sentAt: clock(), sentWall: wall(), state: 'sending',
+        note: '', refusal: null, attributed: false, seen: null, retryable: true,
+      };
+      if (!revHolds.put(uid, attempt)) return notSent(REVERSE_TEXT.pending); // HELD BEFORE IT LEAVES
+      setRevCheck(null);
+      press.held(key);
+      const answer = await issuing.reversePayment(attempt.storeId, attempt.invoiceId, attempt.paymentId, key, body, s.csrf); // NO AbortSignal
+      return answerReversal(key, answer, true, { csrf: s.csrf, since, mine }, press.open);
+    } finally {
+      revSending.current = false;
+    }
+  }
+
+  /**
+   * One reversal answer (R6): settled BY KEY (settleReversal), then — only while the session it went with stands — a 429
+   * starts the wait (and cools Retry for its Retry-After), a 401 ends the session; an in-progress cools Retry 5 s; a resend's
+   * invalid-state runs Check payment (only the exact row can say reversed). A first send's outcome comes back to say.
+   */
+  function answerReversal(
+    key: string, answer: ReverseResult, first: boolean, sent: { readonly csrf: string; readonly since: number; readonly mine: number }, open: (() => boolean) | null,
+  ): ReverseSendOutcome | null {
+    const same = (): boolean => alive.current && gen.current.n === sent.mine && gen.current.csrf === sent.csrf && sent.since === sessionEndsSoFar();
+    settleReversal(revHolds, uid, key, answer, first, { csrf: sent.csrf, since: sent.since }, open?.() ?? false);
+    const h = revHolds.get(uid);
+    const ours = h?.key === key && alive.current;
+    if (answer.kind === 'rate-limited' && same()) startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'rate-limited' && !first && ours) coolReversal(key, answer.retryAfterSeconds * 1000);
+    if (answer.kind === 'in-progress' && ours) coolReversal(key, IN_PROGRESS_WAIT_MS);
+    if (answer.kind === 'signed-out' && same()) failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+    if (!first && answer.kind === 'invalid-state' && ours && h.state === 'unresolved' && same()) queueMicrotask(() => { void findReversal(); });
+    if (!first || open === null) return { kind: 'sent' };
+    // What settleReversal did decides, not the answer's kind: one left live (detached mid-flight) is the card's (review F6).
+    if (ours && isLiveReversal(h)) return { kind: 'sent' };
+    switch (answer.kind) {
+      case 'not-sent': return { kind: 'not-sent', text: REVERSE_TEXT.notSendable };
+      case 'step-up': return { kind: 'step-up', method: identity.reauthMethod(uid) };
+      case 'signed-out': return null;
+      case 'rate-limited': return { kind: 'not-run', text: REVERSE_TEXT.rateLimited(answer.retryAfterSeconds) };
+      case 'denied': return { kind: 'not-run', text: REVERSE_TEXT.denied };
+      case 'not-found': case 'tenant-conflict': case 'invalid': return { kind: 'not-run', text: REVERSE_TEXT.notRun };
+      case 'invalid-state': case 'write-conflict': return { kind: 'refused' };
+      default: return { kind: 'sent' };
+    }
+  }
+
+  /** "Retry reversal": the SAME key and bytes under the token it was sent with — attached, retryable, not cooling, in time. */
+  async function retryReversal(): Promise<void> {
+    const h = revHolds.get(uid);
+    if (h === undefined || h.state !== 'unresolved' || !h.retryable || h.csrf === null || revChecking.current !== null || revReading.current !== null
+      || waitRef.current || revCoolRef.current === h.key) return;
+    if (signingIn.current !== null) return void setRevCheck({ key: h.key, text: REVERSE_TEXT.signingIn });
+    if (h.body === '' || reversalExpired(h, clock(), wall())) { if (h.body !== '') revHolds.change(uid, h.key, { body: '' }); return; }
+    const { key, csrf } = h;
+    revChecking.current = key;
+    const since = sessionEndsSoFar();
+    const mine = gen.current.n;
+    setRevCheck(null);
+    revHolds.change(uid, key, { state: 'checking', note: '' });
+    let settled = false;
+    const leave = (note: string): void => { settled = true; revHolds.change(uid, key, { state: 'unresolved', note }); };
+    try {
+      const s = await connect();
+      const now = revHolds.get(uid);
+      if (now?.key !== key || now.csrf === null || since !== sessionEndsSoFar() || !alive.current) return;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') { leave(VOID_NOTE_TEXT.signedOut); return failSession(failure); }
+        if (failure.seconds !== undefined) startWait(failure.seconds);
+        return leave(failure.seconds !== undefined ? VOID_NOTE_TEXT.rateLimited(failure.seconds) : VOID_NOTE_TEXT.noAnswer);
+      }
+      if (adopt(s.csrf)) return;
+      if (s.csrf !== csrf) { detachRev(); return; }
+      if (reversalExpired(h, clock(), wall())) { settled = true; revHolds.change(uid, key, { state: 'unresolved', body: '' }); return; }
+      const answer = await issuing.reversePayment(h.storeId, h.invoiceId, h.paymentId, key, h.body, csrf);
+      settled = true;
+      answerReversal(key, answer, false, { csrf, since, mine }, null);
+    } finally {
+      if (revChecking.current === key) revChecking.current = null;
+      const now = revHolds.get(uid);
+      if (!settled && now?.key === key && now.state === 'checking') revHolds.change(uid, key, { state: 'unresolved', note: '' });
+    }
+  }
+
+  /** "Check payment" (R7): read-only; only `found reversed` settles the attempt (not attributed) — the rest settle nothing. */
+  async function findReversal(): Promise<void> {
+    const h = revHolds.get(uid);
+    if (h === undefined || !isLiveReversal(h) || (h.state === 'checking' && h.csrf !== null) || revReading.current !== null || waitRef.current) return;
+    const { key } = h;
+    // R8: the read's answer stands only under the generation, session and attached-state it began with (fix2 item 1).
+    const attached = h.csrf !== null;
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    revReading.current = key;
+    setRevFinding(key);
+    setRevCheck(null);
+    revFindCtl.current?.abort();
+    const controller = new AbortController();
+    revFindCtl.current = controller;
+    try {
+      const found = await findReversalPayment(h.storeId, h.invoiceId, h.paymentId, () => revHolds.get(uid)?.key === key, controller.signal);
+      const now = revHolds.get(uid);
+      // Begun attached, detached meanwhile: its answer is not used (FIX2 item 1), and the card says so (review-3 LOW-3).
+      if (attached && now?.key === key && now.csrf === null) { if (alive.current) setRevCheck({ key, text: REVERSE_TEXT.checkDetached }); return; }
+      if (found === null || mine !== gen.current.n || since !== sessionEndsSoFar()) return;
+      seeReversal(revHolds, uid, key, found.kind !== 'found' ? 'unconfirmed' : found.payment.reversal !== null ? 'reversed' : 'not-reversed', attached);
+    } finally {
+      if (revReading.current === key) revReading.current = null;
+      if (alive.current) setRevFinding((was) => (was === key ? null : was));
+    }
+  }
+
+  /** "Dismiss": stop tracking it here — never a cancel and never a resend. Not while an attached attempt is out. */
+  function dismissReversal(): void {
+    const h = revHolds.get(uid);
+    if (h === undefined || (h.csrf !== null && (h.state === 'sending' || h.state === 'checking')) || revReading.current === h.key) return;
+    revHolds.remove(uid, h.key);
+    setRevCheck(null);
   }
 
   // ---- the settings panel ----
@@ -2197,7 +2525,37 @@ function IssuedSection({
     signIn: (secret) => signInForVoid(v.id, secret),
     stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
   });
+  /** The Issued section's reversal action for the dialog it opened (P2C). */
+  const reversingOf = (v: ViewOpen, store: StoreEntry): IssuedReversalCapability => ({
+    store,
+    held: revHeld !== undefined && revHeld.storeId === v.storeId ? revHeld : undefined,
+    blocked: isLiveVoid(voidHeld) || isLiveReversal(revHeld) || isOpenPayment(payHeld),
+    expired: revHeld !== undefined && reversalExpired(revHeld, clock(), wall()),
+    cooling: revHeld !== undefined && revCool === revHeld.key, finding: revHeld !== undefined && revFinding === revHeld.key,
+    checkText: revHeld !== undefined && revCheck?.key === revHeld.key ? revCheck.text : '',
+    signingIn: voidSigning, generation: () => gen.current.n,
+    eligibility: (signal) => readReversalEligibility(v.id, v.storeId, v.invoiceId, signal),
+    find: (paymentId, signal) => findReversalPayment(v.storeId, v.invoiceId, paymentId, () => viewRef.current?.id === v.id, signal),
+    send: (press) => sendReversal(v.id, store, press),
+    retry: () => { if (!waitRef.current && revCoolRef.current === null) void retryReversal(); },
+    check: () => { if (!waitRef.current) void findReversal(); },
+    dismiss: dismissReversal,
+    signIn: (secret) => signInForVoid(v.id, secret),
+    stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
+  });
   const cardHeld = voidHeld?.state === 'refused' && voidHeld.refusal === 'signed-out' && signedOut ? undefined : voidHeld;
+  // F4: with no dialog open, this user's LIVE reversal attempt in the store chosen now (the dialog shows it otherwise).
+  const revSectionHeld = view === null && !signedOut && isLiveReversal(revHeld) && revHeld.storeId === storeId ? revHeld : undefined;
+  const revSectionKey = revSectionHeld?.key ?? null;
+  // F2: that card going (settled by a Retry or Check payment) with focus in it: focus to the section's heading.
+  const revSectionWas = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const was = revSectionWas.current;
+    revSectionWas.current = revSectionKey;
+    if (was === null || revSectionKey !== null) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) heading.current?.focus();
+  }, [revSectionKey]);
   const track = (target: EventTarget | null): void => {
     if (target instanceof Element && section.current?.contains(target) === true) keepFocus.current = { from: target, inPanel: target.closest('[data-testid="issued-settings"]') !== null };
   };
@@ -2228,6 +2586,17 @@ function IssuedSection({
         onFind={() => { if (waitRef.current) return; voidCardHeading.current?.focus(); void findVoid(); }}
         onDismiss={dismissVoid}
       />
+      {revSectionHeld !== undefined && (
+        // F4: a live reversal attempt stays reachable (Check payment, Dismiss) with no dialog open — e.g. its invoice no
+        // longer opens — in its own store only, for this section's user only.
+        <ReversalCard
+          held={revSectionHeld} expired={reversalExpired(revSectionHeld, clock(), wall())} waiting={waiting} cooling={revCool === revSectionHeld.key}
+          finding={revFinding === revSectionHeld.key} checkText={revCheck?.key === revSectionHeld.key ? revCheck.text : ''} headingRef={revSectionHeading}
+          onRetry={() => { if (waitRef.current || revCoolRef.current !== null) return; revSectionHeading.current?.focus(); void retryReversal(); }}
+          onCheck={() => { if (waitRef.current) return; revSectionHeading.current?.focus(); void findReversal(); }}
+          onDismiss={() => { heading.current?.focus(); dismissReversal(); }}
+        />
+      )}
 
       {open && (
         <div className="space-y-4">
@@ -2372,6 +2741,7 @@ function IssuedSection({
           key={view.id} storeId={view.storeId} invoiceId={view.invoiceId} read={(s, i, signal) => readView(view.id, s, i, signal)} waiting={waiting} onClose={closeView} returnFocus={heading}
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
           voiding={view.store === null ? undefined : voidingOf(view, view.store)}
+          reversing={view.store === null ? undefined : reversingOf(view, view.store)}
           payments={{
             read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal),
             ...(view.store === null ? {} : {
@@ -2462,7 +2832,8 @@ export type VoidSendOutcome =
   | { readonly kind: 'denied'; readonly text: string; readonly gone: boolean }
   /** Reviewed under an earlier generation (R2-1c): nothing sent; the confirmation closes. */
   | { readonly kind: 'stale' };
-export type VoidSignIn = { readonly kind: 'renewed' } | { readonly kind: 'failed'; readonly text: string };
+/** `gen`: the session generation this sign-in's renewal produced. */
+export type VoidSignIn = { readonly kind: 'renewed'; readonly gen: number } | { readonly kind: 'failed'; readonly text: string };
 /** The one void sign-in a section waits for (R1): the open, generation and sign-out count it was pressed under, its deadline, its one answer. */
 interface VoidSignInOwner {
   readonly viewId: number;
@@ -2503,6 +2874,53 @@ export interface IssuedVoidCapability {
   readonly stopSignIn: () => void;
 }
 
+/** One press of the reversal confirmation's "Reverse payment" (M7B-PAYMENTS-P2C R4): the payment as the review read it. */
+export interface ReversePress {
+  readonly invoiceId: string;
+  readonly number: number;
+  readonly payment: InvoicePayment;
+  readonly reasonCode: InvoicePaymentReversalReason;
+  readonly open: () => boolean;
+  readonly allowed: () => boolean;
+  readonly held: (key: string) => void;
+  readonly reviewGen: number;
+}
+/** What a first send comes back with: `sent` (the hold says what, by key), `refused` (sealed: a fresh read says why), or not run. */
+export type ReverseSendOutcome =
+  | { readonly kind: 'not-sent'; readonly text: string }
+  | { readonly kind: 'sent' }
+  | { readonly kind: 'refused' }
+  | { readonly kind: 'not-run'; readonly text: string }
+  | { readonly kind: 'step-up'; readonly method: 'password' | 'google' | null }
+  | { readonly kind: 'stale' };
+/** R7's answer: the exact row as read, `missing` after a complete traversal, or `unconfirmed`. */
+export type PaymentFind =
+  | { readonly kind: 'found'; readonly payment: InvoicePayment; readonly status: IssuedStatus }
+  | { readonly kind: 'missing' | 'unconfirmed' };
+/** The Issued section's reversal action for the one dialog it opened (M7B-PAYMENTS-P2C). */
+export interface IssuedReversalCapability {
+  /** The dialog's store as the server's store list named it (its label, and its tenant for the body). */
+  readonly store: StoreEntry;
+  /** The user's reversal attempt when it is for the dialog's store (R8: its card shows only there), else undefined. */
+  readonly held: HeldReversal | undefined;
+  /** R8: the user holds an unresolved record, reversal or void attempt somewhere — Reverse shows nowhere. */
+  readonly blocked: boolean;
+  readonly expired: boolean;
+  readonly cooling: boolean;
+  readonly finding: boolean;
+  readonly checkText: string;
+  readonly signingIn: boolean;
+  readonly generation: () => number;
+  readonly eligibility: (signal: AbortSignal) => Promise<'allowed' | 'not' | null>;
+  readonly find: (paymentId: string, signal: AbortSignal) => Promise<PaymentFind | null>;
+  readonly send: (press: ReversePress) => Promise<ReverseSendOutcome | null>;
+  readonly retry: () => void;
+  readonly check: () => void;
+  readonly dismiss: () => void;
+  readonly signIn: (secret: string | null) => Promise<VoidSignIn | null>;
+  readonly stopSignIn: () => void;
+}
+
 export interface IssuedInvoiceDialogProps {
   readonly storeId: string;
   readonly invoiceId: string;
@@ -2532,6 +2950,8 @@ export interface IssuedInvoiceDialogProps {
    * the next page. Without it the dialog renders and reads exactly as before.
    */
   readonly payments?: IssuedPaymentsCapability;
+  /** The reversal action (M7B-PAYMENTS-P2C): only the Issued section gives one, with `payments`. */
+  readonly reversing?: IssuedReversalCapability;
 }
 
 type ViewState =
@@ -2605,7 +3025,7 @@ interface VoidConfirm {
   readonly decided: boolean;
 }
 /** Each void-side read of the dialog has its own abort (design R9); the detail reads among them share one sequence (F1). */
-type VoidReadKind = 'elig' | 'review' | 'after' | 'load' | 'renew' | 'renewElig';
+type VoidReadKind = 'elig' | 'review' | 'after' | 'load' | 'renew' | 'renewElig' | 'revElig' | 'revFind';
 /**
  * The detail reads of one open — its first read and Try again, the review, the post-void read, Load again and the sign-in's
  * re-read — share ONE sequence: only the latest started may set what is shown, so a review answered before a void's commit
@@ -2629,14 +3049,14 @@ const DETAIL_KINDS: ReadonlySet<VoidReadKind> = new Set(['review', 'after', 'loa
  * retries only that GET). A late answer of any of these reads changes nothing once its open, its kind's latest read or
  * its context is gone.
  */
-export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments }: IssuedInvoiceDialogProps) {
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments, reversing }: IssuedInvoiceDialogProps) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<ViewState>(VIEW_OPENING);
   const alive = useRef(false);
   const seq = useRef(0);
   const ctl = useRef<AbortController | null>(null);
-  const owner = useRef({ read, current, voiding, payments });
-  useLayoutEffect(() => { owner.current = { read, current, voiding, payments }; });
+  const owner = useRef({ read, current, voiding, payments, reversing });
+  useLayoutEffect(() => { owner.current = { read, current, voiding, payments, reversing }; });
   // The void action (idle, and nothing of it rendered, without `voiding`).
   // The eligibility answer AND the section generation it was read under (review B1 R3-1b): only an 'allowed' read under
   // the generation that stands now permits the action; an older one counts as not yet known.
@@ -2661,8 +3081,8 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const pressing = useRef(false);
   const afterFor = useRef<string | null>(null);
   const liveSeen = useRef(new Set<string>()); // attempts for this invoice seen out (or pressed) while this dialog was open
-  const vseq = useRef<Record<VoidReadKind, number>>({ elig: 0, review: 0, after: 0, load: 0, renew: 0, renewElig: 0 });
-  const vctl = useRef<Record<VoidReadKind, AbortController | null>>({ elig: null, review: null, after: null, load: null, renew: null, renewElig: null });
+  const vseq = useRef<Record<VoidReadKind, number>>({ elig: 0, review: 0, after: 0, load: 0, renew: 0, renewElig: 0, revElig: 0, revFind: 0 });
+  const vctl = useRef<Record<VoidReadKind, AbortController | null>>({ elig: null, review: null, after: null, load: null, renew: null, renewElig: null, revElig: null, revFind: null });
   const setElig = (value: 'allowed' | 'not', gen: number): void => { const next = { value, gen }; eligRef.current = next; setEligState(next); };
   const setRenewal = (out: boolean): void => { renewalRef.current = out; if (alive.current) setRenewalOutState(out); };
   /** An 'allowed' eligibility read under the generation that stands now (R3-1b). */
@@ -2686,6 +3106,35 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   // Recording (M7B-PAYMENTS-P2B): the one eligibility read of this open (issued invoices only) and its abort.
   const [payElig, setPayElig] = useState<'asking' | 'allowed' | 'not'>('asking');
   const payEligCtl = useRef<AbortController | null>(null);
+  // Reversing (M7B-PAYMENTS-P2C; nothing of it read or rendered without `reversing`): its eligibility AND the generation it
+  // was read under (only 'allowed' under the generation now permits it, R1), the row being reviewed, what the payments
+  // section says about it, the confirmation, and the attempts for this invoice seen live while this dialog was open.
+  const [revElig, setRevEligState] = useState<{ readonly value: 'asking' | 'allowed' | 'not'; readonly gen: number }>({ value: 'asking', gen: -1 });
+  const revEligRef = useRef<{ readonly value: 'asking' | 'allowed' | 'not'; readonly gen: number }>({ value: 'asking', gen: -1 });
+  const setRevElig = (value: 'allowed' | 'not', gen: number): void => { const next = { value, gen }; revEligRef.current = next; setRevEligState(next); };
+  const revAllowedNow = (): boolean => {
+    const r = owner.current.reversing;
+    return r !== undefined && revEligRef.current.value === 'allowed' && revEligRef.current.gen === r.generation();
+  };
+  const [revReviewing, setRevReviewing] = useState<string | null>(null);
+  const revReviewingRef = useRef(false);
+  const [revSay, setRevSay] = useState<{ readonly alert: boolean; readonly text: string } | null>(null);
+  const [revConfirm, setRevConfirmState] = useState<ReverseConfirm | null>(null);
+  const revConfirmRef = useRef<ReverseConfirm | null>(null);
+  const putRevConfirm = (next: ReverseConfirm | null): void => { revConfirmRef.current = next; setRevConfirmState(next); };
+  const patchRevConfirm = (id: number, next: Partial<ReverseConfirm>): boolean => {
+    const c = revConfirmRef.current;
+    if (c === null || c.id !== id) return false;
+    putRevConfirm({ ...c, ...next });
+    return true;
+  };
+  const revPressing = useRef(false);
+  const [revFocusReasons, setRevFocusReasons] = useState(0);
+  const [revFocusSignIn, setRevFocusSignIn] = useState(0);
+  const [revFocusCard, setRevFocusCard] = useState(0);
+  const [revFocusRow, setRevFocusRow] = useState<{ readonly id: string } | null>(null);
+  const revCardHeading = useRef<HTMLHeadingElement | null>(null);
+  const revLiveSeen = useRef(new Set<string>());
   const putPay = (next: PaymentsView): void => {
     // Load more (its last page, a change) or Try again (a read starts) going while focused: focus moves to the section's
     // heading, never to the body.
@@ -2812,7 +3261,41 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     const controller = new AbortController();
     payEligCtl.current = controller;
     void ask(controller.signal).catch(() => 'not' as const).then((answer) => { if (alive.current && answer !== null && owner.current.current()) setPayElig(answer); });
+    // The reversal eligibility (R1): ONE per open, issued invoices only, under the generation it was asked in.
+    const r = owner.current.reversing;
+    if (r !== undefined) {
+      const opened = r.generation();
+      void voidRead('revElig', (signal) => r.eligibility(signal)).then((answer) => { if (answer !== null) setRevElig(answer, opened); });
+    }
   }, [state.invoice]);
+
+  // R6/R8: this invoice's reversal attempt, seen live while this dialog was open, settling as reversed — by its own answer,
+  // a Retry or a Check payment read — says so and reads the detail and the history again ONCE (whatever pressed it).
+  const revHere = reversing?.held !== undefined && reversing.held.storeId === storeId && reversing.held.invoiceId === invoiceId ? reversing.held : undefined;
+  if (revHere !== undefined && isLiveReversal(revHere)) revLiveSeen.current.add(revHere.key);
+  const revDoneKey = revHere !== undefined && revHere.state === 'reversed' && revLiveSeen.current.has(revHere.key) ? revHere.key : null;
+  useEffect(() => {
+    if (revDoneKey === null) return;
+    revLiveSeen.current.delete(revDoneKey); // once per attempt
+    setRevSay({ alert: false, text: REVERSE_TEXT.reversed });
+    void reread('after');
+    if (payStarted.current) void loadPayments(null, true);
+  }, [revDoneKey]);
+  useEffect(() => { if (revFocusCard > 0) (revCardHeading.current ?? payHeading.current)?.focus(); }, [revFocusCard]);
+  // R3 after a not-run close (fix2 item 2): the row's Reverse payment (re-rendered once the hold went), else the heading —
+  // a timer queued after DialogFrame's own close-time return (its opener, the old row button, is gone).
+  useEffect(() => {
+    if (revFocusRow === null) return undefined;
+    const timer = setTimeout(() => (document.querySelector<HTMLElement>(`[data-testid="issued-payments-reverse"][data-id="${revFocusRow.id}"]`) ?? payHeading.current)?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [revFocusRow]);
+  // F2: a settle that takes the card away with focus in it hands focus to the payments heading — a layout effect, so it runs
+  // before DialogFrame's lost-focus fallback (Close).
+  useLayoutEffect(() => {
+    if (revDoneKey === null) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) payHeading.current?.focus();
+  }, [revDoneKey]);
 
   // Page one again ONCE per bump of this invoice's payment attempt (a recorded payment, a sealed refusal, a lookup
   // confirmation) — never for what was already so when this dialog opened.
@@ -2850,14 +3333,15 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   }, [afterKey]);
 
   /** The re-read after a void's answer, and its "Load again": a GET only, never another POST. */
-  async function reread(kind: 'after' | 'load'): Promise<void> {
+  async function reread(kind: 'after' | 'load'): Promise<IssuedInvoice | null> {
     setAfter((was) => ({ busy: true, failed: was.failed })); // Load again and its alert stay until this read answers
     const answer = await readDetail(kind);
-    if (answer === null) { if (alive.current) setAfter((was) => ({ ...was, busy: false })); return; }
+    if (answer === null) { if (alive.current) setAfter((was) => ({ ...was, busy: false })); return null; }
     if (answer.kind === 'ok') setState({ phase: 'ready', text: '', invoice: answer.invoice });
     else if (answer.kind === 'not-found') setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null });
     else if (answer.kind === 'denied') setState({ phase: 'denied', text: VIEW_TEXT.denied, invoice: null });
     setAfter({ busy: false, failed: answer.kind === 'unavailable' ? '' : answer.kind === 'rate-limited' ? answer.text : null });
+    return answer.kind === 'ok' ? answer.invoice : null; // the fresh invoice, for a refusal's words (R6)
   }
 
   /**
@@ -2868,6 +3352,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     const v = owner.current.voiding;
     // Not during the sign-in (R2-1a) nor its re-reads (R3-1a), and only on this generation's 'allowed' (R3-1b).
     if (v === undefined || reviewingRef.current || confirmRef.current !== null || waiting || v.signingIn || renewalRef.current) return;
+    if (revReviewingRef.current || revConfirmRef.current !== null) return; // never beside a reversal review/confirmation (review F3)
     if (!allowedNow() || goneRef.current || state.invoice?.status !== 'issued') return;
     reviewingRef.current = true;
     setReviewing(true);
@@ -3012,6 +3497,152 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     setFocusReasons((x) => x + 1);
   }
 
+  // ---- reversing a payment (M7B-PAYMENTS-P2C) ----
+
+  /**
+   * R2 checks, shared by the review and the renewal: the detail (issued), the eligibility (allowed) and the exact payment
+   * (R7: found and not reversed). Each failure is said; the confirmation then never opens (or closes). Null: context gone.
+   */
+  async function revChecks(r: IssuedReversalCapability, paymentId: string, gen: number, kinds: { readonly detail: VoidReadKind; readonly still?: () => boolean }): Promise<{ readonly payment: InvoicePayment; readonly number: number } | null> {
+    // A renewal's failure is said only while the confirmation that asked is still open (fix3 req 2): nothing about a closed one.
+    const fail = (text: string, alert = true): null => { if (alive.current && (kinds.still?.() ?? true)) setRevSay({ alert, text }); return null; };
+    const detail = await readDetail(kinds.detail);
+    if (detail === null) return null;
+    if (detail.kind === 'not-found') { setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null }); return fail(REVERSE_TEXT.gone); }
+    if (detail.kind !== 'ok') return fail(detail.kind === 'rate-limited' ? detail.text : REVERSE_TEXT.unconfirmed);
+    setState({ phase: 'ready', text: '', invoice: detail.invoice });
+    if (detail.invoice.status !== 'issued') return fail(REVERSE_TEXT.voided);
+    const elig = await voidRead('revElig', (signal) => r.eligibility(signal));
+    if (elig === null) return null;
+    setRevElig(elig, gen);
+    if (elig !== 'allowed') return fail(REVERSE_TEXT.notAllowed);
+    const found = await voidRead('revFind', (signal) => r.find(paymentId, signal));
+    if (found === null) return null;
+    if (found.kind !== 'found') return fail(found.kind === 'missing' ? REVERSE_TEXT.missing : REVERSE_TEXT.unconfirmed);
+    if (found.status !== 'issued') return fail(REVERSE_TEXT.voided);
+    if (found.payment.reversal !== null) { if (payStarted.current) void loadPayments(null, true); return fail(REVERSE_TEXT.alreadyReversed, false); }
+    return { payment: found.payment, number: detail.invoice.number };
+  }
+
+  /** R2: a row's "Reverse payment" — the checks above, while the trigger stays; the confirmation opens on what they read. */
+  async function reviewReverse(paymentId: string): Promise<void> {
+    const r = owner.current.reversing;
+    // Never beside a void review or confirmation of this invoice (review F3): on entry, and again before it opens.
+    const voidOut = (): boolean => reviewingRef.current || confirmRef.current !== null;
+    if (r === undefined || revReviewingRef.current || revConfirmRef.current !== null || voidOut() || r.signingIn || waiting) return;
+    revReviewingRef.current = true;
+    setRevReviewing(paymentId);
+    setRevSay(null);
+    const gen = r.generation();
+    try {
+      const fit = await revChecks(r, paymentId, gen, { detail: 'review' });
+      if (fit === null || !alive.current) return;
+      if (gen !== r.generation()) return setRevSay({ alert: true, text: REVERSE_TEXT.staleReview });
+      if (voidOut()) return setRevSay({ alert: true, text: REVERSE_TEXT.voidFirst });
+      putRevConfirm({
+        id: ++confirmSeq.current, payment: fit.payment, number: fit.number, reason: null, invalid: false, gen, sending: false, status: null, stepUp: null, confirming: false, renewing: false,
+      });
+    } finally {
+      revReviewingRef.current = false;
+      if (alive.current) setRevReviewing(null);
+    }
+  }
+
+  /** R4/R6: the confirmation's "Reverse payment": ONE send (a ref holds a second press back); its outcome said. */
+  async function pressReverse(): Promise<void> {
+    const r = owner.current.reversing;
+    const c = revConfirmRef.current;
+    if (r === undefined || c === null || revPressing.current || c.sending || c.stepUp !== null || c.renewing || c.confirming || waiting) return;
+    if (c.reason === null) { patchRevConfirm(c.id, { invalid: true, status: null }); return setRevFocusReasons((x) => x + 1); }
+    const { id } = c;
+    const open = (): boolean => alive.current && revConfirmRef.current?.id === id;
+    revPressing.current = true;
+    patchRevConfirm(id, { sending: true, status: null, invalid: false });
+    let out: ReverseSendOutcome | null;
+    try {
+      out = await r.send({
+        invoiceId, number: c.number, payment: c.payment, reasonCode: c.reason, reviewGen: c.gen, open, allowed: revAllowedNow,
+        held: (key) => { revLiveSeen.current.add(key); },
+      });
+    } catch {
+      out = { kind: 'not-sent', text: REVERSE_TEXT.notRun };
+    } finally {
+      revPressing.current = false;
+    }
+    if (!alive.current || out === null) return void patchRevConfirm(id, { sending: false });
+    switch (out.kind) {
+      case 'stale': putRevConfirm(null); return setRevSay({ alert: true, text: REVERSE_TEXT.staleReview });
+      case 'not-sent': return void patchRevConfirm(id, { sending: false, status: { alert: true, text: out.text } });
+      case 'not-run':
+        // The server ran nothing and the key is gone: another press would need a NEW R2 review (fix2 item 2) — so it closes
+        // (focus back per R3) and the section's alert says why.
+        if (open()) { putRevConfirm(null); setRevFocusRow({ id: c.payment.id }); }
+        return setRevSay({ alert: true, text: out.text });
+      case 'step-up':
+        // R5: only a first send's step-up — nothing ran, the key is gone; the sign-in group opens here.
+        patchRevConfirm(id, { sending: false, stepUp: { method: out.method }, status: { alert: true, text: out.method === null ? REVERSE_TEXT.stepUpNoMethod : REVERSE_TEXT.stepUp } });
+        return setRevFocusSignIn((x) => x + 1);
+      case 'refused': {
+        // R6: a sealed refusal; a fresh invoice and history read says why (exact row reversed, voided, or neither).
+        if (open()) putRevConfirm(null);
+        const found = await voidRead('revFind', (signal) => r.find(c.payment.id, signal));
+        const freshRead = reread('after');
+        if (payStarted.current) void loadPayments(null, true);
+        const fresh = await freshRead;
+        if (!alive.current) return;
+        if (found?.kind === 'found' && found.payment.reversal !== null) return setRevSay({ alert: false, text: REVERSE_TEXT.alreadyReversed });
+        // Voided by either fresh read — the invoice's own, even when the history read failed (SII-244).
+        if ((found?.kind === 'found' && found.status !== 'issued') || (fresh !== null && fresh.status !== 'issued')) return setRevSay({ alert: true, text: REVERSE_TEXT.voided });
+        return setRevSay({ alert: true, text: REVERSE_TEXT.cannotNow });
+      }
+      default:
+        // Sent: the hold says what, by key. Reversed: the effect above says it and reads again; unresolved: its card.
+        if (!open()) return;
+        putRevConfirm(null);
+        setRevFocusCard((x) => x + 1);
+    }
+  }
+
+  /** R5: the sign-in after a first send's step-up; success re-runs the R2 checks and keeps the confirmation for a NEW press. */
+  async function signInReverse(): Promise<void> {
+    const r = owner.current.reversing;
+    const c = revConfirmRef.current;
+    if (r === undefined || c === null || c.stepUp === null || c.stepUp.method === null || c.confirming || waiting) return;
+    const secret = c.stepUp.method === 'password' ? password : null;
+    if (secret === '') return;
+    const { id } = c;
+    const open = (): boolean => revConfirmRef.current?.id === id;
+    setPassword('');
+    patchRevConfirm(id, { confirming: true, status: null });
+    let out: VoidSignIn | null;
+    try { out = await r.signIn(secret); } catch { out = { kind: 'failed', text: VOID_TEXT.reauthFailed }; }
+    if (!alive.current) return;
+    if (out === null) return void patchRevConfirm(id, { confirming: false });
+    if (out.kind === 'failed') {
+      if (!open()) return;
+      patchRevConfirm(id, { confirming: false, status: { alert: true, text: out.text } });
+      return setRevFocusSignIn((x) => x + 1);
+    }
+    // Only the generation THIS sign-in produced, and only for the confirmation that started it (fix3 req 1/2, review-3 LOW-1/2):
+    // closed meanwhile it stays closed and nothing is said; another session since closes it, never another confirmation.
+    const renewGen = out.gen;
+    const ours = (): boolean => alive.current && open();
+    if (!ours()) return;
+    if (renewGen !== r.generation()) return putRevConfirm(null);
+    patchRevConfirm(id, { confirming: false, stepUp: null, renewing: true, reason: null, invalid: false, status: { alert: false, text: REVERSE_TEXT.renewing } });
+    const fit = await revChecks(r, c.payment.id, renewGen, { detail: 'renew', still: open });
+    if (!ours()) return;
+    if (fit === null || renewGen !== r.generation()) return putRevConfirm(null); // anything that no longer fits closes it (and is said)
+    patchRevConfirm(id, { renewing: false, payment: fit.payment, number: fit.number, gen: renewGen, status: { alert: false, text: REVERSE_TEXT.renewed } });
+    setRevFocusReasons((x) => x + 1);
+  }
+
+  function closeReverseConfirm(): void {
+    owner.current.reversing?.stopSignIn(); // Keep payment or Escape while its sign-in is waited for: the wait ends here
+    putRevConfirm(null);
+    setPassword('');
+  }
+
   function closeConfirm(): void {
     owner.current.voiding?.stopSignIn(); // Keep invoice or Escape while its sign-in is waited for: the wait ends here (R1)
     putConfirm(null);
@@ -3023,7 +3654,15 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   // trigger is then shown but held with the checking reason, never as "not allowed" (review B1 R3-1b).
   const eligNow = voiding !== undefined && elig.value === 'allowed' && elig.gen === voiding.generation();
   const eligOld = voiding !== undefined && elig.value === 'allowed' && elig.gen !== voiding.generation();
-  const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal;
+  // R8: while this invoice has an unresolved reversal attempt, neither Void nor Record payment shows on it.
+  const revLiveHere = revHere !== undefined && isLiveReversal(revHere);
+  const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal && !revLiveHere
+    && revReviewing === null; // nor while a reversal review is out (review F3)
+  // R1: Reverse shows only on an 'allowed' read under this generation, an issued invoice whose payments page says issued and
+  // is not loading, no unresolved record, reversal or void attempt of this user anywhere, and a dialog that is not terminal.
+  const canReverse = reversing !== undefined && revElig.value === 'allowed' && revElig.gen === reversing.generation() && !reversing.blocked
+    && invoice !== null && invoice.status === 'issued' && pay.phase === 'ready' && pay.page?.invoice.status === 'issued' && !terminal
+    && !reviewing && confirm === null; // nor while a void review or confirmation is out (review F3)
   // Once this invoice is known voided (a 200 or a sealed already-void for an attempt of this user), no confirmation is
   // shown — but the one that pressed an already-void, which says so — and it goes in the commit that hides the trigger
   // (design R17): focus then goes to Close, never to a control that is gone.
@@ -3156,9 +3795,25 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             {/* Above the state line and the list (R2 R6): what a re-read changes never moves the recording controls. */}
             {payments.recording !== undefined && (
               <PaymentRecorder
-                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed'}
+                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed' && !revLiveHere} reversing={revLiveHere}
                 waiting={waiting} recording={payments.recording} headingRef={payHeading}
               />
+            )}
+            {reversing !== undefined && (
+              // R8: the reversal's always-mounted status and alert regions, and this invoice's held attempt (its card).
+              <div data-testid="issued-reverse-area" className="space-y-2">
+                <p data-testid="issued-reverse-status" role="status" className="text-sm font-bold text-emerald-800">{revReviewing !== null ? REVERSE_TEXT.reviewing : revSay !== null && !revSay.alert ? revSay.text : ''}</p>
+                <p data-testid="issued-reverse-alert" role="alert" className="text-sm font-bold text-rose-800">{revSay?.alert === true ? revSay.text : ''}</p>
+                {revHere !== undefined && (revHere.state !== 'reversed' || !revHere.attributed) && (
+                  <ReversalCard
+                    held={revHere} expired={reversing.expired} waiting={waiting} cooling={reversing.cooling} finding={reversing.finding} checkText={reversing.checkText}
+                    // F2: the card's heading takes focus before Retry/Check can take their own controls away (the void's precedent).
+                    headingRef={revCardHeading} onRetry={() => { revCardHeading.current?.focus(); reversing.retry(); }}
+                    onCheck={() => { revCardHeading.current?.focus(); reversing.check(); }}
+                    onDismiss={() => { payHeading.current?.focus(); reversing.dismiss(); }}
+                  />
+                )}
+              </div>
             )}
             <p data-testid="issued-payments-state" data-phase={pay.phase} role={pay.phase === 'denied' ? 'alert' : 'status'} className="text-sm font-bold text-slate-600">{pay.text}</p>
             {(pay.phase === 'not-found' || pay.phase === 'denied' || pay.phase === 'unavailable' || pay.phase === 'rate-limited') && (
@@ -3179,6 +3834,17 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
                       {p.reversal !== null && <>{' · '}<span data-testid="issued-payments-reversed" className="text-rose-800">{PAYMENTS_TEXT.reversed}</span></>}
                     </p>
                     <p className={hintClass}>Recorded at <time data-testid="issued-payments-recorded-at" dateTime={p.recordedAt}>{utcText(p.recordedAt)}</time></p>
+                    {canReverse && p.reversal === null && (
+                      // R1: in its own row, wrapping at 320 px / 24 px text; aria-disabled (never disabled) while a review is out.
+                      <button
+                        type="button" data-testid="issued-payments-reverse" data-id={p.id} aria-haspopup="dialog" aria-label={REVERSE_TEXT.openLabel(formatCents(p.amountCents))}
+                        aria-disabled={revReviewing !== null || waiting} aria-describedby={revReviewing === p.id ? 'issued-reverse-reviewing' : undefined}
+                        onClick={() => { if (revReviewing === null && !waiting) void reviewReverse(p.id); }} className={`mt-1 ${quiet} ${waitable} ${fitsRow}`}
+                      >
+                        {REVERSE_TEXT.open}
+                      </button>
+                    )}
+                    {revReviewing === p.id && <span id="issued-reverse-reviewing" className="sr-only">{REVERSE_TEXT.reviewing}</span>}
                     {p.reversal !== null && (
                       <p className={hintClass}>
                         Reversed at <time data-testid="issued-payments-reversed-at" dateTime={p.reversal.reversedAt}>{utcText(p.reversal.reversedAt)}</time>
@@ -3214,6 +3880,19 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             if (c !== null && c.key === null && !c.saving && c.stepUp === null && !c.decided && !c.renewing) patchConfirm(c.id, { reason: code, invalid: false });
           }}
           onPress={() => { void press(); }} onClose={closeConfirm} onCheck={voiding.check} onFind={voiding.find} onSignIn={() => { void signIn(); }} onStopSignIn={voiding.stopSignIn} returnFocus={closeButton}
+        />
+      )}
+      {reversing !== undefined && revConfirm !== null && (
+        // R3: focus goes back to the row's Reverse payment (what had it), else to the payments heading.
+        <ReverseConfirmDialog
+          c={revConfirm} store={storeLabel(reversing.store)} waiting={waiting} password={password} focusReasons={revFocusReasons} focusSignIn={revFocusSignIn}
+          onPassword={setPassword}
+          onReason={(code) => {
+            const c = revConfirmRef.current;
+            if (c !== null && !c.sending && c.stepUp === null && !c.renewing && !c.confirming) patchRevConfirm(c.id, { reason: code, invalid: false });
+          }}
+          onPress={() => { void pressReverse(); }} onClose={closeReverseConfirm} onSignIn={() => { void signInReverse(); }} onStopSignIn={reversing.stopSignIn}
+          returnFocus={payHeading}
         />
       )}
     </>
@@ -3273,8 +3952,10 @@ function paymentFlowText(h: HeldPayment, expired: boolean): string {
  * runs the same lookup, on a press only. Every
  * control is aria-disabled, never disabled; a control that goes while focused hands focus to the section's heading.
  */
-function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, recording, headingRef }: {
+function PaymentRecorder({ storeId, invoiceId, number, page, allowed, reversing, waiting, recording, headingRef }: {
   readonly storeId: string; readonly invoiceId: string; readonly number: number; readonly page: PaymentsPage | null; readonly allowed: boolean;
+  /** R8: a reversal of one of this invoice's payments is unresolved — the lookup rows' Withdraw/Confirm hold back. */
+  readonly reversing: boolean;
   readonly waiting: boolean; readonly recording: PaymentRecording; readonly headingRef: RefObject<HTMLHeadingElement | null>;
 }) {
   const [formOpen, setFormOpen] = useState(false);
@@ -3453,6 +4134,7 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
           </button>
         )}
         {recording.out && <span id="issued-payments-rows-out" className="sr-only">{SETTINGS_TEXT.busy}</span>}
+        {reversing && <span id="issued-payments-rows-reversing" className="sr-only">{REVERSE_TEXT.pending}</span>}
         {lookup !== null && lookup.rows.length > 0 && (
           <ul aria-label="Your unfinished payment attempts on this invoice" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
             {lookup.rows.map((row, index) => {
@@ -3461,8 +4143,8 @@ function PaymentRecorder({ storeId, invoiceId, number, page, allowed, waiting, r
               const noteId = `issued-payments-attempt-note-${index}`;
               const heldBack = rowHeldBack(held, row);
               const other = (heldBack && held !== undefined && held.key !== row.attemptId) || elsewhere; // another attempt is undecided (S3, G3)
-              const off = waiting || busy || heldBack || elsewhere || recording.out; // R2 N2: a chain still out holds the row back, said
-              const describedBy = [textId, other ? noteId : '', recording.out ? 'issued-payments-rows-out' : ''].filter((id) => id !== '').join(' ');
+              const off = waiting || busy || heldBack || elsewhere || recording.out || reversing; // R2 N2: a chain still out holds the row back, said
+              const describedBy = [textId, other ? noteId : '', recording.out ? 'issued-payments-rows-out' : '', reversing ? 'issued-payments-rows-reversing' : ''].filter((id) => id !== '').join(' ');
               return (
                 <li key={row.attemptId} data-testid="issued-payments-attempt" data-attempt-state={row.state} className={`px-4 py-3 text-sm space-y-2 ${fitsRow}`}>
                   <p id={textId} className="font-bold text-slate-700">
@@ -3683,6 +4365,195 @@ function VoidConfirmDialog({
         </div>
       )}
     </DialogFrame>
+  );
+}
+
+/** The reversal confirmation over the dialog (M7B-PAYMENTS-P2C R3): exactly the payment its review read, the reason, the press. */
+interface ReverseConfirm {
+  readonly id: number;
+  readonly payment: InvoicePayment;
+  readonly number: number;
+  readonly reason: InvoicePaymentReversalReason | null;
+  readonly invalid: boolean;
+  /** The section generation its review read was made under (R4). */
+  readonly gen: number;
+  /** Its press is out (the session check and the POST). */
+  readonly sending: boolean;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+  readonly stepUp: { readonly method: 'password' | 'google' | null } | null;
+  readonly confirming: boolean;
+  readonly renewing: boolean;
+}
+const REVERSAL_REASON_CODES = Object.keys(INVOICE_PAYMENT_REVERSAL_REASONS) as readonly InvoicePaymentReversalReason[];
+
+/** R3: the reversal confirmation (VoidConfirmDialog's structure): Keep payment first, the facts, a required reason, the press. */
+function ReverseConfirmDialog({ c, store, waiting, password, focusReasons, focusSignIn, onPassword, onReason, onPress, onClose, onSignIn, onStopSignIn, returnFocus }: {
+  readonly c: ReverseConfirm; readonly store: string; readonly waiting: boolean; readonly password: string;
+  readonly focusReasons: number; readonly focusSignIn: number;
+  readonly onPassword: (value: string) => void; readonly onReason: (code: InvoicePaymentReversalReason) => void; readonly onPress: () => void;
+  readonly onClose: () => void; readonly onSignIn: () => void; readonly onStopSignIn: () => void;
+  readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const firstReason = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<HTMLInputElement | null>(null);
+  const signInButton = useRef<HTMLButtonElement | null>(null);
+  const reasonsSeen = useRef(focusReasons);
+  const signInSeen = useRef(focusSignIn);
+  useEffect(() => {
+    if (focusReasons === reasonsSeen.current) return;
+    reasonsSeen.current = focusReasons;
+    firstReason.current?.focus();
+  }, [focusReasons]);
+  const method = c.stepUp?.method;
+  useEffect(() => {
+    if (focusSignIn === signInSeen.current) return;
+    signInSeen.current = focusSignIn;
+    (method === 'password' ? passwordRef.current : signInButton.current)?.focus();
+  }, [focusSignIn, method]);
+  const locked = c.sending || c.stepUp !== null || c.renewing || c.confirming;
+  const why = c.sending ? REVERSE_TEXT.sending : c.renewing ? REVERSE_TEXT.renewing : waiting ? VOID_TEXT.waiting : c.reason === null ? REVERSE_TEXT.sendWhyReason : '';
+  const invalid = c.invalid && c.reason === null;
+  const signInBlocked = c.confirming || waiting || (method === 'password' && password.length === 0);
+  const p = c.payment;
+  return (
+    <DialogFrame
+      role="alertdialog" labelledBy="issued-reverse-title" describedBy="issued-reverse-description" testId="issued-reverse-confirm" anchor="top"
+      busy={false} onClose={onClose} initialFocus={keep} returnFocus={returnFocus}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h2 id="issued-reverse-title" data-testid="issued-reverse-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">{REVERSE_TEXT.title}</h2>
+        <button ref={keep} type="button" data-testid="issued-reverse-keep" onClick={onClose} className={`${quiet} ${actionFit}`}>
+          {c.sending ? REVERSE_TEXT.close : REVERSE_TEXT.keep}
+        </button>
+      </div>
+      <div id="issued-reverse-description" data-testid="issued-reverse-description" className="space-y-2 text-sm font-medium text-slate-700">
+        <p data-testid="issued-reverse-facts" className="break-words">
+          Invoice <span data-testid="issued-reverse-number">{c.number}</span> at <bdi data-testid="issued-reverse-store" className="break-words">{store}</bdi>:{' '}
+          <span data-testid="issued-reverse-amount" className="whitespace-nowrap font-black text-primary">{formatCents(p.amountCents)}</span>
+          {' · '}<span data-testid="issued-reverse-method">{INVOICE_PAYMENT_METHODS[p.method]}</span>
+          {', recorded at '}<time data-testid="issued-reverse-recorded-at" dateTime={p.recordedAt}>{utcText(p.recordedAt)}</time>.
+        </p>
+        <p data-testid="issued-reverse-consequence">{REVERSE_TEXT.consequence}</p>
+      </div>
+      {c.sending && <p data-testid="issued-reverse-close-warning" className={hintClass}>{REVERSE_TEXT.closeWarning}</p>}
+      <fieldset
+        role="radiogroup" aria-labelledby="issued-reverse-reason-legend" aria-required="true" aria-invalid={invalid} aria-describedby={invalid ? 'issued-reverse-reason-error' : undefined}
+        disabled={locked} data-testid="issued-reverse-reasons" className="space-y-2"
+      >
+        <legend id="issued-reverse-reason-legend" className={labelClass}>{REVERSE_TEXT.reasonLegend}</legend>
+        {REVERSAL_REASON_CODES.map((code, i) => (
+          <label key={code} className={`flex items-center gap-2 text-sm font-bold text-slate-700 ${fitsRow}`}>
+            <input
+              ref={i === 0 ? firstReason : undefined} type="radio" name="issued-reverse-reason" value={code} data-testid={`issued-reverse-reason-${code}`}
+              checked={c.reason === code} onChange={() => onReason(code)} className={focusRing}
+            />
+            {INVOICE_PAYMENT_REVERSAL_REASONS[code]}
+          </label>
+        ))}
+        {invalid && <p id="issued-reverse-reason-error" data-testid="issued-reverse-reason-error" className="text-xs font-bold text-rose-700">{REVERSE_TEXT.chooseReason}</p>}
+      </fieldset>
+      {c.stepUp !== null && (
+        // R5: the void's sign-in pattern (one owner, 30 s wait, Stop waiting), its own ids.
+        <div role="group" aria-labelledby="issued-reverse-reauth-title" data-testid="issued-reverse-reauth-group" className="flex flex-wrap items-end gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100">
+          <p id="issued-reverse-reauth-title" className="w-full text-xs font-black text-amber-900">{REVERSE_TEXT.stepUp}</p>
+          <p data-testid="issued-reverse-reauth-explain" className="w-full text-[11px] font-medium text-amber-800">{method === null ? REVERSE_TEXT.stepUpNoMethod : VOID_TEXT.reauthExplain}</p>
+          {method === 'password' && (
+            <div className="flex flex-col gap-1 min-w-0 max-w-full">
+              <label htmlFor="issued-reverse-reauth-password" className={labelClass}>Your password</label>
+              <input
+                ref={passwordRef} id="issued-reverse-reauth-password" data-testid="issued-reverse-reauth-password" type="password" autoComplete="current-password"
+                value={password} readOnly={c.confirming} onChange={(e) => onPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!signInBlocked) onSignIn(); } }}
+                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white min-w-0 max-w-full ${focusRing}`}
+              />
+            </div>
+          )}
+          {method !== null && method !== undefined && (
+            <>
+              <button
+                ref={signInButton} type="button" data-testid="issued-reverse-reauth-confirm" aria-disabled={signInBlocked}
+                onClick={() => { if (!signInBlocked) onSignIn(); }}
+                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing} ${fitsRow}`}
+              >
+                {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
+              </button>
+              {c.confirming && (
+                <button type="button" data-testid="issued-reverse-reauth-stop" onClick={onStopSignIn} className={`${quiet} ${fitsRow}`}>{VOID_TEXT.stopWaiting}</button>
+              )}
+              {c.confirming && <p data-testid="issued-reverse-reauth-stop-hint" className="w-full text-[11px] font-medium text-amber-800">{VOID_TEXT.stopWaitingHint}</p>}
+            </>
+          )}
+        </div>
+      )}
+      {/* Always mounted (R3): what this confirmation says is a change to them. */}
+      <p data-testid="issued-reverse-confirm-status" role="status" className="text-sm font-bold text-amber-900">{c.sending ? REVERSE_TEXT.sending : c.renewing ? REVERSE_TEXT.renewing : c.status !== null && !c.status.alert ? c.status.text : ''}</p>
+      <p data-testid="issued-reverse-confirm-alert" role="alert" className="text-sm font-bold text-rose-800">{c.status?.alert === true ? c.status.text : ''}</p>
+      {c.stepUp === null && (
+        <div className="flex flex-wrap justify-end items-center gap-3">
+          {why !== '' && <span id="issued-reverse-send-why" data-testid="issued-reverse-send-why" className={why === REVERSE_TEXT.sendWhyReason ? 'sr-only' : hintClass}>{why}</span>}
+          <button
+            type="button" data-testid="issued-reverse-send" aria-disabled={why !== ''} aria-describedby={why !== '' ? 'issued-reverse-send-why' : undefined}
+            onClick={onPress} className={`${button} ${waitable} ${actionFit}`}
+          >
+            {c.sending ? REVERSE_TEXT.sending : REVERSE_TEXT.send}
+          </button>
+        </div>
+      )}
+    </DialogFrame>
+  );
+}
+
+/** R8: the user's held reversal attempt for the dialog's invoice, in its payments section; it outlives the confirmation. */
+function ReversalCard({ held, expired, waiting, cooling, finding, checkText, headingRef, onRetry, onCheck, onDismiss }: {
+  readonly held: HeldReversal; readonly expired: boolean; readonly waiting: boolean; readonly cooling: boolean; readonly finding: boolean; readonly checkText: string;
+  readonly headingRef: RefObject<HTMLHeadingElement | null>;
+  readonly onRetry: () => void; readonly onCheck: () => void; readonly onDismiss: () => void;
+}) {
+  const attached = held.csrf !== null;
+  const title = held.state === 'reversed' ? REVERSE_TEXT.reversed : held.state === 'refused' ? REVERSE_TEXT.cardRefusedTitle : REVERSE_TEXT.cardTitle;
+  const live = isLiveReversal(held);
+  const amount = formatCents(held.amountCents);
+  const state = held.state === 'reversed' ? (held.attributed ? REVERSE_TEXT.cardReversed : REVERSE_TEXT.cardSeenReversed)
+    : held.state === 'refused' ? REVERSE_TEXT.cardRefused
+      : !attached ? REVERSE_TEXT.cardDetached // before `sending`: a detached attempt is never out here (review F1)
+        : held.state === 'sending' ? REVERSE_TEXT.cardSending : REVERSE_TEXT.cardUnresolved(amount, held.number);
+  const seen = !live ? '' : finding ? REVERSE_TEXT.checking : checkText !== '' ? checkText
+    : held.seen === 'not-reversed' ? REVERSE_TEXT.seenNotReversed : held.seen === 'unconfirmed' ? REVERSE_TEXT.seenUnconfirmed : '';
+  const canRetry = attached && held.state === 'unresolved' && held.retryable && !expired && held.body !== '';
+  const out = attached && (held.state === 'sending' || held.state === 'checking');
+  return (
+    <div data-testid="issued-reverse-card" data-state={attached ? held.state : 'detached'} data-id={held.paymentId} className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2">
+      <h4 ref={headingRef} tabIndex={-1} data-testid="issued-reverse-card-title" className="text-sm font-black text-amber-900">{title}</h4>
+      <p data-testid="issued-reverse-card-status" role="status" className="text-sm font-bold text-amber-900">{state}</p>
+      {live && attached && held.note !== '' && <p data-testid="issued-reverse-card-note" className="text-xs font-bold text-amber-900">{held.note}</p>}
+      <p data-testid="issued-reverse-card-seen" role="status" className="text-xs font-bold text-slate-700">{seen}</p>
+      <div className="flex flex-wrap items-center gap-3">
+        {canRetry && (
+          <button
+            type="button" data-testid="issued-reverse-retry" aria-disabled={waiting || cooling} aria-describedby={waiting || cooling ? 'issued-reverse-cool' : undefined}
+            onClick={() => { if (!waiting && !cooling) onRetry(); }} className={`${button} ${waitable} ${fitsRow}`}
+          >
+            {REVERSE_TEXT.retry}
+          </button>
+        )}
+        {live && !out && (
+          <button
+            type="button" data-testid="issued-reverse-check" aria-disabled={waiting || finding} onClick={() => { if (!waiting && !finding) onCheck(); }}
+            className={`${quiet} ${waitable} ${fitsRow}`}
+          >
+            {REVERSE_TEXT.check}
+          </button>
+        )}
+        {!out && (
+          <button type="button" data-testid="issued-reverse-dismiss" aria-describedby={live ? 'issued-reverse-dismiss-warning' : undefined} onClick={onDismiss} className={`${quiet} ${fitsRow}`}>
+            {REVERSE_TEXT.dismiss}
+          </button>
+        )}
+        {(waiting || cooling) && <span id="issued-reverse-cool" className="sr-only">{waiting ? VOID_TEXT.waiting : REVERSE_TEXT.coolDown}</span>}
+      </div>
+      {live && <p id="issued-reverse-dismiss-warning" className={hintClass}>{REVERSE_TEXT.dismissWarning}</p>}
+    </div>
   );
 }
 

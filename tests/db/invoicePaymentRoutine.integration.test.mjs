@@ -54,6 +54,9 @@
 //   IPR-20 (PAY-02) a session that expires while the record waits on the issued header: refused after the wait, nothing written.
 //   IPR-21 (PAY-02) session and standing changes at a direct call: an expired session, a suspended account and a suspended
 //          membership refuse the record and the reversal, nothing written (each actor's record and reversal applied before).
+//   IPR-22 (PAY-03 PAY-05 PAY-08) two sessions reversing one payment behind a third session's header lock, each signed in
+//          recently with its own correlation id: exactly one applied, the other invalid_state; one reversal and one reverse
+//          audit record for the payment, carrying the winner's actor and correlation id.
 //
 // NOT PROVEN HERE: the HTTP command path (idempotency, replay, completion, the chain's step-up) is invoicePaymentHttp's.
 //
@@ -1649,4 +1652,47 @@ test('IPR-21 (PAY-02): session and standing changes at a direct call — an expi
   }
   assert.deepEqual(got, Object.fromEntries(Object.keys(got).map((k) => [k, k.startsWith('record') ? NO_REC('refused') : NO_REV('refused')])), 'each refused');
   assert.deepEqual(await stateOf([f.T]), before, 'nothing written');
+});
+
+// ===========================================================================
+// IPR-22: the reversal race
+// ===========================================================================
+
+test('IPR-22 (PAY-03 PAY-05 PAY-08): two sessions reversing one payment behind a third session\'s header lock, each signed in recently with its own correlation id — exactly one applied, the other invalid_state; exactly one reversal and one reverse audit record for the payment, carrying the winner\'s actor and correlation id', async () => {
+  const f = await scene('rev-race', { invoices: 1 });
+  const inv = f.inv[0];
+  const p = await pay(f, inv, 1n);
+  const now = await dbNowMs();
+  await setAuth(f.kBoss, now);
+  await setAuth(f.kManager, now);
+  const sides = [{ who: f.boss, key: f.kBoss, corr: randomUUID(), reason: 'duplicate' }, { who: f.manager, key: f.kManager, corr: randomUUID(), reason: 'wrong_amount' }];
+  const before = await stateOf([f.T]);
+  const holder = holding(owner, (tx) => tx`select 1 from tmpos_invoice_issue.issued_invoice where invoice_id = ${inv} for update`);
+  let runs = [];
+  try {
+    await until(() => holder.ready, 'the third session holds the header');
+    runs = sides.map((x) => running(runtime, (tx) => reverseCall(x.key, { store: f.S, invoice: inv, payment: p.payment, tenant: f.T, reason: x.reason, corr: x.corr, db: tx })));
+    await until(async () => (await blockers(runs[0].pid)).length > 0 && (await blockers(runs[1].pid)).length > 0, 'both reversals wait');
+    for (const r of runs) {
+      const by = await blockers(r.pid);
+      assert.ok(by.every((pid) => [holder.pid, ...runs.map((x) => x.pid)].includes(pid)), `each waits on the holder or the other reversal only (${by})`);
+    }
+    assert.ok((await blockedBy(runs[0].pid, holder.pid)) || (await blockedBy(runs[1].pid, holder.pid)), 'the header holder is the barrier');
+    holder.release('rollback');
+    await holder.done;
+    const got = [];
+    for (const [i, r] of runs.entries()) got.push(finished(await r.done, `reversal ${i}`).value);
+    assert.deepEqual(got.map((g) => g[0].o_outcome).sort(), ['applied', 'invalid_state'], 'exactly one applied, the other refused');
+    const won = got[0][0].o_outcome === 'applied' ? 0 : 1;
+    const event = assertReversed(got[won], sides[won].who, f.T, f.S, p.payment, 'the reversal that took the header first');
+    assert.deepEqual(got[1 - won], NO_REV('invalid_state'), 'the second sees the committed reversal');
+    const after = await stateOf([f.T]);
+    assert.deepEqual(diffKeys(before, after).sort(), ['audits', 'audits_anywhere', 'reversals'], 'one reversal and its audit record, nothing else');
+    assert.equal(after.reversals.length - before.reversals.length, 1, 'one reversal row in the tenant');
+    assert.equal(after.audits_anywhere - before.audits_anywhere, 1, 'one audit record anywhere');
+    assert.deepEqual((await paymentsOf(inv)).map((x) => [x.payment_id, x.reason_code, x.reversed_by]), [[p.payment, sides[won].reason, sides[won].who.id]], 'the winner\'s reversal');
+    const reverses = (await auditOf(p.payment)).filter((j) => j.action_id === 'store.invoice_payment.reverse');
+    assert.deepEqual(reverses.map((j) => [j.event_id, j.request_id, j.actor_internal_user_id]), [[event, sides[won].corr, sides[won].who.id]], 'one reverse audit record: the winner\'s');
+    assert.equal(Number((await owner`select count(*)::int as n from tmpos_invoice_payment.invoice_payment_reversal where payment_id = ${p.payment}`)[0].n), 1, 'one reversal per payment');
+  } finally { await settle(holder, ...runs); }
 });

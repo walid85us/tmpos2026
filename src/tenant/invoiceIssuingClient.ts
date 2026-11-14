@@ -11,7 +11,10 @@
 // on a recent sign-in: exactly `{ expectedTenant, reasonCode }`, no version; a 200 names the invoice and "voided" only).
 // M7B-PAYMENTS-P2A adds ONE read (docs/phase-4/15 §12.3): GET …/invoices/{id}/payments[?after={paymentId}] — the invoice's
 // status, its due/recorded/remaining amounts and status word over the whole history, and one page of at most 50 payments,
-// oldest first. Nothing here records, reverses or proves a payment.
+// oldest first. M7B-PAYMENTS-P2B adds the recording commands (register, proof, record, settle, the attempts read) and
+// M7B-PAYMENTS-P2C the reversal's two: GET …/invoices/{id}/payment-reversal-eligibility (action-only, target-blind, no recent
+// sign-in asked) and POST …/invoices/{id}/payments/{paymentId}/reversal (exactly `{ expectedTenant, reasonCode }` on a
+// recent sign-in; a 200 names the payment, the invoice and "reversed" only). Only `reversePayment` reverses a payment.
 //
 //   - The server is the authority for everything: who may read, write or issue, which tenant a store belongs to, the
 //     amounts, the number and what was stored. This client reports what the server answered and decides nothing.
@@ -76,6 +79,9 @@ export const paymentProofPathOf = (storeId: string, invoiceId: string): string =
 export const paymentSettlementPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-settlement`;
 /** The caller's own payment attempts at one store (every invoice), oldest registration first. */
 export const paymentAttemptsPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/payment-attempts`;
+/** The reversal (M7B-PAYMENTS-P2C, server/runtime/invoicePayments.ts): its eligibility under the invoice, its command under the payment. */
+export const paymentReversalEligibilityPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-reversal-eligibility`;
+export const paymentReversalPathOf = (storeId: string, invoiceId: string, paymentId: string): string => `${paymentsPathOf(storeId, invoiceId)}/${paymentId}/reversal`;
 
 export const LEGAL_NAME_MAX_CHARACTERS = 200;
 export const ISSUING_STORE_NAME_MAX_CHARACTERS = 120;
@@ -300,6 +306,16 @@ export type SettleResult =
   | { readonly kind: 'settled'; readonly state: 'withdrawn' | 'confirmed'; readonly replayed: boolean }
   | { readonly kind: 'write-conflict' | PaymentChainKind }
   | RateLimited | Unknown;
+/**
+ * A reversal answer (M7B-PAYMENTS-P2C): `reversed` only for the exact 200 naming the payment AND the invoice asked. Sealed:
+ * `invalid-state` (already reversed) and `write-conflict` (the version; unreachable, the planner pins 1). `step-up`: 403
+ * step_up_required (a stale sign-in, decided before any key: nothing ran). Then the chain's own (any other chain 403
+ * `denied`). A 503, an unnamed word or shape, a mismatched or malformed 200 or no answer is `unknown`.
+ */
+export type ReverseResult =
+  | { readonly kind: 'reversed'; readonly replayed: boolean }
+  | { readonly kind: 'invalid-state' | 'write-conflict' | 'step-up' | PaymentChainKind }
+  | RateLimited | Unknown;
 /** One of the caller's own payment attempts as the attempts read answers it (never a registration id). */
 export interface PaymentAttempt {
   readonly invoiceId: string; readonly invoiceNumber: number; readonly attemptId: string; readonly state: PaymentAttemptState; readonly version: 1 | 2 | 3;
@@ -448,6 +464,10 @@ export function settleBodyOf(expectedTenant: string, attemptId: string, expected
   return isCustomerId(expectedTenant) && isCustomerId(attemptId) && (expectedVersion === 1 || expectedVersion === 2)
     ? JSON.stringify({ expectedTenant, attemptId, expectedVersion }) : null;
 }
+/** The reversal body, built ONCE: exactly `{"expectedTenant":…,"reasonCode":…}` — a canonical tenant and one of the six reversal reasons — or null. */
+export function reverseBodyOf(expectedTenant: string, reasonCode: string): string | null {
+  return isCustomerId(expectedTenant) && isKeyOf(INVOICE_PAYMENT_REVERSAL_REASONS, reasonCode) ? JSON.stringify({ expectedTenant, reasonCode }) : null;
+}
 /** A recording body parsed back, only when it is byte for byte what its builder makes of the values it carries. */
 function sentOf(body: string, rebuild: (parsed: Record<string, unknown>) => string | null): Record<string, unknown> | null {
   try {
@@ -461,6 +481,7 @@ function sentOf(body: string, rebuild: (parsed: Record<string, unknown>) => stri
 const registerSentOf = (body: string) => sentOf(body, (p) => registerBodyOf(p.expectedTenant as string, p.attemptId as string));
 const recordSentOf = (body: string) => sentOf(body, (p) => recordBodyOf(p as unknown as RecordFields));
 const settleSentOf = (body: string) => sentOf(body, (p) => settleBodyOf(p.expectedTenant as string, p.attemptId as string, p.expectedVersion as 1 | 2));
+const reverseSentOf = (body: string) => sentOf(body, (p) => reverseBodyOf(p.expectedTenant as string, p.reasonCode as string));
 
 // ---- strict answer parsers ----
 
@@ -895,6 +916,15 @@ export interface InvoiceIssuingClient {
   paymentProof(storeId: string, invoiceId: string, registrationId: string, attemptId: string, csrf: string): Promise<ProofResult>;
   /** One page of the caller's own payment attempts at `storeId`: page one or the page after a `nextCursor` this client decoded. Never rejects. */
   paymentAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<AttemptsResult>;
+  /** Whether this session may reverse payments at `storeId` now — action-only, target-blind, no recent sign-in asked (voidEligibility's rules). Never rejects. */
+  reversalEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult>;
+  /**
+   * One reversal of `paymentId` on `invoiceId` (M7B-PAYMENTS-P2C): `body` exactly as reverseBodyOf built it, under
+   * `idempotencyKey` (a canonical lowercase UUID v4); never aborted by its caller (no signal) — the module's own timeout ends
+   * only the wait (unknown, responded:false), never the server's work. A body not byte for byte reverseBodyOf's, a bad key
+   * or an id outside its grammar is `not-sent`, nothing sent. One fetch, never a retry. Never rejects.
+   */
+  reversePayment(storeId: string, invoiceId: string, paymentId: string, idempotencyKey: string, body: string, csrf: string): Promise<ReverseResult>;
 }
 
 interface Answer { readonly status: number; readonly body: unknown; readonly header: (name: string) => string | null }
@@ -1287,6 +1317,37 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return paymentRefusal(answer, { write_conflict: 'write-conflict' } as const);
   }
 
+  // ---- reversal (M7B-PAYMENTS-P2C) ----
+
+  async function reversalEligibility(storeId: string, invoiceId: string, csrf: string, signal?: AbortSignal): Promise<EligibilityResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId)) return Object.freeze({ kind: 'denied' }); // nothing is sent
+    const answer = await read(paymentReversalEligibilityPathOf(storeId, invoiceId), csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const allowed = isPlain(answer.body) && hasKeys(answer.body, ['eligibility']) && answer.body.eligibility === 'allowed';
+      return allowed ? Object.freeze({ kind: 'allowed' }) : UNAVAILABLE;
+    }
+    if (answer.status === 403 && refusalOf(answer.body)?.sealed === false) return Object.freeze({ kind: 'denied' });
+    return readRefusal(answer) ?? UNAVAILABLE;
+  }
+
+  async function reversePayment(storeId: string, invoiceId: string, paymentId: string, idempotencyKey: string, body: string, csrf: string): Promise<ReverseResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || !isVoidTarget(paymentId) || reverseSentOf(body) === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    // No caller's signal: only the module's own timeout ends the wait (unknown, responded:false), never the server's work.
+    const answer = await command('POST', paymentReversalPathOf(storeId, invoiceId, paymentId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 200) {
+      const replayed = replayOf(answer);
+      const p = memberOf(answer.body, 'payment', ['id', 'invoiceId', 'status']);
+      if (p !== undefined && p.id === paymentId && p.invoiceId === invoiceId && p.status === 'reversed' && replayed !== null) {
+        return Object.freeze({ kind: 'reversed', replayed });
+      }
+      return ANSWERED; // a 200 this client cannot name (or for another payment or invoice): only the key can say
+    }
+    if (answer.status === 403 && shapes(answer).chain('step_up_required')) return Object.freeze({ kind: 'step-up' });
+    return paymentRefusal(answer, { invalid_state: 'invalid-state', write_conflict: 'write-conflict' } as const);
+  }
+
   async function paymentAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<AttemptsResult> {
     if (!isCustomerId(storeId) || (after !== null && !isAttemptsCursor(after))) return UNAVAILABLE; // nothing is sent
     const answer = await read(`${paymentAttemptsPathOf(storeId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
@@ -1300,7 +1361,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
 
   return Object.freeze({
     getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice,
-    paymentEligibility, registerPayment, paymentProof, recordPayment, settlePayment, paymentAttempts,
+    paymentEligibility, registerPayment, paymentProof, recordPayment, settlePayment, paymentAttempts, reversalEligibility, reversePayment,
   });
 }
 

@@ -14,7 +14,11 @@
 //     barrier on the issued header (both seen waiting) never exceed the Total;
 //   * the reversal (POST …/payments/{paymentId}/reversal): the exact sealed 200 {"payment":{"id","invoiceId","status"}}, its
 //     replay, the sealed 409 invalid_state once reversed, the chain's 403 step_up_required past 10 minutes before any key, a
-//     payment of another invoice or a missing one the 404;
+//     payment of another invoice or a missing one the 404; two reversals of one payment under different keys released
+//     together from the header barrier: one 200, one sealed 409 invalid_state, one reversal and one audit record; the
+//     winner's key resent once its record is aged past retention runs again: the sealed 409 invalid_state, nothing written;
+//     the same key sent while the first waits on the header is the 503 idempotency_unavailable (its record fenced), then the
+//     first's stored 200 replays; a stale expectedTenant the unsealed 409 write_conflict, its key then request_in_progress;
 //   * the void (changed): an unreversed payment is the sealed 409 payments_recorded; after its reversal the void applies; a
 //     void queued behind a record on the issued header answers payments_recorded;
 //   * the read (GET …/payments): exactly { invoice, amounts, paymentStatus, payments, nextCursor } in that order, the amounts
@@ -1483,5 +1487,135 @@ test('IPH-07 (PAY-01 Total 0, PAY-05): two recordings that together exceed the T
     const b = await counts([w.T], [{ key: k, principal: w.mgr.principal }]);
     sealedOf(await ctx.record(s, w.S, z.invoice, JSON.stringify(recordBody(w.T, rz, 1)), { key: k }), 'amount_exceeds_remaining', 'one cent on a Total of 0');
     assert.deepEqual(delta(await counts([w.T], [{ key: k, principal: w.mgr.principal }]), b), COMPLETION_ONLY);
+  });
+});
+
+// ===========================================================================
+// IPH-08: one reversal per payment — concurrent keys, and a key past its retention
+// ===========================================================================
+
+const REVERSE_CALL = 'tmpos_invoice_payment.m7b_invoice_payment_reverse(';
+/** The owner ages a key's record past its lease and its retention, as if IDEMPOTENCY_POLICY.retentionMs had passed. */
+const expireRecord = (key, principal) => owner`update tmpos_internal.idempotency_record
+  set lease_expires_at = pg_catalog.clock_timestamp() - interval '1 second', expires_at = pg_catalog.clock_timestamp() - interval '1 second'
+  where scope = ${scopeOf(key, principal)} returning 1`;
+
+test('IPH-08 (PAY-03, PAY-05, PAY-08): two reversals of one payment under DIFFERENT Idempotency-Keys from two managers, both seen waiting behind the owner\'s lock on the issued header — one the sealed 200, the other the sealed 409 invalid_state; one reversal record and ONE reversal audit record (the winner\'s), two completions; the winner\'s key resent after its record is aged past retention runs again (not a replay) and is the sealed 409 invalid_state, writing no reversal and no audit record', async () => {
+  const w = await world('iph08');
+  await withEntry(async (ctx) => {
+    await ready(ctx, w);
+    const s = await signIn(ctx, w.mgr);
+    const x = await issueOne(ctx, s, w, 'iph08');
+    // Two managers: one actor's commands already queue on its own app_user row (016's standing hold), before the header.
+    const mgr2 = await actor('iph08-mgr2', [storeGrant(w.T, w.S, 'manager')]);
+    const s2 = await signIn(ctx, mgr2);
+    const A = randomUUID();
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
+    const p = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 100))), x.invoice, A, 100, 'cash', 'the payment');
+    const senders = [[s, w.mgr, 'duplicate'], [s2, mgr2, 'wrong_amount']];
+    const keys = [randomUUID(), randomUUID()];
+    const owned = keys.map((key, i) => ({ key, principal: senders[i][1].principal }));
+    const bodies = senders.map(([, , reason]) => JSON.stringify(reverseBody(w.T, reason)));
+    const before = await counts([w.T], owned);
+    const h = await holdHeader(x.invoice);
+    let pending = [];
+    try {
+      pending = keys.map((key, i) => quietly(ctx.reverse(senders[i][0], w.S, x.invoice, p, bodies[i], { key })));
+      await engaged(async () => {
+        const rows = await waitingIn(REVERSE_CALL);
+        const pids = [h.pid, ...rows.map((r) => r.pid)];
+        return rows.length === 2 && rows.every((r) => r.by.length > 0 && r.by.every((q) => pids.includes(q))) && rows.some((r) => r.by.includes(h.pid));
+      }, pending, 'both reversals waiting behind the owner\'s header lock');
+    } finally { await h.release(); await Promise.allSettled(pending); }
+    const replies = await Promise.all(pending);
+    assert.deepEqual(replies.map((r) => r.status).sort(), [200, 409], replies.map(replyNote).join(' | '));
+    const won = replies.findIndex((r) => r.status === 200);
+    reversedOf(replies[won], p, x.invoice, 'the reversal that took the header first');
+    sealedOf(replies[1 - won], 'invalid_state', 'the second of two concurrent reversals');
+    assert.deepEqual(delta(await counts([w.T], owned), before), { ...NOTHING, R: 1, RA: 1, AA: 1, K: 2, C: 2 }, 'one reversal, one audit record, two completions');
+    const rev = await reversalRowOf(p);
+    assert.deepEqual([rev.reason_code, rev.reversed_by], [senders[won][2], senders[won][1].id], 'the winner\'s reversal as stored');
+    const reverses = () => auditOf(p).then((rows) => rows.filter((a) => a.action_id === REVERSE_ACTION).map((a) => a.actor_internal_user_id));
+    assert.deepEqual(await reverses(), [senders[won][1].id], 'one reversal audit record for the payment: the winner\'s');
+    // The winner's key past its retention: the record is overwritten in place and the command runs again — invalid_state.
+    assert.equal((await expireRecord(keys[won], owned[won].principal)).length, 1, 'the winner\'s record aged past its retention');
+    const b1 = await counts([w.T], owned);
+    sealedOf(await ctx.reverse(senders[won][0], w.S, x.invoice, p, bodies[won], { key: keys[won] }), 'invalid_state', 'the winner\'s key resent after its retention');
+    assert.deepEqual(delta(await counts([w.T], owned), b1), NOTHING, 'its record overwritten in place: no reversal, no audit record, no new completion');
+    assert.equal(Number((await owner`select count(*)::int as n from tmpos_invoice_payment.invoice_payment_reversal where payment_id = ${p}`)[0].n), 1, 'still one reversal');
+    assert.deepEqual(await reverses(), [senders[won][1].id], 'still one reversal audit record');
+  });
+});
+
+// ===========================================================================
+// IPH-09..10: the reversal's key — the same key concurrently, and a lease left by a stale tenant
+// ===========================================================================
+
+const ACQUIRE_CALL = 'tmpos_internal.m6_idempotency_acquire(';
+
+test('IPH-09 (PAY-03, PAY-04): the same Idempotency-Key and body sent again while the first reversal waits behind the owner\'s header lock — the first\'s transaction holds its record under the fence, so the second\'s acquire waits on that row and runs out its bound: the 503 service_unavailable (idempotency_unavailable), nothing stored for it; released, the first is the sealed 200 and stored; a later same-key resend replays it (Idempotent-Replayed: true); one reversal, one reversal audit record, one completion', async () => {
+  const w = await world('iph09');
+  await withEntry(async (ctx) => {
+    await ready(ctx, w);
+    const s = await signIn(ctx, w.mgr);
+    const x = await issueOne(ctx, s, w, 'iph09');
+    const A = randomUUID();
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
+    const p = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 100))), x.invoice, A, 100, 'cash', 'the payment');
+    const key = randomUUID();
+    const owned = [{ key, principal: w.mgr.principal }];
+    const body = JSON.stringify(reverseBody(w.T, 'duplicate'));
+    const before = await counts([w.T], owned);
+    const h = await holdHeader(x.invoice);
+    let first = null;
+    let second = null;
+    try {
+      first = quietly(ctx.reverse(s, w.S, x.invoice, p, body, { key }));
+      const [held] = await engaged(async () => {
+        const rows = await waitingIn(REVERSE_CALL);
+        return rows.length === 1 && rows[0].by.includes(h.pid) ? rows : null;
+      }, [first], 'the first reversal waiting on the owner\'s header lock');
+      second = quietly(ctx.reverse(s, w.S, x.invoice, p, body, { key }));
+      await engaged(async () => {
+        const rows = await waitingIn(ACQUIRE_CALL);
+        return rows.length === 1 && rows[0].by.includes(held.pid);
+      }, [first, second], 'the second\'s acquire waiting on the first\'s fenced record');
+      const r2 = await second;
+      assertRefusal(r2, 503, 'service_unavailable', 'the same key while the first holds its record');
+      assert.equal(ctx.reason(r2), 'idempotency_unavailable', 'its acquire ran out its lock bound');
+    } finally { await h.release(); await Promise.allSettled([first, second].filter(Boolean)); }
+    const r1 = await first;
+    reversedOf(r1, p, x.invoice, 'the first, released');
+    assert.deepEqual(delta(await counts([w.T], owned), before), ONE_REVERSAL, 'one reversal, one audit record, one completion');
+    const replay = await ctx.reverse(s, w.S, x.invoice, p, body, { key });
+    reversedOf(replay, p, x.invoice, 'the later same-key resend', { replayed: true });
+    assert.equal(replay.body, r1.body, 'the stored answer');
+    assert.deepEqual(delta(await counts([w.T], owned), before), ONE_REVERSAL, 'the replay wrote nothing');
+    assert.equal((await auditOf(p)).filter((a) => a.action_id === REVERSE_ACTION).length, 1, 'one reversal audit record');
+  });
+});
+
+test('IPH-10 (PAY-02, PAY-03): a reversal with a stale expectedTenant is the unsealed 409 write_conflict with a requestId — rolled back, nothing stored, the lease held; the same key resent within the lease is the 409 request_in_progress, writing nothing; the payment stays unreversed', async () => {
+  const w = await world('iph10');
+  await withEntry(async (ctx) => {
+    await ready(ctx, w);
+    const s = await signIn(ctx, w.mgr);
+    const x = await issueOne(ctx, s, w, 'iph10');
+    const A = randomUUID();
+    const ra = await prepare(ctx, s, w.T, w.S, x.invoice, A);
+    const p = recordedOf(await ctx.record(s, w.S, x.invoice, JSON.stringify(recordBody(w.T, ra, 100))), x.invoice, A, 100, 'cash', 'the payment');
+    const other = await newTenant('iph10-other');
+    const key = randomUUID();
+    const owned = [{ key, principal: w.mgr.principal }];
+    const body = JSON.stringify(reverseBody(other, 'duplicate'));
+    let before = await counts([w.T], owned);
+    assertRefusal(await ctx.reverse(s, w.S, x.invoice, p, body, { key }), 409, 'write_conflict', 'a stale expectedTenant');
+    assert.deepEqual(delta(await counts([w.T], owned), before), LEASE_ONLY, 'rolled back, the lease kept');
+    assert.equal(await leaseOpen(key, w.mgr.principal), true, 'the lease held, nothing stored');
+    before = await counts([w.T], owned);
+    assertRefusal(await ctx.reverse(s, w.S, x.invoice, p, body, { key }), 409, 'request_in_progress', 'the same key within the lease');
+    assert.deepEqual(delta(await counts([w.T], owned), before), NOTHING, 'the retry wrote nothing');
+    assert.equal(await leaseOpen(key, w.mgr.principal), true, 'still the open lease');
+    assert.equal(await reversalRowOf(p), null, 'the payment unreversed');
   });
 });

@@ -20,6 +20,7 @@ import {
   PAYMENT_ATTEMPTS_PAGE_SIZE, PAYMENT_ATTEMPT_VERSIONS, paymentAmountOf, paymentAttemptsPathOf, paymentEligibilityPathOf, paymentProofPathOf, paymentRegistrationsPathOf,
   paymentSettlementPathOf, recordBodyOf, registerBodyOf, settleBodyOf, type RecordFields,
 } from './invoiceIssuingClient';
+import { paymentReversalEligibilityPathOf, paymentReversalPathOf, reverseBodyOf } from './invoiceIssuingClient';
 import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
 import { invoiceTaxOf, issueAmountsOf } from '../../server/runtime/invoiceIssuing';
@@ -27,6 +28,7 @@ import { INVOICE_VOID_REASON_CODES, INVOICE_VOID_REASON_LABELS } from '../../ser
 import {
   INVOICE_PAYMENTS_PAGE_SIZE, INVOICE_PAYMENT_METHODS as SERVER_PAYMENT_METHODS, INVOICE_PAYMENT_METHOD_LABELS, INVOICE_PAYMENT_REVERSAL_REASON_CODES, INVOICE_PAYMENT_REVERSAL_REASON_LABELS,
   INVOICE_PAYMENT_STATUSES as SERVER_PAYMENT_STATUSES, INVOICE_PAYMENT_ATTEMPTS_PAGE_SIZE, INVOICE_PAYMENT_ATTEMPT_STATES,
+  INVOICE_PAYMENT_REVERSAL_ELIGIBILITY_PATH, INVOICE_PAYMENT_REVERSE_PATH,
 } from '../../server/runtime/invoicePayments';
 
 const cp = (code: number): string => String.fromCodePoint(code);
@@ -1550,4 +1552,120 @@ test('IIC-45. R2: the card method records as "external_card_terminal"; the recor
   for (const [i, reply] of [new Response('busy', { status: 422 }), json(422, { error: 'idempotency_key_reused' }), json(422, { x: 1 })].entries()) {
     assert.deepEqual(await scripted(reply).client.registerPayment(STORE, INVOICE, KEY, REGISTER_BODY, CSRF), { kind: 'key-reused' }, `register 422 row ${i}`);
   }
+});
+
+// ---- M7B-PAYMENTS-P2C: the reversal ----
+
+const PAYMENT = uuid(0x9a1);
+const REVERSE_BODY = reverseBodyOf(TENANT, 'wrong_amount') as string;
+const REVERSED = (overrides: Record<string, unknown> = {}) => ({ payment: { id: PAYMENT, invoiceId: INVOICE, status: 'reversed', ...overrides } });
+
+test('IIC-46. the reversal paths are the server\'s two templates filled in: payment-reversal-eligibility under the invoice, reversal under the payment', () => {
+  const fill = (template: string, ids: Record<string, string>): string => template.replace(/\{(\w+)\}/g, (_m, name: string) => ids[name]);
+  assert.equal(paymentReversalEligibilityPathOf(STORE, INVOICE), `${BASE}/payment-reversal-eligibility`);
+  assert.equal(paymentReversalEligibilityPathOf(STORE, INVOICE), fill(INVOICE_PAYMENT_REVERSAL_ELIGIBILITY_PATH, { storeId: STORE, id: INVOICE }));
+  assert.equal(paymentReversalPathOf(STORE, INVOICE, PAYMENT), `${BASE}/payments/${PAYMENT}/reversal`);
+  assert.equal(paymentReversalPathOf(STORE, INVOICE, PAYMENT), fill(INVOICE_PAYMENT_REVERSE_PATH, { storeId: STORE, id: INVOICE, paymentId: PAYMENT }));
+});
+
+test('IIC-47. the reversal eligibility: allowed ONLY for a 200 exactly { eligibility: "allowed" }; any chain 403 denied; 401 signed-out, 429 its wait, a 400 and everything else unavailable; one GET; a bad id sends nothing', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [json(200, { eligibility: 'allowed' }), { kind: 'allowed' }], [json(200, { eligibility: 'allowed', x: 1 }), { kind: 'unavailable' }], [json(200, { eligibility: 'denied' }), { kind: 'unavailable' }],
+    [refused(403, 'forbidden'), { kind: 'denied' }], [refused(403, 'step_up_required'), { kind: 'denied' }], [sealed(403, 'forbidden'), { kind: 'unavailable' }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '4' }), { kind: 'rate-limited', retryAfterSeconds: 4 }],
+    [refused(400, 'invalid_request'), { kind: 'unavailable' }], [refused(503, 'service_unavailable'), { kind: 'unavailable' }], [network(), { kind: 'unavailable' }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.reversalEligibility(STORE, INVOICE, CSRF), outcome, name);
+    assert.equal(calls.length, 1);
+    assert.equal(`${calls[0].init.method} ${calls[0].url}`, `GET ${BASE}/payment-reversal-eligibility`);
+  }
+  const { calls, client } = scripted();
+  assert.deepEqual(await client.reversalEligibility('not-a-store', INVOICE, CSRF), { kind: 'denied' });
+  assert.deepEqual(await client.reversalEligibility(STORE, INVOICE.toUpperCase(), CSRF), { kind: 'denied' });
+  assert.equal(calls.length, 0);
+});
+
+test('IIC-48. the reversal body is built ONCE: exactly {"expectedTenant","reasonCode"} for each of the server\'s six reasons, in its order; any other code or a non-canonical tenant is null; a body not byte for byte the builder\'s, a bad id or key sends NOTHING (not-sent)', async () => {
+  assert.deepEqual(Object.keys(INVOICE_PAYMENT_REVERSAL_REASONS), [...INVOICE_PAYMENT_REVERSAL_REASON_CODES]);
+  for (const code of INVOICE_PAYMENT_REVERSAL_REASON_CODES) {
+    assert.equal(reverseBodyOf(TENANT, code), `{"expectedTenant":"${TENANT}","reasonCode":"${code}"}`, code);
+  }
+  for (const code of ['', 'paid', 'Other', 'issued_in_error', 'toString', '__proto__', ' other']) assert.equal(reverseBodyOf(TENANT, code), null, `code ${JSON.stringify(code)}`);
+  for (const tenant of ['', TENANT.toUpperCase(), `${TENANT} `, 'tenant']) assert.equal(reverseBodyOf(tenant, 'other'), null, `tenant ${JSON.stringify(tenant)}`);
+  const BAD_KEY_V1 = KEY.replace(/-4/, '-1');
+  const rows: Array<[string, string, string, string, string]> = [
+    ['not-a-store', INVOICE, PAYMENT, KEY, REVERSE_BODY], [STORE, 'x', PAYMENT, KEY, REVERSE_BODY], [STORE, INVOICE, 'x', KEY, REVERSE_BODY],
+    [STORE, INVOICE, PAYMENT.toUpperCase(), KEY, REVERSE_BODY], [STORE, INVOICE, PAYMENT, KEY.toUpperCase(), REVERSE_BODY], [STORE, INVOICE, PAYMENT, BAD_KEY_V1, REVERSE_BODY],
+    [STORE, INVOICE, PAYMENT, KEY, REVERSE_BODY.replace(':', ': ')], [STORE, INVOICE, PAYMENT, KEY, JSON.stringify({ reasonCode: 'wrong_amount', expectedTenant: TENANT })],
+    [STORE, INVOICE, PAYMENT, KEY, JSON.stringify({ expectedTenant: TENANT, reasonCode: 'wrong_amount', x: 1 })],
+    [STORE, INVOICE, PAYMENT, KEY, voidBodyOf(TENANT, 'issued_in_error') as string], [STORE, INVOICE, PAYMENT, KEY, ''],
+  ];
+  for (const [i, [store, invoice, payment, key, body]] of rows.entries()) {
+    const { calls, client } = scripted();
+    assert.deepEqual(await client.reversePayment(store, invoice, payment, key, body, CSRF), { kind: 'not-sent' }, `row ${i}`);
+    assert.equal(calls.length, 0, `row ${i} sent nothing`);
+  }
+});
+
+test('IIC-49. a reversal is ONE fetch: POST to the payment\'s reversal path with exactly the five command headers (one Idempotency-Key, the session CSRF token) and the caller\'s exact bytes; same-origin, credentialed, uncached, never redirected; the method takes no AbortSignal', async () => {
+  const { calls, client } = scripted(refused(503, 'service_unavailable'));
+  await client.reversePayment(STORE, INVOICE, PAYMENT, KEY, REVERSE_BODY, CSRF);
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  assert.equal(`${call.init.method} ${call.url}`, `POST ${BASE}/payments/${PAYMENT}/reversal`);
+  const COMMAND = [['accept', 'application/json'], ['content-type', 'application/json'], ['idempotency-key', KEY], ['x-tmpos-csrf', '1'], ['x-tmpos-session-csrf', CSRF]];
+  // R2 U1: the key and the token are compared, never printed.
+  assert.ok(JSON.stringify([...headersOf(call).entries()]) === JSON.stringify(COMMAND), 'exactly the five command headers');
+  assert.ok(call.init.body === REVERSE_BODY && REVERSE_BODY === `{"expectedTenant":"${TENANT}","reasonCode":"wrong_amount"}`, 'the caller\'s exact bytes');
+  assert.equal(call.init.credentials, 'include');
+  assert.equal(call.init.mode, 'same-origin');
+  assert.equal(call.init.cache, 'no-store');
+  assert.equal(call.init.redirect, 'error');
+  assert.equal(call.init.referrerPolicy, 'no-referrer');
+  assert.ok(call.init.signal instanceof AbortSignal); // the module's own (its timeout), never a caller's
+  assert.equal(client.reversePayment.length, 6);
+  assert.equal(client.reversalEligibility.length, 4);
+});
+
+test('IIC-50. every reversal answer is ONE outcome by status AND word AND envelope: reversed ONLY for the exact 200 naming the payment and invoice asked (replay header absent or "true"); sealed invalid_state/write_conflict; step_up_required step-up; the chain\'s own; a 503, a timeout, no answer, an unnamed word or any other 200 unknown with its responded flag; never a retry', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [json(200, REVERSED()), { kind: 'reversed', replayed: false }],
+    [json(200, REVERSED(), { 'idempotent-replayed': 'true' }), { kind: 'reversed', replayed: true }],
+    [json(200, REVERSED(), { 'idempotent-replayed': 'yes' }), { kind: 'unknown', responded: true }],
+    [json(200, REVERSED({ id: uuid(0x9a2) })), { kind: 'unknown', responded: true }],
+    [json(200, REVERSED({ invoiceId: uuid(0x1a2) })), { kind: 'unknown', responded: true }],
+    [json(200, REVERSED({ amountCents: 100 })), { kind: 'unknown', responded: true }],
+    [json(200, { ...REVERSED(), requestId: 'r' }), { kind: 'unknown', responded: true }],
+    [json(200, { payment: { id: PAYMENT, invoiceId: INVOICE } }), { kind: 'unknown', responded: true }],
+    [json(200, REVERSED({ status: 'active' })), { kind: 'unknown', responded: true }],
+    [new Response('ok', { status: 200 }), { kind: 'unknown', responded: true }],
+    [json(201, REVERSED()), { kind: 'unknown', responded: true }],
+    [sealed(409, 'invalid_state'), { kind: 'invalid-state' }], [sealed(409, 'write_conflict'), { kind: 'write-conflict' }],
+    [refused(409, 'invalid_state'), { kind: 'unknown', responded: true }], [refused(409, 'write_conflict'), { kind: 'tenant-conflict' }],
+    [refused(409, 'request_in_progress'), { kind: 'in-progress' }], [sealed(409, 'already_recorded'), { kind: 'unknown', responded: true }],
+    [refused(404, 'not_found'), { kind: 'not-found' }], [sealed(404, 'not_found'), { kind: 'unknown', responded: true }],
+    [refused(403, 'step_up_required'), { kind: 'step-up' }], [refused(403, 'forbidden'), { kind: 'denied' }], [sealed(403, 'step_up_required'), { kind: 'unknown', responded: true }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [refused(422, 'idempotency_key_reused'), { kind: 'key-reused' }],
+    [refused(400, 'invalid_request'), { kind: 'invalid' }], [refused(413, 'content_too_large'), { kind: 'invalid' }],
+    [refused(503, 'service_unavailable'), { kind: 'unknown', responded: true }], [refused(500, 'internal_error'), { kind: 'unknown', responded: true }],
+    [network(), { kind: 'unknown', responded: false }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.reversePayment(STORE, INVOICE, PAYMENT, KEY, REVERSE_BODY, CSRF), outcome, name);
+    assert.equal(calls.length, 1, `${name}: one fetch`);
+  }
+  // A timeout is no answer too (the outcome is unknown, never "cancelled"), and is not retried.
+  let hung = 0;
+  const hanging = createInvoiceIssuingClient({ timeoutMs: 5, fetch: (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    hung += 1;
+    return new Promise<Response>((_resolve, reject) => { init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))); });
+  }) as typeof globalThis.fetch });
+  assert.deepEqual(await hanging.reversePayment(STORE, INVOICE, PAYMENT, KEY, REVERSE_BODY, CSRF), { kind: 'unknown', responded: false });
+  assert.equal(hung, 1);
 });

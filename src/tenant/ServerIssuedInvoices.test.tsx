@@ -16,14 +16,15 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
-import { INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
+import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, REVERSE_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
+import { INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import { RECORD_ID_TEXT } from './ServerInvoiceDrafts';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
 import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import type { ShopIdentity } from './ServerCustomerLevels';
 import { createPaymentHoldStore, judgePayment, type HeldPayment, type PaymentHoldStore } from './invoicePaymentHold';
+import { createReversalHoldStore, REVERSAL_NOTE_TEXT, seeReversal, type ReversalHoldStore } from './invoiceReversalHold';
 import { idEndingText, pickerWaitText } from './ServerCustomerPicker';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -507,7 +508,7 @@ function seeded() {
   return server;
 }
 
-interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
+interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; revHolds: ReversalHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
 function rig(server: Server): Rig {
   const keys: string[] = [];
   const reauth: Array<string | null> = [];
@@ -519,15 +520,16 @@ function rig(server: Server): Rig {
   // Each rig its own void hold on the rig's clocks (never the shop's singleton): a new store and a remount is a page load.
   const holds = createVoidHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const payHolds = createPaymentHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
+  const revHolds = createReversalHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const identity: ShopIdentity = {
     idToken: async (uid) => tokens[uid] ?? null,
     reauthMethod: () => 'password',
     reauthenticate: async (uid, password) => { reauth.push(password); return password === 'correct horse' ? tokens[uid] ?? null : null; },
   };
   return {
-    keys, clock, reauth, holds, payHolds,
+    keys, clock, reauth, holds, payHolds, revHolds,
     props: (over = {}) => ({
-      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds,
+      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds, reversalHolds: revHolds,
       newKey: () => { const k = ['5e1f0000', '1d2f', '4a6b', '9c8d', String(keys.length + 1).padStart(12, '0')].join('-'); keys.push(k); return k; },
       ...over,
     }),
@@ -1220,7 +1222,7 @@ describe('Issued invoices — an unconfirmed settings write (M7B-INVOICES-ISSUE-
     expect(document.body.innerHTML).not.toContain('s'.repeat(40));
     expect(document.body.innerHTML).not.toContain(r.keys[0]);
     expect(document.body.innerHTML).not.toContain('expectedVersion');
-    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts']) { // the held void (VOID-P2) and payment (P2B) attempts too
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts']) { // the held void (VOID-P2) and payment (P2B) attempts too
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
     }
@@ -3210,9 +3212,10 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
         await waitFor(() => expect(server.payRequests('payment-eligibility').filter((x) => x.url.includes(made[2].id)).length).toBeGreaterThan(0));
         await settle();
         // In order (R1 T10): the fresh check, then ONE session check the two reads started together share, the payments GET
-        // and the payment eligibility GET.
+        // and the payment eligibility GET — and (M7B-PAYMENTS-P2C R1) the open's ONE reversal eligibility GET after it.
         expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${TENANT_SESSION_PATHS.current}`,
-          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payments`, `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-eligibility`]);
+          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payments`, `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-eligibility`,
+          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-reversal-eligibility`]);
       }
       server.voidDenied.delete('uid-a');
       await closeAll();
@@ -4039,7 +4042,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(replace).not.toHaveBeenCalled();
     for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
     expect(window.location.href).toBe(href);
-    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts']) {
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts']) {
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source, file).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
     }
@@ -4665,7 +4668,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     // Fix round 3 supersession (was: the newer read was a review, which R3-1a now holds back during the renewal): the newer
     // detail read is the post-void re-read of this open's attempt, which no hold stops. Over the stub capability.
     const send = vi.fn(async (press: VoidPress): Promise<VoidSendOutcome | null> => { press.held('k1'); return { kind: 'step-up', method: 'password' }; });
-    const h = await stubbed(send, async () => ({ kind: 'renewed' }));
+    const h = await stubbed(send, async () => ({ kind: 'renewed', gen: 1 }));
     await click('issued-view-void');
     await waitFor(() => expect(box()).not.toBeNull());
     await pressWith('wrong_customer');
@@ -4784,7 +4787,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
   });
 
   it('SII-137. Review B1 R3-1a: the renewal itself holds the action — signed in again with NO generation change, its detail and eligibility reads out, A closed: "Void invoice…" is held (checking) and reviews nothing until both reads are applied; then it comes back', async () => {
-    const h = await stubbed(async () => ({ kind: 'step-up', method: 'password' }), async () => ({ kind: 'renewed' }));
+    const h = await stubbed(async () => ({ kind: 'step-up', method: 'password' }), async () => ({ kind: 'renewed', gen: 1 }));
     await click('issued-view-void');
     await waitFor(() => expect(box()).not.toBeNull());
     await pressWith('wrong_customer');
@@ -4826,7 +4829,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
   it('SII-139. Review B1 R4-1: a renewal whose eligibility read answers nothing (aborted, failed or superseded) leaves no Void action in this open — absent, not held for good on the older generation\'s "allowed" and never said as not allowed — and the confirmation says it could not check; nothing more is sent', async () => {
     const send = vi.fn(async (): Promise<VoidSendOutcome | null> => ({ kind: 'step-up', method: 'password' }));
     let h!: Awaited<ReturnType<typeof stubbed>>;
-    h = await stubbed(send, async () => { h.ctl.generation = 2; return { kind: 'renewed' }; }); // the renewal's new generation
+    h = await stubbed(send, async () => { h.ctl.generation = 2; return { kind: 'renewed', gen: 2 }; }); // the renewal's new generation
     await click('issued-view-void');
     await waitFor(() => expect(box()).not.toBeNull());
     await pressWith('wrong_customer');
@@ -5386,7 +5389,8 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       await settle();
       const sent = server.sent.slice(mark).filter((x) => !x.url.startsWith('/api/v1/session')).map((x) => `${x.method} ${x.url}`);
       // M7B-PAYMENTS-P2B: an issued invoice adds its ONE recording eligibility (4); a voided one sends none (3).
-      const recordElig = n === 3 ? [`GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/payment-eligibility')}`] : [];
+      // M7B-PAYMENTS-P2C R1: and its ONE reversal eligibility (5 issued, 3 voided).
+      const recordElig = n === 3 ? [`GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/payment-eligibility')}`, `GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/payment-reversal-eligibility')}`] : [];
       expect(sent.sort(), `invoice ${n}`).toEqual([`GET ${STORES_PATH}/${STORE_1}/invoices/${made[n - 1].id}`, `GET ${paymentsUrl(made[n - 1].id)}`, `GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/void-eligibility')}`, ...recordElig].sort());
       const reads = server.paymentReads().length;
       await focusEvents();
@@ -6099,6 +6103,90 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect((server.payments.get(made[2].id) ?? []).length).toBe(0);
     expect((attemptsReads(server)).length).toBe(1);
     await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull()); // a new attempt may start
+  });
+
+  it('SII-269. FIX2 item 3 (R8): while a reversal of one of the invoice\'s payments is unresolved, its lookup rows\' Withdraw holds back (said) and sends nothing; once that attempt is gone it settles as before', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.record.push(404);
+    await recordWith('4.00');
+    await waitFor(() => expect(tid('issued-payments-attempts')).toHaveAttribute('data-phase', 'ready'));
+    const rev = {
+      key: 'k-rev', body: '{"x":1}', storeId: STORE_1, storeLabel: 'Store 1', invoiceId: made[2].id, number: 3, paymentId: uuid(0x9009), amountCents: 100,
+      reasonCode: 'other', csrf: 'csrf-live', sentAt: performance.now(), sentWall: Date.now(), state: 'unresolved', note: '', refusal: null, attributed: false,
+      seen: null, retryable: false,
+    } as const;
+    await act(async () => { r.revHolds.put('uid-a', rev); });
+    await waitFor(() => expect(tid('issued-payments-withdraw')).toHaveAttribute('aria-disabled', 'true'));
+    expect(tid('issued-payments-withdraw').getAttribute('aria-describedby')).toContain('issued-payments-rows-reversing');
+    expect(document.getElementById('issued-payments-rows-reversing')).toHaveTextContent(REVERSE_TEXT.pending);
+    const mark = server.sent.length;
+    await click('issued-payments-withdraw');
+    await settle();
+    expect(apart(server, mark), 'nothing sent').toEqual([]);
+    await act(async () => { r.revHolds.remove('uid-a', 'k-rev'); });
+    await waitFor(() => expect(tid('issued-payments-withdraw')).toHaveAttribute('aria-disabled', 'false'));
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(flow()).toBe('Attempt withdrawn. No payment was recorded.'));
+  });
+
+  /** A live reversal of one of invoice 3's payments (P2C R8), put straight into the hold store. */
+  const liveRev = (made: Issued[]) => ({
+    key: 'k-rev', body: '{"x":1}', storeId: STORE_1, storeLabel: 'Store 1', invoiceId: made[2].id, number: 3, paymentId: uuid(0x9009), amountCents: 100,
+    reasonCode: 'other', csrf: 'csrf-live', sentAt: performance.now(), sentWall: Date.now(), state: 'unresolved', note: '', refusal: null, attributed: false,
+    seen: null, retryable: false,
+  } as const);
+
+  it('SII-276. FIX3 E5: a lookup row\'s Withdraw pressed BEFORE a reversal on its invoice went live, its session check out meanwhile, is refused after that check — no settlement is sent', async () => {
+    const { server, made, r } = await setup();
+    await openRecordable(3);
+    server.payScripts.record.push(404);
+    await recordWith('4.00');
+    await waitFor(() => expect(tid('issued-payments-attempts')).toHaveAttribute('data-phase', 'ready'));
+    expect(tid('issued-payments-withdraw')).toHaveAttribute('aria-disabled', 'false');
+    const mark = server.sent.length;
+    server.hold.current = 1;
+    await click('issued-payments-withdraw');
+    await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+    await act(async () => { r.revHolds.put('uid-a', liveRev(made)); });
+    await act(async () => { server.held.shift()!.release(); });
+    await settle();
+    expect(apart(server, mark), 'no settlement sent').toEqual([]);
+    expect(posts(server, 'payment-settlement')).toHaveLength(0);
+  });
+
+  it.each(['pressed while the reversal is live', 'pressed before it went live (its session check out)'] as const)('SII-277. FIX3 E5: a listed recorded attempt\'s Confirm on an invoice with a live reversal, %s, sends nothing (aria-disabled, said)', async (arm) => {
+    const { server, made, r, view } = await setup();
+    await openRecordable(3);
+    server.payScripts.record.push('lose');
+    await recordWith('3.00');
+    await waitFor(() => expect(heldA(r)?.state).toBe('unresolved'));
+    view.unmount();
+    const fresh = createPaymentHoldStore({ now: () => r.clock.mono, wallNow: () => r.clock.wall });
+    render(<ServerIssuedInvoices {...r.props({ paymentHolds: fresh })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await openRecordable(3);
+    await recordWith('3.00');
+    await waitFor(() => expect(tid('issued-payments-attempts')).toHaveAttribute('data-phase', 'ready'));
+    expect(screen.getByTestId('issued-payments-attempt')).toHaveAttribute('data-attempt-state', 'recorded');
+    const mark = server.sent.length;
+    if (arm === 'pressed while the reversal is live') {
+      await act(async () => { r.revHolds.put('uid-a', liveRev(made)); });
+      await waitFor(() => expect(tid('issued-payments-attempt-confirm')).toHaveAttribute('aria-disabled', 'true'));
+      expect(tid('issued-payments-attempt-confirm').getAttribute('aria-describedby')).toContain('issued-payments-rows-reversing');
+      expect(document.getElementById('issued-payments-rows-reversing')).toHaveTextContent(REVERSE_TEXT.pending);
+      await click('issued-payments-attempt-confirm');
+    } else {
+      server.hold.current = 1;
+      await click('issued-payments-attempt-confirm');
+      await waitFor(() => expect(server.held.map((h) => h.kind)).toEqual(['current']));
+      await act(async () => { r.revHolds.put('uid-a', liveRev(made)); });
+      await act(async () => { server.held.shift()!.release(); });
+    }
+    await settle();
+    expect(apart(server, mark), 'nothing sent').toEqual([]);
+    expect(server.regs.map((g) => g.state)).not.toContain('confirmed');
   });
 
   it('SII-171. a page load after a lost record answer (a new hold, a remount): Record → the register\'s sealed write_conflict says so, the lookup finds the recorded attempt, and its deliberate Confirm (settle v2) releases it; payments page one once more; still ONE payment', async () => {
@@ -8003,5 +8091,1326 @@ describe('Issued invoices — recording a payment and recovering it (M7B-PAYMENT
     expect(screen.queryByTestId('issued-payments-record')).toBeNull();
     expect(chain(), 'never a register, proof or record after the reload').toBe(before);
     expect(posts(server, 'payment-settlement').length).toBe(1);
+  });
+});
+
+describe('Issued invoices — reversing a payment: smoke (M7B-PAYMENTS-P2C)', () => {
+  const T = (n: number) => `2026-10-17T09:00:${String(n % 60).padStart(2, '0')}.000001Z`;
+  const pay = (n: number, over: Partial<PaymentWire> = {}): PaymentWire => ({ id: uuid(0x9000 + n), attemptId: uuid(0xa000 + n), amountCents: 100, method: 'cash', recordedAt: T(n), reversal: null, ...over });
+  const paymentsUrl = (invoiceId: string) => `${STORES_PATH}/${STORE_1}/invoices/${invoiceId}/payments`;
+  const payPhase = () => screen.queryByTestId('issued-payments-state')?.getAttribute('data-phase') ?? 'none';
+  const paymentsReady = () => waitFor(() => expect(payPhase()).toBe('ready'));
+  const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  /** The fake's reversal routes, in front of the shared fake: the eligibility answers `allowed.value`; a POST reverses the payment. */
+  async function setup(over: (n: number) => Partial<Issued> = () => ({})) {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 3, over);
+    const r = rig(server);
+    const allowed = { value: true };
+    const eligReads: string[] = [];
+    const posts: Array<{ url: string; body: string; key: string | null }> = [];
+    const routed = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      if ((init.method ?? 'GET') === 'GET' && url.endsWith('/payment-reversal-eligibility')) {
+        eligReads.push(url);
+        return allowed.value ? reply(200, { eligibility: 'allowed' }) : reply(403, { error: 'forbidden', requestId: 'r' });
+      }
+      const target = /\/invoices\/([0-9a-f-]{36})\/payments\/([0-9a-f-]{36})\/reversal$/.exec(url);
+      if (init.method === 'POST' && target !== null) {
+        posts.push({ url, body: String(init.body), key: new Headers(init.headers).get('idempotency-key') });
+        const [, invoiceId, paymentId] = target;
+        const reasonCode = (JSON.parse(String(init.body)) as { reasonCode: string }).reasonCode;
+        server.payments.set(invoiceId, (server.payments.get(invoiceId) ?? []).map((p) => (p.id === paymentId ? { ...p, reversal: { reversedAt: '2026-10-18T10:00:00.000001Z', reasonCode } } : p)));
+        return reply(200, { payment: { id: paymentId, invoiceId, status: 'reversed' } });
+      }
+      return server.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    render(<ServerIssuedInvoices {...r.props({ issuing: createInvoiceIssuingClient({ fetch: routed }) })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    return { server, made, r, allowed, eligReads, posts };
+  }
+  async function open(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await paymentsReady();
+  }
+  async function close() {
+    await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+  }
+  async function review() {
+    await waitFor(() => expect(tid('issued-payments-reverse')).toBeInTheDocument());
+    await user().click(tid('issued-payments-reverse'));
+    await waitFor(() => expect(tid('issued-reverse-confirm')).toBeInTheDocument());
+  }
+
+  it('SII-231. P2C R1: "Reverse payment" shows in an unreversed history row only once the reversal eligibility read answered exactly allowed — never on a reversed row; none when that read is refused (403); a voided invoice sends no reversal eligibility read and shows none', async () => {
+    const voidedAt = '2026-10-18T11:00:00.000001Z';
+    const { server, made, allowed, eligReads } = await setup((n) => (n === 1 ? { void: { voidedAt, reasonCode: 'other' } } : {}));
+    server.payments.set(made[1].id, [pay(1), pay(2, { amountCents: 50, reversal: { reversedAt: '2026-10-18T10:00:00.000001Z', reasonCode: 'wrong_amount' } })]);
+    await open(2);
+    await waitFor(() => expect(screen.getAllByTestId('issued-payments-reverse')).toHaveLength(1));
+    expect(tid('issued-payments-reverse')).toHaveAttribute('data-id', uuid(0x9001));
+    expect(tid('issued-payments-reverse').closest('[data-testid="issued-payments-item"]')).toHaveAttribute('data-id', uuid(0x9001));
+    expect(tid('issued-payments-reverse')).toHaveTextContent(/^Reverse payment$/);
+    expect(eligReads.filter((u) => u.includes(made[1].id))).toHaveLength(1);
+    await close();
+    allowed.value = false;
+    await open(2);
+    await waitFor(() => expect(eligReads.filter((u) => u.includes(made[1].id))).toHaveLength(2));
+    await settle();
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    await close();
+    allowed.value = true;
+    await open(1);
+    await settle();
+    expect(eligReads.filter((u) => u.includes(made[0].id))).toEqual([]);
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+  });
+
+  it('SII-232. P2C R2-R4/R6 happy path: the review re-reads the invoice, the eligibility and the history before the confirmation opens on that payment (Keep payment first); an empty press says "Choose a reason first." and sends nothing; with a reason ONE press is ONE POST under ONE key with exactly {expectedTenant, reasonCode}; then "Payment reversed." and the history read again shows the row Reversed, its control gone', async () => {
+    const { server, made, posts, eligReads, r } = await setup();
+    server.payments.set(made[1].id, [pay(1, { amountCents: 150 })]);
+    await open(2);
+    const reads = server.paymentReads().length;
+    await review();
+    expect(server.paymentReads().length, 'the review read the history again').toBeGreaterThan(reads);
+    expect(eligReads.filter((u) => u.includes(made[1].id)), 'and the eligibility').toHaveLength(2);
+    expect(tid('issued-reverse-confirm')).toHaveAttribute('role', 'alertdialog');
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-reverse-keep')));
+    expect(tid('issued-reverse-keep')).toHaveTextContent('Keep payment');
+    expect(tid('issued-reverse-amount')).toHaveTextContent('$1.50');
+    expect(tid('issued-reverse-consequence')).toHaveTextContent('Reversing records that this payment was entered in error. It does not return any money.');
+    expect(tid('issued-reverse-reasons').querySelectorAll('input[type="radio"]')).toHaveLength(6);
+    expect(tid('issued-reverse-confirm').textContent).not.toMatch(/refund/i);
+    await user().click(tid('issued-reverse-send'));
+    expect(tid('issued-reverse-reason-error')).toHaveTextContent('Choose a reason first.');
+    expect(document.activeElement).toBe(tid('issued-reverse-reason-recorded_in_error'));
+    expect(posts).toHaveLength(0);
+    await user().click(tid('issued-reverse-reason-wrong_amount'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe(`${paymentsUrl(made[1].id)}/${uuid(0x9001)}/reversal`);
+    expect(JSON.parse(posts[0].body)).toEqual({ expectedTenant: TENANT_A, reasonCode: 'wrong_amount' });
+    expect(posts[0].key).toBe(r.keys[0]);
+    await waitFor(() => expect(tid('issued-reverse-status')).toHaveTextContent('Payment reversed.'));
+    await waitFor(() => expect(tid('issued-payments-reversed')).toHaveTextContent('Reversed'));
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    expect(r.revHolds.get('uid-a')?.state).toBe('reversed');
+    expect(posts).toHaveLength(1);
+  });
+
+  it('SII-233. P2C R3: Keep payment closes the confirmation and sends nothing — focus back on the row\'s "Reverse payment"', async () => {
+    const { server, made, posts, r } = await setup();
+    server.payments.set(made[1].id, [pay(1)]);
+    await open(2);
+    await review();
+    await user().click(tid('issued-reverse-reason-duplicate'));
+    await user().click(tid('issued-reverse-keep'));
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await settle();
+    expect(posts).toEqual([]);
+    expect(r.keys).toEqual([]);
+    expect(r.revHolds.get('uid-a')).toBeUndefined();
+    expect(document.activeElement).toBe(tid('issued-payments-reverse'));
+  });
+});
+
+describe('Issued invoices — reversing a payment: boundaries, review, outcomes, recovery and coordination (M7B-PAYMENTS-P2C)', () => {
+  const T = (n: number) => `2026-10-17T09:${String(Math.floor(n / 60) % 60).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}.000001Z`;
+  const pay = (n: number, over: Partial<PaymentWire> = {}): PaymentWire => ({ id: uuid(0x9000 + n), attemptId: uuid(0xa000 + n), amountCents: 100, method: 'cash', recordedAt: T(n), reversal: null, ...over });
+  const P = (n: number) => uuid(0x9000 + n);
+  const reply = (status: number, body: unknown, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const sealed = (status: number, error: string) => reply(status, { error });
+  const REVERSED_AT = '2026-10-18T10:00:00.000001Z';
+  type RevScript = Response | 'network' | 'lose' | 'apply';
+  type Gate = 'elig' | 'post';
+  /**
+   * The fake's reversal routes in front of the shared fake. Eligibility: the next `eligScripts` answer, else 200 allowed while
+   * `allowed.value`, else a chain 403. POST: the next `revScripts` answer ('apply' or none: the payment is reversed and a 200
+   * names it; 'lose': reversed, the answer lost; 'network': nothing reaches it). `gate` holds the next N of a kind until released.
+   */
+  async function setup(opts: { over?: (n: number) => Partial<Issued>; recorder?: boolean; identity?: (r: Rig) => ShopIdentity } = {}) {
+    const server = seeded();
+    if (opts.recorder === true) server.recorders.add('uid-a');
+    const made = issueAt(server, STORE_1, 3, opts.over);
+    const made2 = issueAt(server, STORE_2, 1);
+    const r = rig(server);
+    const allowed = { value: true };
+    const eligScripts: Array<Response | 'network'> = [];
+    const revScripts: RevScript[] = [];
+    const eligReads: string[] = [];
+    const posts: Array<{ url: string; body: string; key: string | null }> = [];
+    const log: string[] = [];
+    const gate: Record<Gate, number> = { elig: 0, post: 0 };
+    const held: Array<{ kind: Gate; url: string; release: (late?: Response) => void }> = [];
+    const hold = async (kind: Gate, url: string, answer: () => Response): Promise<Response> => {
+      if (gate[kind] > 0) {
+        gate[kind] -= 1;
+        const late = await new Promise<Response | undefined>((release) => { held.push({ kind, url, release }); });
+        if (late !== undefined) return late;
+      }
+      return answer();
+    };
+    const apply = (invoiceId: string, paymentId: string, body: string) => {
+      const reasonCode = (JSON.parse(body) as { reasonCode: string }).reasonCode;
+      server.payments.set(invoiceId, (server.payments.get(invoiceId) ?? []).map((p) => (p.id === paymentId ? { ...p, reversal: { reversedAt: REVERSED_AT, reasonCode } } : p)));
+    };
+    const routed = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      const method = init.method ?? 'GET';
+      log.push(`${method} ${url}`);
+      if (method === 'GET' && url.endsWith('/payment-reversal-eligibility')) {
+        eligReads.push(url);
+        const script = eligScripts.shift();
+        if (script === 'network') throw new TypeError('network');
+        return hold('elig', url, () => script ?? (allowed.value ? reply(200, { eligibility: 'allowed' }) : chain(403, 'forbidden')));
+      }
+      const target = /\/invoices\/([0-9a-f-]{36})\/payments\/([0-9a-f-]{36})\/reversal$/.exec(url);
+      if (method === 'POST' && target !== null) {
+        const body = String(init.body);
+        posts.push({ url, body, key: new Headers(init.headers).get('idempotency-key') });
+        const [, invoiceId, paymentId] = target;
+        const script = revScripts.shift() ?? 'apply';
+        if (script === 'network') throw new TypeError('network');
+        return hold('post', url, () => {
+          if (script instanceof Response) return script;
+          apply(invoiceId, paymentId, body);
+          if (script === 'lose') throw new TypeError('network'); // committed, the answer lost
+          return reply(200, { payment: { id: paymentId, invoiceId, status: 'reversed' } });
+        });
+      }
+      return server.fetch(input, init);
+    }) as typeof globalThis.fetch;
+    const props = r.props({ issuing: createInvoiceIssuingClient({ fetch: routed }), ...(opts.identity === undefined ? {} : { identity: opts.identity(r) }) });
+    const page = render(<ServerIssuedInvoices {...props} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    return { server, made, made2, r, props, page, allowed, eligScripts, revScripts, eligReads, posts, log, gate, held, routed };
+  }
+  type Setup = Awaited<ReturnType<typeof setup>>;
+  const payPhase = () => screen.queryByTestId('issued-payments-state')?.getAttribute('data-phase') ?? 'none';
+  const paymentsReady = () => waitFor(() => expect(payPhase()).toBe('ready'));
+  const reverseIds = () => screen.queryAllByTestId('issued-payments-reverse').map((b) => b.getAttribute('data-id'));
+  const cardState = () => screen.queryByTestId('issued-reverse-card')?.getAttribute('data-state') ?? 'none';
+  const cardButtons = () => within(tid('issued-reverse-card')).queryAllByRole('button').map((b) => b.textContent);
+  const revStatus = () => tid('issued-reverse-status').textContent;
+  const revAlert = () => tid('issued-reverse-alert').textContent;
+  const heldRev = (r: Rig) => r.revHolds.get('uid-a');
+  async function open(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await paymentsReady();
+  }
+  async function close() {
+    await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+  }
+  /** Press the row's Reverse payment for `paymentId` (the trigger must be there). */
+  async function pressRow(paymentId: string) {
+    await waitFor(() => expect(reverseIds()).toContain(paymentId));
+    await user().click(screen.getAllByTestId('issued-payments-reverse').find((b) => b.getAttribute('data-id') === paymentId)!);
+  }
+  async function review(paymentId: string) {
+    await pressRow(paymentId);
+    await waitFor(() => expect(tid('issued-reverse-confirm')).toBeInTheDocument());
+  }
+  /** Review, choose `reason` and press the confirmation's Reverse payment once. */
+  async function reverse(paymentId: string, reason = 'wrong_amount') {
+    await review(paymentId);
+    await user().click(tid(`issued-reverse-reason-${reason}`));
+    await user().click(tid('issued-reverse-send'));
+  }
+  /** Invoice 2 with one unreversed payment, open; its reversal sent once and answered by `script`, ending UNRESOLVED (the card). */
+  async function unresolved(s: Setup, script: RevScript = reply(500, { error: 'internal', requestId: 'r' })) {
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    s.revScripts.push(script);
+    await reverse(P(1));
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+  }
+
+  it.each([['403 forbidden', chain(403, 'forbidden')], ['401 unauthenticated', chain(401, 'unauthenticated')], ['429 rate limited', chain(429, 'rate_limited', { 'retry-after': '3' })], ['400 invalid', chain(400, 'invalid_request')], ['a network failure', 'network']] as const)('SII-234. P2C R1: a reversal eligibility read answered %s shows no "Reverse payment" on any row — only an exact 200 allowed does', async (_label, answer) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1), pay(2)]);
+    s.eligScripts.push(answer instanceof Response ? answer.clone() : answer);
+    await user().click(openButton(2));
+    await waitFor(() => expect(s.eligReads).toHaveLength(1));
+    await settle();
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    expect(s.posts).toEqual([]);
+  });
+
+  it.each(['another invoice', 'the same invoice opened again', 'another store'] as const)('SII-235. P2C R1/R8: a reversal eligibility "allowed" that arrives late — after the dialog moved to %s whose own read refused — is ignored: no "Reverse payment" shows', async (arm) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    s.server.payments.set(s.made[2].id, [pay(2)]);
+    s.server.payments.set(s.made2[0].id, [pay(3)]);
+    s.gate.elig = 1;
+    await open(2);
+    await waitFor(() => expect(s.held).toHaveLength(1));
+    await close();
+    s.allowed.value = false;
+    if (arm === 'another store') {
+      await showAndChoose(STORE_2);
+      await listReady();
+      await open(1);
+    } else {
+      await open(arm === 'another invoice' ? 3 : 2);
+    }
+    await waitFor(() => expect(s.eligReads).toHaveLength(2));
+    await settle();
+    expect(screen.getAllByTestId('issued-payments-item')).toHaveLength(1);
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    await act(async () => { s.held[0].release(reply(200, { eligibility: 'allowed' })); });
+    await settle();
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    expect(s.posts).toEqual([]);
+  });
+
+  it.each(['the invoice is now voided', 'the eligibility is now refused'] as const)('SII-236. P2C R2: the review on press finds %s — no confirmation opens, the reason is said, nothing is sent', async (arm) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    if (arm === 'the invoice is now voided') s.server.issued.set(STORE_1, s.made.map((i, n) => (n === 1 ? { ...i, void: { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' } } : i)));
+    else s.allowed.value = false;
+    const eligs = s.eligReads.length;
+    await pressRow(P(1));
+    await waitFor(() => expect(revAlert()).toBe(arm === 'the invoice is now voided' ? REVERSE_TEXT.voided : REVERSE_TEXT.notAllowed));
+    await settle();
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(s.eligReads.length - eligs).toBe(arm === 'the invoice is now voided' ? 0 : 1);
+    expect(screen.queryByTestId('issued-payments-reverse')).toBeNull();
+    expect(s.posts).toEqual([]);
+    expect(s.r.keys).toEqual([]);
+    expect(heldRev(s.r)).toBeUndefined();
+  });
+
+  /** `count` older 1-cent payments (ids and times before nothing else), then the shown payment 1, moved last. */
+  const behind = (count: number): PaymentWire[] => [...Array.from({ length: count }, (_, k) => pay(100 + k, { amountCents: 1 })), pay(1, { recordedAt: T(1500) })];
+
+  it.each([
+    ['already reversed', (s: Setup) => s.server.payments.set(s.made[1].id, [pay(1, { reversal: { reversedAt: REVERSED_AT, reasonCode: 'duplicate' } })]), REVERSE_TEXT.alreadyReversed, false, 1],
+    ['no longer listed', (s: Setup) => s.server.payments.set(s.made[1].id, [pay(2)]), REVERSE_TEXT.missing, true, 1],
+    ['unreadable (500)', (s: Setup) => { s.server.paymentsStatus.push(500); }, REVERSE_TEXT.unconfirmed, true, 1],
+    ['past the 20-page lookup cap (page 21)', (s: Setup) => s.server.payments.set(s.made[1].id, behind(1000)), REVERSE_TEXT.unconfirmed, true, 20],
+  ] as const)('SII-237. P2C R2/R7: the exact payment is %s on the review\'s read — no confirmation, no key, no POST; the reason is said', async (_label, change, text, alert, pages) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    change(s);
+    const reads = s.server.paymentReads().length;
+    await pressRow(P(1));
+    await waitFor(() => expect(alert ? revAlert() : revStatus()).toBe(text));
+    await settle();
+    expect(alert ? revStatus() : revAlert()).toBe('');
+    expect(s.server.paymentReads().slice(reads, reads + pages), 'the lookup read from page one following the cursor').toHaveLength(pages);
+    if (pages === 20) expect(s.server.paymentReads().length - reads, 'never past the cap (the review itself)').toBe(20);
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(s.posts).toEqual([]);
+    expect(s.r.keys).toEqual([]);
+    expect(heldRev(s.r)).toBeUndefined();
+  });
+
+  it('SII-238. P2C R7: the exact payment on page 2 of the history is found by following nextCursor — the confirmation opens on THAT read row and ONE POST reverses it', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    s.server.payments.set(s.made[1].id, behind(50));
+    const reads = s.server.paymentReads().length;
+    await review(P(1));
+    const lookup = s.server.paymentReads().slice(reads, reads + 2);
+    expect(lookup[0]).not.toContain('after=');
+    expect(lookup[1]).toContain(`after=${pay(149).id}`);
+    expect(tid('issued-reverse-recorded-at')).toHaveTextContent('09:25:00');
+    await user().click(tid('issued-reverse-reason-other'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    expect(s.posts.map((p) => p.url)).toEqual([`${STORES_PATH}/${STORE_1}/invoices/${s.made[1].id}/payments/${P(1)}/reversal`]);
+  });
+
+  it('SII-239. P2C R3: the confirmation states the exact invoice, store, amount, method and time with "does not return any money" and the six reasons; Escape closes it, sends nothing and returns focus to the row\'s "Reverse payment"', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1, { amountCents: 1234, method: 'external_card_terminal' })]);
+    await open(2);
+    const rowTime = tid('issued-payments-recorded-at').textContent ?? '';
+    await review(P(1));
+    expect(tid('issued-reverse-title')).toHaveTextContent(REVERSE_TEXT.title);
+    expect(tid('issued-reverse-number')).toHaveTextContent(/\b2\b/);
+    expect(tid('issued-reverse-store')).toHaveTextContent('Main Street');
+    expect(tid('issued-reverse-amount')).toHaveTextContent('$12.34');
+    expect(tid('issued-reverse-method')).toHaveTextContent('Card on a separate terminal');
+    expect(tid('issued-reverse-recorded-at')).toHaveTextContent(rowTime);
+    expect(tid('issued-reverse-consequence')).toHaveTextContent('It does not return any money.');
+    expect(tid('issued-reverse-reasons')).toHaveAttribute('role', 'radiogroup');
+    const radios = within(tid('issued-reverse-reasons')).getAllByRole('radio');
+    expect(radios.map((r) => r.getAttribute('data-testid'))).toEqual(Object.keys(INVOICE_PAYMENT_REVERSAL_REASONS).map((c) => `issued-reverse-reason-${c}`));
+    expect(radios.map((r) => (r as HTMLInputElement).labels?.[0]?.textContent)).toEqual(Object.values(INVOICE_PAYMENT_REVERSAL_REASONS));
+    expect(radios.every((r) => !(r as HTMLInputElement).checked)).toBe(true);
+    expect(within(tid('issued-reverse-confirm')).queryByRole('textbox')).toBeNull(); // no free text
+    expect(tid('issued-reverse-send')).toHaveAttribute('aria-disabled', 'true');
+    expect(tid('issued-reverse-send')).not.toBeDisabled();
+    expect(describedBy('issued-reverse-send')).toBe(REVERSE_TEXT.sendWhyReason);
+    expect(tid('issued-reverse-confirm-status')).toHaveAttribute('role', 'status');
+    expect(tid('issued-reverse-confirm-alert')).toHaveAttribute('role', 'alert');
+    await user().click(tid('issued-reverse-reason-wrong_method'));
+    expect(tid('issued-reverse-send')).toHaveAttribute('aria-disabled', 'false');
+    await user().keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await settle();
+    expect(s.posts).toEqual([]);
+    expect(s.r.keys).toEqual([]);
+    expect(heldRev(s.r)).toBeUndefined();
+    expect(document.activeElement).toBe(tid('issued-payments-reverse'));
+  });
+
+  it('SII-240. P2C R4: a double press (two clicks in one tick, then a third while it is out) sends exactly ONE POST under ONE key; the button says "Reversing…" meanwhile', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await review(P(1));
+    await user().click(tid('issued-reverse-reason-duplicate'));
+    s.gate.post = 1;
+    act(() => { fireEvent.click(tid('issued-reverse-send')); fireEvent.click(tid('issued-reverse-send')); });
+    await waitFor(() => expect(s.held).toHaveLength(1));
+    expect(tid('issued-reverse-send')).toHaveTextContent(REVERSE_TEXT.sending);
+    fireEvent.click(tid('issued-reverse-send'));
+    await settle();
+    expect(s.posts).toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+    await act(async () => { s.held[0].release(); });
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    await settle();
+    expect(s.posts).toHaveLength(1);
+    expect(s.posts[0].key).toBe(s.r.keys[0]);
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  it('SII-241. P2C R5: a FIRST send answered step-up runs nothing — the key is dropped and the sign-in opens in the confirmation; a successful sign-in re-reads the eligibility, the invoice and the history, CLEARS the reason and sends nothing until a new press, which goes under a NEW key', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    s.revScripts.push(chain(403, 'step_up_required'));
+    await reverse(P(1), 'wrong_invoice');
+    await waitFor(() => expect(tid('issued-reverse-reauth-group')).toBeInTheDocument());
+    expect(tid('issued-reverse-confirm-alert')).toHaveTextContent(REVERSE_TEXT.stepUp);
+    expect(s.posts).toHaveLength(1);
+    expect(heldRev(s.r), 'nothing ran: the key is dropped').toBeUndefined();
+    expect(cardState()).toBe('none');
+    const before = { elig: s.eligReads.length, details: s.server.details().length, pays: s.server.paymentReads().length, logins: s.server.logins().length };
+    type('issued-reverse-reauth-password', 'correct horse');
+    await user().click(tid('issued-reverse-reauth-confirm'));
+    await waitFor(() => expect(tid('issued-reverse-confirm-status')).toHaveTextContent(REVERSE_TEXT.renewed));
+    expect(s.server.logins().length).toBe(before.logins + 1);
+    expect(s.eligReads.length).toBeGreaterThan(before.elig);
+    expect(s.server.details().length).toBeGreaterThan(before.details);
+    expect(s.server.paymentReads().length).toBeGreaterThan(before.pays);
+    expect(screen.queryByTestId('issued-reverse-reauth-group')).toBeNull();
+    expect(within(tid('issued-reverse-reasons')).getAllByRole('radio').every((r) => !(r as HTMLInputElement).checked), 'the reason is cleared').toBe(true);
+    await settle();
+    expect(s.posts, 'the sign-in never submits').toHaveLength(1);
+    await user().click(tid('issued-reverse-send'));
+    expect(tid('issued-reverse-reason-error')).toHaveTextContent(REVERSE_TEXT.chooseReason);
+    expect(s.posts).toHaveLength(1);
+    await user().click(tid('issued-reverse-reason-wrong_invoice'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    expect(s.posts).toHaveLength(2);
+    expect(s.r.keys).toHaveLength(2);
+    expect(s.r.keys[1]).not.toBe(s.r.keys[0]);
+    expect(s.posts.map((p) => p.key)).toEqual(s.r.keys);
+    expect(heldRev(s.r)?.state).toBe('reversed');
+  });
+
+  it.each(['Keep payment while it is waited for', 'Stop waiting', 'the 30 s deadline'] as const)('SII-242. P2C R5: after a first send\'s step-up, %s ends the sign-in — the provider\'s late success then renews nothing and submits nothing (no login, no re-read, no reversal POST, no key)', async (arm) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const calls: Array<(token: string | null) => void> = [];
+    const s = await setup({ identity: (r) => ({ ...r.props().identity!, reauthenticate: () => new Promise<string | null>((resolve) => { calls.push(resolve); }) }) });
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    s.revScripts.push(chain(403, 'step_up_required'));
+    await reverse(P(1));
+    await waitFor(() => expect(tid('issued-reverse-reauth-group')).toBeInTheDocument());
+    fakeClock();
+    type('issued-reverse-reauth-password', 'correct horse');
+    fireEvent.click(tid('issued-reverse-reauth-confirm'));
+    await until(() => expect(calls).toHaveLength(1));
+    await until(() => expect(tid('issued-reverse-reauth-stop')).toBeInTheDocument());
+    if (arm === 'Keep payment while it is waited for') {
+      fireEvent.click(tid('issued-reverse-keep'));
+      await until(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    } else if (arm === 'Stop waiting') {
+      fireEvent.click(tid('issued-reverse-reauth-stop'));
+      await until(() => expect(screen.queryByTestId('issued-reverse-reauth-stop')).toBeNull());
+    } else {
+      await advance(30_000);
+      await until(() => expect(screen.queryByTestId('issued-reverse-reauth-stop')).toBeNull());
+    }
+    const logins = s.server.logins().length;
+    const eligs = s.eligReads.length;
+    await act(async () => { calls[0]('tok-a'); });
+    await settle();
+    await advance(60_000);
+    expect(s.server.logins().length, 'the late success renews nothing').toBe(logins);
+    expect(s.eligReads.length, 'and re-reads nothing').toBe(eligs);
+    expect(s.posts).toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+    expect(heldRev(s.r)).toBeUndefined();
+  });
+
+  it('SII-243. P2C R6: a first send answered reversed says "Payment reversed." and reads the invoice and history again; when that history read fails, the failure is said in the payments state line, SEPARATE from the confirmed reversal (rows kept)', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await review(P(1));
+    const details = s.server.details().length;
+    const reads = s.server.paymentReads().length;
+    s.server.paymentsStatus.push(500);
+    await user().click(tid('issued-reverse-reason-recorded_in_error'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    await waitFor(() => expect(payPhase()).toBe('unavailable'));
+    expect(s.server.details().length).toBeGreaterThan(details);
+    expect(s.server.paymentReads().length).toBe(reads + 1);
+    expect(tid('issued-payments-state')).toHaveTextContent(PAYMENTS_TEXT.unavailable);
+    expect(revStatus()).toBe(REVERSE_TEXT.reversed);
+    expect(revAlert()).toBe('');
+    expect(screen.getAllByTestId('issued-payments-item')).toHaveLength(1);
+    expect(heldRev(s.r)).toMatchObject({ state: 'reversed', attributed: true });
+    expect(cardState()).toBe('none');
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['invalid_state; the fresh read shows the exact row reversed', 'invalid_state', 'reversed', REVERSE_TEXT.alreadyReversed, false],
+    // A voided invoice's history has every payment reversed (a void refuses while one is recorded; the client rejects anything else).
+    ['invalid_state; the fresh read shows the invoice voided and the row reversed', 'invalid_state', 'voided', REVERSE_TEXT.alreadyReversed, false],
+    // The fresh INVOICE read says voided while the history read failed: R6's words come from either fresh read (FIX1).
+    ['invalid_state; the fresh invoice read shows it voided while the history read fails', 'invalid_state', 'voided-unread', REVERSE_TEXT.voided, true],
+    ['invalid_state; the fresh read shows neither', 'invalid_state', 'neither', REVERSE_TEXT.cannotNow, true],
+    // FIX3 E1: a SIBLING payment reversed, the exact one not — nothing may say this payment was reversed.
+    ['invalid_state; the fresh read shows a sibling reversed and the exact row not', 'invalid_state', 'sibling', REVERSE_TEXT.cannotNow, true],
+    ['a sealed write_conflict; the fresh read shows neither', 'write_conflict', 'neither', REVERSE_TEXT.cannotNow, true],
+  ] as const)('SII-244. P2C R6: a first send refused with %s — a fresh invoice and history read decides the words; the attempt is settled (no card with Retry), never left unresolved', async (_label, error, now, text, alert) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await review(P(1));
+    if (now === 'reversed') s.server.payments.set(s.made[1].id, [pay(1, { reversal: { reversedAt: REVERSED_AT, reasonCode: 'other' } })]);
+    if (now === 'sibling') s.server.payments.set(s.made[1].id, [pay(1), pay(2, { reversal: { reversedAt: REVERSED_AT, reasonCode: 'other' } })]);
+    if (now === 'voided' || now === 'voided-unread') {
+      s.server.payments.set(s.made[1].id, [pay(1, { reversal: { reversedAt: REVERSED_AT, reasonCode: 'other' } })]);
+      s.server.issued.set(STORE_1, s.made.map((i, n) => (n === 1 ? { ...i, void: { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' } } : i)));
+    }
+    if (now === 'voided-unread') s.server.paymentsStatus.push(500);
+    s.revScripts.push(sealed(409, error));
+    const details = s.server.details().length;
+    const reads = s.server.paymentReads().length;
+    await user().click(tid('issued-reverse-reason-wrong_amount'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(alert ? revAlert() : revStatus()).toBe(text));
+    await settle();
+    expect(alert ? revStatus() : revAlert()).toBe('');
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(s.server.details().length).toBeGreaterThan(details);
+    expect(s.server.paymentReads().length).toBeGreaterThan(reads);
+    expect(['sending', 'unresolved', 'checking']).not.toContain(heldRev(s.r)?.state);
+    expect(screen.queryByTestId('issued-reverse-retry')).toBeNull();
+    // FIX3 E1: a refused attempt's card is never titled "Payment reversed." — this request reversed nothing.
+    expect(heldRev(s.r)?.state).toBe('refused');
+    if (cardState() !== 'none') {
+      expect(cardState()).toBe('refused');
+      expect(tid('issued-reverse-card-title')).toHaveTextContent(REVERSE_TEXT.cardRefusedTitle);
+    }
+    expect(screen.queryAllByText(REVERSE_TEXT.reversed)).toEqual([]);
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['denied (403)', () => chain(403, 'forbidden'), REVERSE_TEXT.denied],
+    ['not found (chain 404)', () => chain(404, 'not_found'), REVERSE_TEXT.notRun],
+    ['tenant conflict (chain 409 write_conflict)', () => chain(409, 'write_conflict'), REVERSE_TEXT.notRun],
+    ['invalid (400)', () => chain(400, 'invalid_request'), REVERSE_TEXT.notRun],
+    ['rate limited (429, Retry-After 7)', () => chain(429, 'rate_limited', { 'retry-after': '7' }), REVERSE_TEXT.rateLimited(7)],
+    ['signed out (401)', () => chain(401, 'unauthenticated'), null],
+  ] as const)('SII-245. P2C R6: a first send answered %s ran nothing — the attempt is removed (no held card), the confirmation closes and the section says so (fix2 item 2); nothing is resent', async (_label, answer, text) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    s.revScripts.push(answer());
+    await reverse(P(1));
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    if (text !== null) expect(revAlert()).toBe(text);
+    await settle();
+    expect(heldRev(s.r)).toBeUndefined();
+    expect(screen.queryByTestId('issued-reverse-card')).toBeNull();
+    expect(s.posts).toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  it.each([
+    ['a 500 (unknown, answered)', () => reply(500, { error: 'internal', requestId: 'r' }), true],
+    ['no answer (network)', () => 'network' as const, true],
+    ['an answer lost after the server reversed it', () => 'lose' as const, true],
+    ['in progress (409 request_in_progress)', () => chain(409, 'request_in_progress'), true],
+    ['key reused (422)', () => reply(422, { error: 'idempotency_key_reused' }), false],
+  ] as const)('SII-246. P2C R6/R8: a first send answered %s is UNRESOLVED — the confirmation closes to a held card (Retry reversal only when retryable, Check payment, Dismiss) and NOTHING is resent on its own, however long it waits', async (_label, answer, retryable) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    await unresolved(s, answer());
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(tid('issued-reverse-card')).toHaveAttribute('data-id', P(1));
+    expect(tid('issued-reverse-card-title')).toHaveTextContent(REVERSE_TEXT.cardTitle);
+    expect(tid('issued-reverse-card-status')).toHaveTextContent(REVERSE_TEXT.cardUnresolved('$1.00', 2));
+    expect(tid('issued-reverse-card').textContent).not.toMatch(/refund/i);
+    expect(cardButtons()).toEqual(retryable ? [REVERSE_TEXT.retry, REVERSE_TEXT.check, REVERSE_TEXT.dismiss] : [REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    // R3: focus back to the row's button, else the payments heading (the row's button is hidden while this is held);
+    // UI-NOTES deviation 2 names the card's heading. Either is accepted here: focus never stays on a removed node.
+    await settle();
+    expect([tid('issued-reverse-card-title'), document.getElementById('issued-payments-title')]).toContain(document.activeElement);
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', key: s.r.keys[0], retryable });
+    const mark = s.log.length;
+    fakeClock();
+    for (let i = 0; i < 12; i++) await advance(10_000);
+    await focusEvents();
+    expect(s.posts).toHaveLength(1);
+    expect(s.log.slice(mark).filter((l) => !l.startsWith('GET ')), 'nothing but reads on its own').toEqual([]);
+    expect(heldRev(s.r)?.state).toBe('unresolved');
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  it('SII-247. P2C R6/R8: Retry reversal resends the SAME key and the SAME body bytes to the same payment; a validated reversed answer settles it — "Payment reversed.", the card goes, the history reads the row Reversed; no new key', async () => {
+    const s = await setup();
+    await unresolved(s);
+    await click('issued-reverse-retry');
+    await waitFor(() => expect(s.posts).toHaveLength(2));
+    const [first, again] = s.posts;
+    expect(again.key).toBe(first.key);
+    expect(again.body).toBe(first.body);
+    expect(again.url).toBe(first.url);
+    expect(JSON.parse(again.body)).toEqual({ expectedTenant: TENANT_A, reasonCode: 'wrong_amount' });
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ state: 'reversed', attributed: true }));
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    await waitFor(() => expect(tid('issued-payments-reversed')).toHaveTextContent('Reversed'));
+    expect(cardState()).toBe('none');
+    expect(s.r.keys).toHaveLength(1);
+    await settle();
+    expect(s.posts).toHaveLength(2);
+  });
+
+  it.each([
+    ['step-up', () => chain(403, 'step_up_required'), false],
+    ['denied (403)', () => chain(403, 'forbidden'), true],
+    ['not found (chain 404)', () => chain(404, 'not_found'), true],
+    ['tenant conflict (chain 409)', () => chain(409, 'write_conflict'), true],
+    ['rate limited (429)', () => chain(429, 'rate_limited', { 'retry-after': '2' }), true],
+    ['key reused (422)', () => reply(422, { error: 'idempotency_key_reused' }), false],
+    ['invalid_state while the exact row is NOT reversed', () => sealed(409, 'invalid_state'), true],
+    ['invalid_state while a SIBLING is reversed and the exact row is NOT', () => sealed(409, 'invalid_state'), true],
+  ] as const)('SII-248. P2C R6: a refusal on RESEND — %s — does not tell what the first request did: the attempt stays UNRESOLVED (never settled, never removed); Retry stays only where it may run again', async (label, answer, retryable) => {
+    const s = await setup();
+    await unresolved(s);
+    s.revScripts.push(answer());
+    if (label.includes('SIBLING')) s.server.payments.set(s.made[1].id, [pay(1), pay(2, { reversal: { reversedAt: REVERSED_AT, reasonCode: 'other' } })]);
+    const reads = s.server.paymentReads().length;
+    await click('issued-reverse-retry');
+    await waitFor(() => expect(s.posts).toHaveLength(2));
+    await waitFor(() => expect(heldRev(s.r)?.state).toBe('unresolved'));
+    if (label.startsWith('invalid_state')) {
+      await waitFor(() => expect(heldRev(s.r)?.seen).toBe('not-reversed'));
+      expect(s.server.paymentReads().length, 'only the exact row may say reversed: it is read').toBeGreaterThan(reads);
+    }
+    await settle();
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', attributed: false, key: s.r.keys[0], retryable });
+    expect(cardState()).toBe('unresolved');
+    expect(screen.queryByTestId('issued-reverse-retry') !== null).toBe(retryable);
+    expect(cardButtons()).toContain(REVERSE_TEXT.check);
+    expect(tid('issued-reverse-card-title')).toHaveTextContent(REVERSE_TEXT.cardTitle);
+    expect(screen.queryAllByText(REVERSE_TEXT.reversed), 'FIX3 E1: never "Payment reversed."').toEqual([]);
+    expect(s.posts).toHaveLength(2);
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  it('SII-249. P2C R6: a resend answered rate limited (Retry-After 7) keeps Retry reversal aria-disabled — a press sends nothing — until the 7 s have passed; then Retry resends the same key', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    await unresolved(s);
+    s.revScripts.push(chain(429, 'rate_limited', { 'retry-after': '7' }));
+    fakeClock();
+    fireEvent.click(tid('issued-reverse-retry'));
+    await until(() => expect(s.posts).toHaveLength(2));
+    await until(() => expect(tid('issued-reverse-retry')).toHaveAttribute('aria-disabled', 'true'));
+    expect(tid('issued-reverse-retry')).not.toBeDisabled();
+    fireEvent.click(tid('issued-reverse-retry'));
+    await advance(6_000);
+    expect(tid('issued-reverse-retry')).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(tid('issued-reverse-retry'));
+    await settle();
+    expect(s.posts).toHaveLength(2);
+    await advance(1_500);
+    await until(() => expect(tid('issued-reverse-retry')).toHaveAttribute('aria-disabled', 'false'));
+    fireEvent.click(tid('issued-reverse-retry'));
+    await until(() => expect(s.posts).toHaveLength(3));
+    expect(s.posts[2].key).toBe(s.posts[0].key);
+    expect(s.posts[2].body).toBe(s.posts[0].body);
+    await until(() => expect(heldRev(s.r)?.state).toBe('reversed'));
+  });
+
+  it.each([
+    ['the server reversed it (answer lost)', 'lose' as const, 'reversed'],
+    ['the server never reversed it (500)', null, 'not-reversed'],
+  ] as const)('SII-250. P2C R7/R8: Check payment when %s — GETs only (no POST, no key); found reversed settles the attempt as reversed WITHOUT attributing it; found unreversed settles nothing ("not reversed as of this read")', async (_label, script, seen) => {
+    const s = await setup();
+    await unresolved(s, script ?? reply(500, { error: 'internal', requestId: 'r' }));
+    const mark = s.log.length;
+    await click('issued-reverse-check');
+    if (seen === 'reversed') {
+      await waitFor(() => expect(heldRev(s.r)).toMatchObject({ state: 'reversed', attributed: false }));
+      await waitFor(() => expect(tid('issued-reverse-card-status')).toHaveTextContent(REVERSE_TEXT.cardSeenReversed));
+      expect(cardButtons()).toEqual([REVERSE_TEXT.dismiss]);
+    } else {
+      await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenNotReversed));
+      expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', seen: 'not-reversed' });
+      expect(cardButtons()).toEqual([REVERSE_TEXT.retry, REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    }
+    await settle();
+    const sent = s.log.slice(mark);
+    expect(sent.some((l) => /\/payments(\?|$)/.test(l))).toBe(true);
+    expect(sent.filter((l) => !l.startsWith('GET ')), 'Check payment only reads').toEqual([]);
+    expect(s.posts).toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  it.each([
+    ['no longer listed (complete traversal)', (s: Setup) => s.server.payments.set(s.made[1].id, [pay(2)]), 1],
+    ['unreadable (500)', (s: Setup) => { s.server.paymentsStatus.push(500); }, 1],
+    ['past the 20-page cap', (s: Setup) => s.server.payments.set(s.made[1].id, behind(1000)), 20],
+  ] as const)('SII-251. P2C R7: Check payment finds the exact payment %s — "couldn\'t confirm", the attempt stays UNRESOLVED with Retry, nothing settles; GETs only', async (_label, change, pages) => {
+    const s = await setup();
+    await unresolved(s);
+    change(s);
+    const reads = s.server.paymentReads().length;
+    const mark = s.log.length;
+    await click('issued-reverse-check');
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenUnconfirmed));
+    await settle();
+    expect(s.server.paymentReads().length - reads).toBe(pages);
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', seen: 'unconfirmed', retryable: true });
+    expect(cardButtons()).toEqual([REVERSE_TEXT.retry, REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    expect(s.log.slice(mark).filter((l) => !l.startsWith('GET '))).toEqual([]);
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it('SII-252. P2C R8: while a reversal is unresolved on invoice 2, Record payment and Void are hidden on invoice 2 and Reverse is hidden EVERYWHERE; invoice 3 keeps working Record payment and Void; after Dismiss, Reverse is back', async () => {
+    const s = await setup({ recorder: true });
+    s.server.payments.set(s.made[2].id, [pay(2)]);
+    const controls = () => ({
+      record: screen.queryByTestId('issued-payments-record') !== null, void: screen.queryByTestId('issued-view-void') !== null, reverse: reverseIds().length > 0,
+    });
+    await open(3);
+    await waitFor(() => expect(controls()).toEqual({ record: true, void: true, reverse: true }));
+    await close();
+    await unresolved(s);
+    await settle();
+    expect(controls()).toEqual({ record: false, void: false, reverse: false });
+    expect(cardState()).toBe('unresolved');
+    await close();
+    await open(3);
+    await waitFor(() => expect(controls()).toMatchObject({ record: true, void: true }));
+    await settle();
+    expect(controls()).toEqual({ record: true, void: true, reverse: false });
+    expect(cardState(), 'the card is invoice 2\'s alone').toBe('none');
+    await click('issued-view-void');
+    await waitFor(() => expect(tid('issued-void-confirm')).toBeInTheDocument());
+    await click('issued-void-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-void-confirm')).toBeNull());
+    await click('issued-payments-record');
+    await waitFor(() => expect(screen.getByRole('radio', { name: /Cash/ })).toBeInTheDocument());
+    await close();
+    await open(2);
+    await click('issued-reverse-dismiss');
+    await waitFor(() => expect(cardState()).toBe('none'));
+    expect(heldRev(s.r)).toBeUndefined();
+    await waitFor(() => expect(controls()).toEqual({ record: true, void: true, reverse: true }));
+    await close();
+    await open(3);
+    await waitFor(() => expect(controls()).toEqual({ record: true, void: true, reverse: true }));
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each(['an unresolved void attempt', 'an unresolved record attempt'] as const)('SII-253. P2C R1/R8: while the user holds %s (invoice 3), "Reverse payment" is hidden on every invoice — invoice 2 shows none although its read says allowed', async (arm) => {
+    const s = await setup({ recorder: true });
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    s.server.payments.set(s.made[2].id, [pay(2)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    await close();
+    await open(3);
+    if (arm === 'an unresolved void attempt') {
+      await click('issued-view-void');
+      await waitFor(() => expect(tid('issued-void-confirm')).toBeInTheDocument());
+      s.server.voids.push('lose-before');
+      await click('issued-void-reason-wrong_customer');
+      await click('issued-void-send');
+      await waitFor(() => expect(s.r.holds.get('uid-a')?.state).toBe('unresolved'));
+      if (screen.queryByTestId('issued-void-confirm') !== null) await click('issued-void-keep');
+    } else {
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+      s.server.payScripts.register.push('lose-before');
+      await click('issued-payments-record');
+      fireEvent.change(within(tid('issued-payments-form')).getByTestId('issued-payments-amount-input'), { target: { value: '1.00' } });
+      await click('issued-payments-method-cash');
+      await click('issued-payments-submit');
+      await waitFor(() => expect(s.r.payHolds.get('uid-a')?.state).toBe('unresolved'));
+    }
+    await settle();
+    expect(reverseIds(), 'none on the invoice it is held for').toEqual([]);
+    await close();
+    const eligs = s.eligReads.length;
+    await open(2);
+    await waitFor(() => expect(s.eligReads.length).toBeGreaterThan(eligs));
+    await settle();
+    expect(reverseIds(), 'none on another invoice').toEqual([]);
+    expect(s.posts).toEqual([]);
+  });
+
+  it.each(['a sign-out', 'a user change', 'another tab\'s session token', 'a store switch'] as const)('SII-254. P2C R8: %s DETACHES an unresolved reversal — token and bytes go; back in its store and invoice the card shows no Retry, only Check payment and Dismiss; it is never shown to another user or in another store', async (arm) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    s.server.payments.set(s.made2[0].id, [pay(3)]);
+    await unresolved(s);
+    await close();
+    if (arm === 'a sign-out') {
+      await act(async () => { await s.props.session!.logout(); });
+    } else if (arm === 'a user change') {
+      s.page.rerender(<ServerIssuedInvoices {...s.props} uid="uid-b" />);
+      await settle();
+      expect(cardState()).toBe('none');
+      expect(s.r.revHolds.get('uid-b')).toBeUndefined();
+      s.page.rerender(<ServerIssuedInvoices {...s.props} />);
+    } else if (arm === 'another tab\'s session token') {
+      s.server.otherTab('uid-a');
+      await focusEvents();
+    } else {
+      await showAndChoose(STORE_2);
+      await listReady();
+      await open(1);
+      await settle();
+      expect(cardState(), 'never in another store').toBe('none');
+      await close();
+    }
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ csrf: null, body: '', state: 'unresolved', key: s.r.keys[0] }));
+    if (screen.queryByTestId('issued-retry') !== null) await click('issued-retry');
+    if ((screen.queryByTestId('issued-store') as HTMLSelectElement | null)?.value !== STORE_1 || screen.queryByTestId('issued-show') !== null) await showAndChoose(STORE_1);
+    await listReady();
+    await open(2);
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    expect(tid('issued-reverse-card-status')).toHaveTextContent(REVERSE_TEXT.cardDetached);
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    const mark = s.log.length;
+    await click('issued-reverse-check');
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenNotReversed));
+    expect(s.log.slice(mark).filter((l) => !l.startsWith('GET '))).toEqual([]);
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each(['another invoice', 'another store'] as const)('SII-255. P2C R8: a reversal answer that arrives after the dialog moved to %s settles only its own attempt (by key) — the open invoice\'s rows, status and alert are untouched and no card shows there', async (arm) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    s.server.payments.set(s.made[2].id, [pay(2)]);
+    s.server.payments.set(s.made2[0].id, [pay(3)]);
+    await open(2);
+    await review(P(1));
+    await user().click(tid('issued-reverse-reason-duplicate'));
+    s.gate.post = 1;
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(s.held).toHaveLength(1));
+    expect(tid('issued-reverse-close-warning')).toHaveTextContent(REVERSE_TEXT.closeWarning);
+    await click('issued-reverse-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await close();
+    if (arm === 'another store') {
+      await showAndChoose(STORE_2);
+      await listReady();
+      await open(1);
+    } else {
+      await open(3);
+    }
+    // The row's facts (its Reverse control may come back once nothing is live: R1, not this answer's doing).
+    const rows = () => screen.getAllByTestId('issued-payments-item').map((li) => `${li.getAttribute('data-id')} ${li.querySelector('p')?.textContent} ${li.querySelector('time')?.textContent}`);
+    const before = rows();
+    const reads = s.server.paymentReads().length;
+    const details = s.server.details().length;
+    await act(async () => { s.held[0].release(); });
+    await settle();
+    expect(rows()).toEqual(before);
+    expect(screen.queryByTestId('issued-payments-reversed')).toBeNull();
+    expect(revStatus()).toBe('');
+    expect(revAlert()).toBe('');
+    expect(cardState()).toBe('none');
+    expect(s.server.paymentReads().length, 'no re-read for the other invoice').toBe(reads);
+    expect(s.server.details().length).toBe(details);
+    if (arm === 'another invoice') expect(heldRev(s.r)).toMatchObject({ state: 'reversed', key: s.r.keys[0] });
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each(['another invoice', 'another store'] as const)('SII-256. P2C R2/R8: the review\'s exact-payment lookup answered late — after the dialog moved to %s — opens no confirmation and says nothing there; nothing is sent', async (arm) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    s.server.payments.set(s.made[2].id, [pay(2)]);
+    s.server.payments.set(s.made2[0].id, [pay(3)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    s.server.hold.payments = 1;
+    await pressRow(P(1));
+    await waitFor(() => expect(s.server.held.filter((h) => h.kind === 'payments')).toHaveLength(1));
+    expect(tid('issued-payments-reverse')).toHaveAttribute('aria-disabled', 'true');
+    await close();
+    if (arm === 'another store') {
+      await showAndChoose(STORE_2);
+      await listReady();
+      await open(1);
+    } else {
+      await open(3);
+    }
+    await act(async () => { s.server.held.find((h) => h.kind === 'payments')!.release(); });
+    await settle();
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(revStatus()).toBe('');
+    expect(revAlert()).toBe('');
+    expect(s.posts).toEqual([]);
+    expect(s.r.keys).toEqual([]);
+  });
+
+  it.each(['Dismiss', 'a reload (a fresh page: the memory-only hold is gone)'] as const)('SII-257. P2C R8: after %s, Reverse needs everything again — a review whose exact payment cannot be verified sends nothing; a verified one needs a fresh reason and an explicit press, and goes under a NEW key', async (arm) => {
+    const s = await setup();
+    await unresolved(s);
+    const firstKey = s.posts[0].key;
+    let keys = s.r.keys;
+    if (arm === 'Dismiss') {
+      await click('issued-reverse-dismiss');
+      await waitFor(() => expect(cardState()).toBe('none'));
+    } else {
+      s.page.unmount();
+      const r2 = rig(s.server);
+      keys = [];
+      render(<ServerIssuedInvoices {...r2.props({ issuing: createInvoiceIssuingClient({ fetch: s.routed }), newKey: () => { const k = `5e1f0000-1d2f-4a6b-9c8d-${String(900 + keys.length).padStart(12, '0')}`; keys.push(k); return k; } })} />);
+      await showAndChoose(STORE_1);
+      await listReady();
+      await open(2);
+      expect(cardState(), 'nothing of it survives a reload').toBe('none');
+    }
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    s.server.paymentsStatus.push(500);
+    await pressRow(P(1));
+    await waitFor(() => expect(revAlert()).toBe(REVERSE_TEXT.unconfirmed));
+    await settle();
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(s.posts).toHaveLength(1);
+    const reads = s.server.paymentReads().length;
+    await review(P(1));
+    expect(s.server.paymentReads().length).toBeGreaterThan(reads);
+    expect(within(tid('issued-reverse-reasons')).getAllByRole('radio').every((r) => !(r as HTMLInputElement).checked)).toBe(true);
+    await user().click(tid('issued-reverse-send'));
+    expect(tid('issued-reverse-reason-error')).toHaveTextContent(REVERSE_TEXT.chooseReason);
+    expect(s.posts).toHaveLength(1);
+    await user().click(tid('issued-reverse-reason-other'));
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(revStatus()).toBe(REVERSE_TEXT.reversed));
+    expect(s.posts).toHaveLength(2);
+    expect(s.posts[1].key).not.toBe(firstKey);
+    expect(s.posts[1].key).toBe(keys[keys.length - 1]);
+    expect(JSON.parse(s.posts[1].body)).toEqual({ expectedTenant: TENANT_A, reasonCode: 'other' });
+  });
+
+  // ---- FIX1 regressions (review F1-F4, F6) ----
+  /** A LIVE reversal hold of uid-a put straight into the store (what another dialog's send would have held). */
+  const liveHold = (invoiceId: string, over: Partial<Parameters<ReversalHoldStore['put']>[1]> = {}): Parameters<ReversalHoldStore['put']>[1] => ({
+    key: 'k-live', body: '{"x":1}', storeId: STORE_1, storeLabel: 'Store 1', invoiceId, number: 2, paymentId: P(9), amountCents: 100, reasonCode: 'other',
+    csrf: 'csrf-live', sentAt: performance.now(), sentWall: Date.now(), state: 'unresolved', note: '', refusal: null, attributed: false, seen: null, retryable: false, ...over,
+  });
+  const voidTrigger = () => screen.queryByTestId('issued-view-void') !== null;
+
+  it('SII-258. FIX1 F3: while a reversal review is out, "Void invoice…" is not shown (no void review can start beside it); the reversal confirmation then opens alone', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await waitFor(() => expect(voidTrigger()).toBe(true));
+    s.gate.elig = 1;
+    await pressRow(P(1));
+    await waitFor(() => expect(s.held.filter((h) => h.kind === 'elig')).toHaveLength(1));
+    expect(voidTrigger()).toBe(false);
+    const details = s.server.details().length;
+    await act(async () => { s.held[0].release(); });
+    await waitFor(() => expect(tid('issued-reverse-confirm')).toBeInTheDocument());
+    expect(screen.queryByTestId('issued-void-confirm')).toBeNull();
+    expect(s.server.details().length).toBe(details);
+    expect(s.posts).toEqual([]);
+  });
+
+  it('SII-259. FIX1 F3: while a void review is out and while its confirmation is open, no row shows "Reverse payment"; Keep invoice brings it back', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    s.server.hold.detail = 1;
+    await click('issued-view-void');
+    await waitFor(() => expect(s.server.held.filter((h) => h.kind === 'detail')).toHaveLength(1));
+    expect(reverseIds()).toEqual([]);
+    await act(async () => { s.server.held.find((h) => h.kind === 'detail')!.release(); });
+    await waitFor(() => expect(tid('issued-void-confirm')).toBeInTheDocument());
+    expect(reverseIds()).toEqual([]);
+    await click('issued-void-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-void-confirm')).toBeNull());
+    await waitFor(() => expect(reverseIds()).toEqual([P(1)]));
+    expect(s.posts).toEqual([]);
+  });
+
+  it('SII-260. FIX1 F3: a void confirmation already open when a reversal of one of the invoice\'s payments goes live sends NO void — "Another request is waiting to be confirmed."', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await click('issued-view-void');
+    await waitFor(() => expect(tid('issued-void-confirm')).toBeInTheDocument());
+    await act(async () => { s.r.revHolds.put('uid-a', liveHold(s.made[1].id)); });
+    await click('issued-void-reason-wrong_customer');
+    await click('issued-void-send');
+    await waitFor(() => expect(tid('issued-void-confirm-alert')).toHaveTextContent(REVERSE_TEXT.pending));
+    await settle();
+    expect(s.log.filter((l) => l.startsWith('POST ') && l.endsWith('/void'))).toEqual([]);
+    expect(s.r.holds.get('uid-a')).toBeUndefined();
+  });
+
+  it('SII-261. FIX1 F3: a Record press whose session check is out when a reversal on the same invoice goes live sends NO register — the flow says "Another request is waiting to be confirmed."', async () => {
+    const s = await setup({ recorder: true });
+    await open(3);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+    await click('issued-payments-record');
+    fireEvent.change(within(tid('issued-payments-form')).getByTestId('issued-payments-amount-input'), { target: { value: '1.00' } });
+    await click('issued-payments-method-cash');
+    s.server.hold.current = 1;
+    await click('issued-payments-submit');
+    await waitFor(() => expect(s.server.held.filter((h) => h.kind === 'current')).toHaveLength(1));
+    await act(async () => { s.r.revHolds.put('uid-a', liveHold(s.made[2].id, { number: 3 })); });
+    await act(async () => { s.server.held.find((h) => h.kind === 'current')!.release(); });
+    await waitFor(() => expect(tid('issued-payments-flow')).toHaveTextContent(REVERSE_TEXT.pending));
+    await settle();
+    expect(s.r.payHolds.get('uid-a')).toBeUndefined();
+    expect(s.log.filter((l) => l.startsWith('POST ') && l.includes('/payment'))).toEqual([]);
+  });
+
+  it('SII-262. FIX1 F1: the store turns a DETACHED sending/checking attempt unresolved (every detach path: detach, detachOthers); a settled one stays settled', () => {
+    for (const state of ['sending', 'checking'] as const) {
+      const one = createReversalHoldStore();
+      one.put('u', liveHold('i', { state }));
+      one.detach('u');
+      expect(one.get('u')).toMatchObject({ csrf: null, body: '', state: 'unresolved', key: 'k-live' });
+      const many = createReversalHoldStore();
+      many.put('u', liveHold('i', { state }));
+      many.put('v', liveHold('i', { state, key: 'k-v' }));
+      many.detachOthers('v');
+      expect(many.get('u')).toMatchObject({ csrf: null, state: 'unresolved' });
+      expect(many.get('v'), 'the kept user is untouched').toMatchObject({ csrf: 'csrf-live', state });
+      many.detachOthers(null);
+      expect(many.get('v')).toMatchObject({ csrf: null, state: 'unresolved' });
+      one.dispose();
+      many.dispose();
+    }
+    const done = createReversalHoldStore();
+    done.put('u', liveHold('i', { state: 'refused', refusal: 'invalid-state' }));
+    done.detach('u');
+    expect(done.get('u')).toMatchObject({ state: 'refused' });
+    done.dispose();
+  });
+
+  it('SII-263. FIX1 F1: a sign-out while the FIRST send is out leaves the attempt unresolved (not "sending"): back in, its card says detached with Check payment and Dismiss; the late 200 changes nothing', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await review(P(1));
+    await user().click(tid('issued-reverse-reason-duplicate'));
+    s.gate.post = 1;
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(s.held.filter((h) => h.kind === 'post')).toHaveLength(1));
+    await click('issued-reverse-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await close();
+    await act(async () => { await s.props.session!.logout(); });
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ csrf: null, body: '', state: 'unresolved' }));
+    if (screen.queryByTestId('issued-retry') !== null) await click('issued-retry');
+    if ((screen.queryByTestId('issued-store') as HTMLSelectElement | null)?.value !== STORE_1 || screen.queryByTestId('issued-show') !== null) await showAndChoose(STORE_1);
+    await listReady();
+    await open(2);
+    await waitFor(() => expect(cardState()).toBe('detached'));
+    expect(tid('issued-reverse-card-status')).toHaveTextContent(REVERSE_TEXT.cardDetached);
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    await act(async () => { s.held.find((h) => h.kind === 'post')!.release(); });
+    await settle();
+    expect(heldRev(s.r)).toMatchObject({ csrf: null, state: 'unresolved' });
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['a sealed invalid_state', () => sealed(409, 'invalid_state')],
+    ['a step-up', () => chain(403, 'step_up_required')],
+  ] as const)('SII-264. FIX1 F6: a FIRST send detached while out and then answered %s follows the hold, not the answer — no sign-in group, no refusal words; the confirmation closes onto the detached card', async (_label, answer) => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    await review(P(1));
+    await user().click(tid('issued-reverse-reason-duplicate'));
+    s.gate.post = 1;
+    await user().click(tid('issued-reverse-send'));
+    await waitFor(() => expect(s.held.filter((h) => h.kind === 'post')).toHaveLength(1));
+    await act(async () => { s.r.revHolds.detach('uid-a'); });
+    const reads = s.server.paymentReads().length;
+    await act(async () => { s.held.find((h) => h.kind === 'post')!.release(answer()); });
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await settle();
+    expect(screen.queryByTestId('issued-reverse-reauth-group')).toBeNull();
+    expect(revAlert()).toBe('');
+    expect(revStatus()).toBe('');
+    expect(s.server.paymentReads().length, 'no refusal lookup').toBe(reads);
+    expect(heldRev(s.r)).toMatchObject({ csrf: null, state: 'unresolved' });
+    expect(cardState()).toBe('detached');
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it('SII-265. FIX1 F2: Retry reversal hands focus to the card\'s heading before its controls go; a Retry that settles reversed takes the card away and focus lands on the payments heading (not Close); Check payment focuses the heading too', async () => {
+    const s = await setup();
+    await unresolved(s);
+    await click('issued-reverse-check');
+    expect(document.activeElement).toBe(tid('issued-reverse-card-title'));
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenNotReversed));
+    s.gate.post = 1;
+    await click('issued-reverse-retry');
+    expect(document.activeElement).toBe(tid('issued-reverse-card-title'));
+    await waitFor(() => expect(s.held.filter((h) => h.kind === 'post')).toHaveLength(1));
+    await act(async () => { s.held.find((h) => h.kind === 'post')!.release(); });
+    await waitFor(() => expect(cardState()).toBe('none'));
+    await settle();
+    expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+    expect(s.posts).toHaveLength(2);
+  });
+
+  it('SII-266. FIX1 F4: with no dialog open, the user\'s live reversal stays reachable in its own store — the section shows its card (Retry, Check payment, Dismiss), never beside an open dialog or in another store; Dismiss focuses the section heading', async () => {
+    const s = await setup();
+    await unresolved(s);
+    await close();
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    expect(cardButtons()).toEqual([REVERSE_TEXT.retry, REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    const mark = s.log.length;
+    await click('issued-reverse-check');
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenNotReversed));
+    expect(s.log.slice(mark).filter((l) => !l.startsWith('GET '))).toEqual([]);
+    await open(3);
+    expect(screen.queryAllByTestId('issued-reverse-card'), 'none beside another invoice\'s dialog').toHaveLength(0);
+    await close();
+    expect(screen.queryAllByTestId('issued-reverse-card')).toHaveLength(1);
+    await click('issued-reverse-dismiss');
+    await waitFor(() => expect(cardState()).toBe('none'));
+    expect(heldRev(s.r)).toBeUndefined();
+    expect(document.activeElement).toBe(document.getElementById('issued-title'));
+    await act(async () => { s.r.revHolds.put('uid-a', liveHold(s.made[1].id)); });
+    await showAndChoose(STORE_2);
+    await listReady();
+    await settle();
+    expect(cardState(), 'never in another store').toBe('none');
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it('SII-267. FIX2 item 1: a Check payment read begun while the attempt was ATTACHED settles nothing once it was detached before the read answered; a read begun after the detach (its own context) may say reversed', () => {
+    const late = createReversalHoldStore();
+    late.put('u', liveHold('i'));
+    late.detach('u');
+    seeReversal(late, 'u', 'k-live', 'reversed', true);
+    expect(late.get('u'), 'the late answer changes nothing').toMatchObject({ csrf: null, state: 'unresolved', seen: null, attributed: false });
+    seeReversal(late, 'u', 'k-live', 'not-reversed', true);
+    expect(late.get('u')).toMatchObject({ seen: null });
+    seeReversal(late, 'u', 'k-live', 'reversed', false);
+    expect(late.get('u'), 'a read begun detached (after the detach) is its own').toMatchObject({ state: 'reversed', attributed: false, seen: 'reversed' });
+    late.dispose();
+  });
+
+  it('SII-268. FIX2 item 2: after a FIRST send that ran nothing (denied) the confirmation is gone — focus back on the row\'s Reverse payment — so no second key can leave on the old review; a new press runs a NEW R2 review first', async () => {
+    const s = await setup();
+    s.server.payments.set(s.made[1].id, [pay(1)]);
+    await open(2);
+    s.revScripts.push(chain(403, 'forbidden'));
+    await reverse(P(1));
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    expect(revAlert()).toBe(REVERSE_TEXT.denied);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-reverse')));
+    expect(s.posts).toHaveLength(1);
+    const mark = s.log.length;
+    await review(P(1));
+    expect(s.log.slice(mark).filter((l) => l.startsWith('GET ')).length, 'a fresh review read').toBeGreaterThan(0);
+    expect(tid('issued-reverse-confirm').querySelector('input[type=radio]:checked'), 'no reason carried over').toBeNull();
+    expect(s.posts).toHaveLength(1);
+  });
+
+  /** After a first send's step-up on invoice 2's P(1) (P(2) listed too): the password typed, the sign-in pressed. */
+  async function stepUpSignIn(s: Setup) {
+    s.server.payments.set(s.made[1].id, [pay(1), pay(2)]);
+    await open(2);
+    s.revScripts.push(chain(403, 'step_up_required'));
+    await reverse(P(1));
+    await waitFor(() => expect(tid('issued-reverse-reauth-group')).toBeInTheDocument());
+    type('issued-reverse-reauth-password', 'correct horse');
+  }
+
+  it('SII-270. FIX3 req 1 (review-3 LOW-1): a renewal whose re-read settles AFTER its confirmation was kept and another row\'s confirmation opened never closes that other confirmation', async () => {
+    const s = await setup();
+    await stepUpSignIn(s);
+    s.server.hold.payments = 1; // the renewal's history read (R7) stays out
+    await user().click(tid('issued-reverse-reauth-confirm'));
+    await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['payments']));
+    await click('issued-reverse-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await review(P(2)); // a NEW confirmation, on the other payment
+    await act(async () => { s.server.held.shift()!.release(); }); // the renewal's superseded read answers late
+    await settle();
+    expect(tid('issued-reverse-confirm'), 'the other confirmation stays open').toBeInTheDocument();
+    expect(tid('issued-reverse-confirm-status')).not.toHaveTextContent(REVERSE_TEXT.renewed);
+    expect(revAlert()).toBe('');
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it('SII-271. FIX3 req 2: a renewal whose confirmation was closed while its eligibility re-read was out leaves it closed and says nothing about it (no "can no longer reverse"); nothing is sent', async () => {
+    const s = await setup();
+    await stepUpSignIn(s);
+    s.gate.elig = 1;
+    await user().click(tid('issued-reverse-reauth-confirm'));
+    await waitFor(() => expect(s.held.map((h) => h.kind)).toEqual(['elig']));
+    await click('issued-reverse-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull());
+    await act(async () => { s.held.shift()!.release(reply(200, { eligibility: 'not_allowed' })); });
+    await settle();
+    expect(screen.queryByTestId('issued-reverse-confirm')).toBeNull();
+    expect(revAlert()).toBe('');
+    expect(revStatus()).toBe('');
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['step-up', () => chain(403, 'step_up_required'), REVERSAL_NOTE_TEXT.stepUp],
+    ['key reused (422)', () => reply(422, { error: 'idempotency_key_reused' }), REVERSAL_NOTE_TEXT.keyReused],
+    ['signed out (401)', () => chain(401, 'unauthenticated'), REVERSAL_NOTE_TEXT.signedOut],
+  ] as const)('SII-272. FIX3 req 4: a resend answered %s withdraws Retry reversal and the card says why and what is left (Check payment, Dismiss); never "refund"', async (_label, answer, note) => {
+    const s = await setup();
+    await unresolved(s);
+    s.revScripts.push(answer());
+    await click('issued-reverse-retry');
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', retryable: false }));
+    expect(note).toMatch(/Use Check payment\.$/);
+    if (note === REVERSAL_NOTE_TEXT.signedOut) {
+      // The 401 ends the session, which detaches the attempt at once: the note is held, but a detached card shows its own
+      // reason (the note line is for attached attempts). Reconnected and reopened, the card says why and what is left.
+      expect(heldRev(s.r)).toMatchObject({ note, csrf: null });
+      await waitFor(() => expect(screen.queryByTestId('issued-retry')).not.toBeNull());
+      await click('issued-retry');
+      if ((screen.queryByTestId('issued-store') as HTMLSelectElement | null)?.value !== STORE_1 || screen.queryByTestId('issued-show') !== null) await showAndChoose(STORE_1);
+      await listReady();
+      await open(2);
+      await waitFor(() => expect(tid('issued-reverse-card-status')).toHaveTextContent(REVERSE_TEXT.cardDetached));
+      expect(screen.queryByTestId('issued-reverse-card-note')).toBeNull();
+    } else await waitFor(() => expect(tid('issued-reverse-card-note')).toHaveTextContent(note));
+    expect(cardButtons()).toEqual([REVERSE_TEXT.check, REVERSE_TEXT.dismiss]);
+    expect(tid('issued-reverse-card').textContent).not.toMatch(/refund/i);
+    expect(s.posts).toHaveLength(2);
+  });
+
+  it('SII-273. FIX3 req 4 (review-3 LOW-3): a Check payment begun while the attempt was attached, refused because another tab\'s session detached it mid-read, says so on the card (never silent); a new Check may then read', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    await unresolved(s);
+    s.server.hold.payments = 1;
+    await click('issued-reverse-check');
+    await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['payments']));
+    s.server.otherTab('uid-a');
+    await focusEvents();
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ csrf: null, state: 'unresolved' }));
+    await act(async () => { s.server.held.shift()!.release(); });
+    await settle();
+    // The new session closed the dialog: back on invoice 2, its card says why that Check settled nothing.
+    if (screen.queryByTestId('issued-view') === null) {
+      if (screen.queryByTestId('issued-retry') !== null) await click('issued-retry');
+      if ((screen.queryByTestId('issued-store') as HTMLSelectElement | null)?.value !== STORE_1 || screen.queryByTestId('issued-show') !== null) await showAndChoose(STORE_1);
+      await listReady();
+      await open(2);
+    }
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.checkDetached));
+    expect(cardState()).toBe('detached');
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', seen: null });
+    // A new Check then reads (detached, so its answer is shown, never a resend): the refusal text goes, the read is seen.
+    await click('issued-reverse-check');
+    await waitFor(() => expect(tid('issued-reverse-card-seen')).toHaveTextContent(REVERSE_TEXT.seenNotReversed));
+    expect(tid('issued-reverse-card-seen')).not.toHaveTextContent(REVERSE_TEXT.checkDetached);
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', seen: 'not-reversed' });
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each(['a store switch', 'another tab\'s session token'] as const)('SII-274. FIX3 E2: a Check payment whose page-2 history read is out when %s detaches the attempt — released with the exact row REVERSED — settles nothing: unresolved, seen null, nothing sent', async (arm) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    await unresolved(s);
+    s.server.payments.set(s.made[1].id, behind(50).map((p) => (p.id === P(1) ? { ...p, reversal: { reversedAt: REVERSED_AT, reasonCode: 'other' } } : p)));
+    const reads = s.server.paymentReads().length;
+    s.server.hold.payments = 2;
+    await click('issued-reverse-check');
+    await waitFor(() => expect(s.server.held).toHaveLength(1));
+    await act(async () => { s.server.held.shift()!.release(); }); // page one answers
+    await waitFor(() => expect(s.server.held).toHaveLength(1)); // page two is out
+    expect(s.server.paymentReads()[reads + 1]).toContain('after=');
+    if (arm === 'a store switch') {
+      await close();
+      await showAndChoose(STORE_2);
+      await listReady();
+    } else {
+      s.server.otherTab('uid-a');
+      await focusEvents();
+    }
+    await waitFor(() => expect(heldRev(s.r)).toMatchObject({ csrf: null }));
+    await act(async () => { s.server.held.shift()!.release(); });
+    await settle();
+    expect(heldRev(s.r)).toMatchObject({ state: 'unresolved', seen: null, key: s.r.keys[0] });
+    expect(s.posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['the Retry POST', 'a sign-out'], ['the Retry POST', 'another tab\'s session token'],
+    ['the Retry\'s session check', 'a sign-out'], ['the Retry\'s session check', 'another tab\'s session token'],
+  ] as const)('SII-275. FIX3 E3: while %s is out, %s detaches the attempt — its late answer changes nothing: no further POST, the hold stays unresolved with no token', async (out, arm) => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const s = await setup();
+    await unresolved(s);
+    if (out === 'the Retry POST') s.gate.post = 1;
+    else s.server.hold.current = 1;
+    await click('issued-reverse-retry');
+    if (out === 'the Retry POST') await waitFor(() => expect(s.held.map((h) => h.kind)).toEqual(['post']));
+    else await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['current']));
+    if (arm === 'a sign-out') {
+      await act(async () => { await s.props.session!.logout(); });
+      await waitFor(() => expect(heldRev(s.r)).toMatchObject({ csrf: null }));
+    } else {
+      s.server.otherTab('uid-a');
+      await focusEvents();
+    }
+    const late = out === 'the Retry POST' ? s.held.shift()! : s.server.held.shift()!;
+    // A held session check answers with the session as it stands NOW (the other tab's token), as a real late answer would.
+    const now = out === 'the Retry\'s session check' && arm !== 'a sign-out' ? await s.server.fetch(late.url) : undefined;
+    await act(async () => { late.release(now); });
+    await settle();
+    expect(heldRev(s.r)).toMatchObject({ csrf: null, state: 'unresolved', key: s.r.keys[0] });
+    expect(s.posts).toHaveLength(out === 'the Retry POST' ? 2 : 1);
   });
 });
