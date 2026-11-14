@@ -896,3 +896,10 @@ Authored from commit `9c4d201` (`9c4d2010149c42aee362566a5f40f6897b8243ce`, tree
 **Carried, and not claimed.**
 - DA-118, DA-119, DA-132, DA-183, DA-186 and DA-187 stay OPEN; DA-184 stays Closed. DA-183 and DA-186 are amended in [08](./08-production-gate-and-risk-register.md) for P2C. No gate changes status: 37 gates, 29 OPEN, 7 PARTIAL and 1 PASS at repository level. Authorized for deployment: no.
 - Not claimed: that a reversal returns money, or any refund; credit notes (they remain for the next workstream), receipts, a cash drawer or customer balances; any provider, terminal or card data; simultaneous attempts at the browser level; a real page reload with an unresolved attempt; screen-reader announcement; voiding after every payment is reversed through the shop; M7b completion; PCI validation or any SAQ; any jurisdiction's rules; statutory retention; layout beyond the widths and fonts the tests and the QA used; deployment; production readiness.
+
+### 12.15 Adopted target amendments from doc 16 (2026-11-14; not implemented)
+
+- **CN-A1-A amends D-PAY-1:** remaining = total − credited − paid; the payments read gains `creditedCents`, and `dueCents` stays the Total.
+- **CN-A2 amends D-PAY-2:** the payment cap counts active credit notes; 038 replaces 037's `record_v2` and revokes `tmpos_app`'s EXECUTE on it. Payment registrations created before 038 still complete through the replacement routine, which can refuse `amount_exceeds_remaining` once credits count.
+- **CN-A3 amends D-PAY-5:** a void is also refused while a credit note is active (`credit_notes_recorded`).
+- All three take effect only at CN-P1 delivery; §12 above describes the shipped behaviour, unchanged. A credit note moves no money and is not a refund; refunds stay deferred. See [16](./16-m7b-invoice-credit-note-decision-pack.md) §12.
