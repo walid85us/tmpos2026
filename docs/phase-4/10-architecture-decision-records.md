@@ -1677,6 +1677,18 @@ What "the session token" is, from the stage's inventory of the mechanism:
 - **Still open.** The shop's issue control and recovery (CN-P2) and withdrawal control (CN-P3); refunds; reusable customer balances; printing, delivery and any tax filing; deployment.
 - **Evidence.** Recorded by acceptance id in [16](./16-m7b-invoice-credit-note-decision-pack.md) §12.4 (2026-11-15, local, on the uncommitted candidate): every database, unit and component test that ran passed (ICH-11, the HTTP cutover variant, is skipped and stays UNVERIFIED), and the pinned 038 checksums are those named there. Owner-directed manual QA (CN-29) passed 12 of 12 on synthetic data (not UAT); the owner's review and exact-commit CI (CN-28) are pending.
 
+**Addendum (M7B-CREDITNOTES-P1 closeout; 2026-11-15).** No decision changes. CN-P1 is integrated on `main` at `064b5f1ddafc5579f496cb084415f283fa0cb20c`, a fast-forward from `04bd9d6`. It consists of the implementation `c20b7f7` and three test-only follow-ups, `2773871`, `079c772` and `064b5f1`. Exact-commit CI (CN-28) passed:
+- candidate run 43756236582, attempt 1;
+- main run 43759859862: `quality` from attempt 2, one failed-job rerun after M7TE-14 and M7TE-C1 each returned 503 in attempt 1 (cause UNCONFIRMED); `appsec` from attempt 1.
+
+Open items are unchanged:
+- ICH-11, the HTTP cutover variant, is the one skipped test case and stays UNVERIFIED.
+- CN-38 stays a deployment prerequisite.
+- G-APPSEC stays PARTIAL and production-blocking.
+- F-2 and F-5 stay missing inputs.
+
+The Status and Evidence text above keeps its candidate-stage wording as history. Nothing is deployed, and deployment is not authorized. See [16](./16-m7b-invoice-credit-note-decision-pack.md) §12.5.
+
 ---
 
 **Reconciliation note:** the legacy Backend Control Plane numbering (phase-1.6 M21+ / phase-2.0 M24–M58) is **superseded** by the M0–M9 roadmap; the read-only CP is absorbed into M4+M8 and controlled write actions into M7 verticals ([09](./09-roadmap-m0-m9.md) §3).

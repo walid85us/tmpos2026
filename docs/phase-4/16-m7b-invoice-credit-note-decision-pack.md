@@ -1,6 +1,14 @@
 # 16 — Credit notes against an issued store invoice: decision pack
 
-**Status: ADOPTED; CN-P1 (CANDIDATE) IMPLEMENTED — NOT DEPLOYED (owner decisions of 2026-11-14, stage M7B-CREDITNOTES-D1-P0; delivery stage M7B-CREDITNOTES-P1).**
+**Status: ADOPTED; CN-P1 IMPLEMENTED IN CODE ON `main` `064b5f1` — NOT DEPLOYED (owner decisions of 2026-11-14, stage M7B-CREDITNOTES-D1-P0; delivery stage M7B-CREDITNOTES-P1; closeout recorded 2026-11-15).**
+- The owner chose every recommendation; §12 records each choice.
+- CN-P1 implements §12.2: migration 038, the server routes and commands, and the shop's decoders and display. It is integrated on `main` at `064b5f1ddafc5579f496cb084415f283fa0cb20c`, a fast-forward from `04bd9d6`. The delivery record is §12.4, the integration and exact-commit CI record is §12.5, and the decision record is [10](./10-architecture-decision-records.md) ADR-53.
+- Exact-commit CI (CN-28) passed on `064b5f1`: candidate run 43756236582 (attempt 1), and main run 43759859862, whose `quality` result comes from attempt 2 (one failed-job rerun after a tenant-entry failure in attempt 1) and whose `appsec` result comes from attempt 1 (§12.5).
+- Owner-directed manual QA (CN-29) passed 12 of 12 on synthetic data (§12.4; not UAT). It ran on the final candidate tree, after the independent review's findings were applied; since then only Markdown records and test files have changed (§12.5).
+- Nothing is deployed, no managed database is touched, and deployment is not authorized. Credit notes are not available in the product: CN-P2 (the shop's issue control and recovery) and CN-P3 (the shop's withdrawal control) are not built.
+- No gate changes status. F-2 and F-5 stay missing inputs. Refunds and every money movement stay excluded.
+
+**Status at the CN-P1 candidate, 2026-11-15 (history): ADOPTED; CN-P1 (CANDIDATE) IMPLEMENTED — NOT DEPLOYED.**
 - The owner chose every recommendation; §12 records each choice.
 - CN-P1 (candidate) implements §12.2 as built on `main` `04bd9d6`: migration 038, the server routes and commands, and the shop's decoders and display. The delivery record is §12.4 and the decision record is [10](./10-architecture-decision-records.md) ADR-53.
 - The CN-P1 candidate has had an independent review (no blocker or major finding; minor findings applied). Owner-directed manual QA (CN-29) passed 12 of 12 on synthetic data (§12.4; not UAT). The owner's review and exact-commit CI are pending. Nothing is deployed. Credit notes are not available in the product.
@@ -693,7 +701,7 @@ D-CN-12 duties and limits:     ACCEPT A
 
 ### 12.4 CN-P1 delivery record (candidate)
 
-**Status.** CN-P1 (candidate) is implemented to §12.2 on a candidate built on `main` `04bd9d6`. The decisions it made beyond this text, and the contract changes CN-I1 to CN-I5 as built, are in [10](./10-architecture-decision-records.md) ADR-53. An independent review found no blocker or major issue and its minor findings are applied; owner-directed manual QA (CN-29) is recorded below; the owner's review and exact-commit CI (CN-28) are pending. Nothing is deployed, no managed database is touched, and credit notes are not available in the product.
+**Status.** CN-P1 (candidate) is implemented to §12.2 on a candidate built on `main` `04bd9d6`. The decisions it made beyond this text, and the contract changes CN-I1 to CN-I5 as built, are in [10](./10-architecture-decision-records.md) ADR-53. An independent review found no blocker or major issue and its minor findings are applied; owner-directed manual QA (CN-29) is recorded below; the owner's review and exact-commit CI (CN-28) are pending. Nothing is deployed, no managed database is touched, and credit notes are not available in the product. *(Superseded 2026-11-15: the owner authorized the commit, the candidate push and the integration on `main`; CN-28 passed (§12.5).)*
 
 **Changed areas.**
 - **Migration 038** (`server/platform-identity/migrations/038_m7b_invoice_credit_note.{up,down}.sql`): schema `tmpos_invoice_credit_note` with the credit-note, withdrawal, counter and registration tables; the register, proof, issue, attempts, settle, withdraw and list routines; the replacements `m7b_invoice_payment_record_v3`, `m7b_invoice_void_v3` and `m7b_invoice_payments_get_v2` with the three revocations; the insert-time barrier triggers on the payment and void tables; the rollback-order anchor; two audit subject columns.
@@ -710,8 +718,8 @@ Recorded 2026-11-15 on the uncommitted candidate (Node 20.20.0, PostgreSQL 16, e
 - **Run, cutover:** CN-34 (i)–(iv) call the retained routines after the migration (ICC-01–03, ICC-06). Distinct from them, CN-34s1 (ICC-08) and CN-34s2 (ICC-09) stage a call admitted before 038 and paused on 016's hold: 038 commits while the call is still blocked, a credit commits, and the call then fails 23000 at the barrier with nothing of its own written; the counterfactual with the barrier lifted commits and breaks I-CN. ICC-07, a property check tagged with both, shows 038 applies while `app_user`, `platform_identity`, `issuer_key`, `tenant_session` and the session tables are held.
 - **Run, HTTP layer (ICH):** CN-10c (a real store-scope `store_owner`, signed in through the tenant entry, registers, proves, issues, lists, looks up, confirms and withdraws within the sign-in window; one routine audit row per mutation, none for the list and lookup), on the same invoice and store as CN-10b's manager denials; CN-04; CN-05; CN-06; CN-07a; CN-09 (real foreign ids); CN-10; CN-11; CN-12; CN-13; CN-15; CN-16; CN-23; CN-24; CN-25; CN-33.
 - **Run, unit and component:** CN-19 (the server decoder cases in `server/runtime/invoicePayments.test.ts` and `server/runtime/invoiceCreditNotes.test.ts`, and the shop's IIC-34), CN-20 (a frozen copy of the pre-change shop decoder refuses the new amounts and does not know `credit_notes_recorded`; the real pre-change module was also run once outside the suite), CN-26 (the 001–038 ledger and approved-grant pins in `server/persistence/postgresStartupPreflight.test.ts`), CN-27a, CN-31 and CN-37 (component).
-- **Not run, or limited:** the HTTP cutover variant (ICH-11) stays UNVERIFIED; CN-36 and true concurrency are database-layer only; CN-04's "past 24 h" is covered by the permanent attempt constraint, not by staging key expiry; the browser assertions added for CN-27a, CN-31 and CN-37 did not run locally; CN-33's "Name not set" has no shop surface until CN-P2.
-- **Pending:** exact-commit CI (CN-28), F-2 sign-off (CN-30) and the cutover rehearsal (CN-38, deployment).
+- **Not run, or limited:** the HTTP cutover variant (ICH-11) stays UNVERIFIED; CN-36 and true concurrency are database-layer only; CN-04's "past 24 h" is covered by the permanent attempt constraint, not by staging key expiry; the browser assertions added for CN-27a, CN-31 and CN-37 did not run locally (the browser file ran in CI, §12.5); CN-33's "Name not set" has no shop surface until CN-P2.
+- **Pending at the candidate stage:** exact-commit CI (CN-28), F-2 sign-off (CN-30) and the cutover rehearsal (CN-38, deployment). *(Updated 2026-11-15: CN-28 passed (§12.5); CN-30 and CN-38 stay pending.)*
 
 **Manual QA (CN-29), recorded 2026-11-15.** Owner-directed browser QA on synthetic data, **not UAT**, not a deployment and not a legal or tax review. Isolated QA run `qa-20261115t1238-732c`, generation 1, on candidate tree `d970dc6035f6d05ad0607531f62931d4229226a8` (based on `04bd9d6`). The QA tree added one local, uncommitted, QA-only line so the disposable cluster was crash-durable (`` resolveDisposableTarget(`QA ${runId}`, { durable: true }) `` in `tests/qa/interactive/supervisor.mjs`; overlay diff sha256 `19906b48521a32dcb8dc34403737df6f5222ac63f646241b739c47308d8d6c6d`); it is not part of the candidate. The QA database applied 001–038; a read-only check at the start showed `fsync`, `synchronous_commit` and `full_page_writes` on. Credit notes were made over the real routes by the store-scope `store_owner`, since CN-P1 has no shop control for them. The owner set every result:
 
@@ -742,3 +750,63 @@ Recorded 2026-11-15 on the uncommitted candidate (Node 20.20.0, PostgreSQL 16, e
 - The unresolved items that could change 038's shape stay listed in D-CN-10; any change is a later additive migration, never an edit of 038.
 - Live store-scope owner provisioning stays subject to deployment review.
 - No gate changes status. Nothing is deployed.
+
+### 12.5 CN-P1 integration and exact-commit CI (closeout, 2026-11-15)
+
+**Repository integration.** With the owner's authorization, `refs/heads/main` was fast-forwarded once, without force, from `04bd9d6` to `064b5f1ddafc5579f496cb084415f283fa0cb20c`. The branch `m7b-credit-notes-p1-candidate` stays at the same commit. CN-P1 consists of four commits:
+
+| Commit | What it changes |
+|---|---|
+| `c20b7f79af8dfb56cab380a8d921c530f7270b1c` | The implementation: 82 paths (10 added, 72 modified). It is the final candidate tree `d970dc6035f6d05ad0607531f62931d4229226a8` (after the independent review's findings were applied) plus the CN-P1 records in docs 09, 10, 13, 15 and 16 and the Phase 4 index |
+| `2773871525acb746d3b11b4a8aab77878e26e8a8` | Test only: the payment registration HTTP suite (IRH-10 to IRH-12) holds autovacuum off its flush-controlled windows, and IRH-11 proves its unflushed precondition before it judges the 503 |
+| `079c772b905c9f14434c90c03b6a90fc317b6930` | Test only: the migration smoke (ICS-02) resolves the credit-note proof routine on its proving connection before the registration |
+| `064b5f1ddafc5579f496cb084415f283fa0cb20c` | Test only: the cutover suite (ICC) does the same before each registration, and the shop browser teardown (R-DB-1) expects 038's void barrier trigger once 038 is applied |
+
+The 038 checksums pinned in §12.4 are unchanged at `064b5f1`.
+
+**The final candidate tree and the manual QA.** The 12 results in §12.4 come from their original run, `qa-20261115t1238-732c` on tree `d970dc60…`. That is the final candidate tree, after the independent review's findings were applied; the review itself read an earlier revision. Between that tree and `064b5f1`, `git diff --name-only` lists only six Markdown records under `docs/phase-4/` (in `c20b7f7`) and four test files (the three follow-ups). No server, shop, migration, CI workflow, package or lockfile path changed, so the server and shop code the QA exercised is the code on `main`. The QA-only overlay line is not in the repository. The QA was not repeated on `064b5f1`. Its limits stand as §12.4 records them: synthetic data, one isolated run, not UAT, not a deployment, and not a legal or tax review.
+
+**Exact-commit CI (CN-28).**
+
+| Run | Event and head | Attempt | `quality` | `appsec` |
+|---|---|---|---|---|
+| 43756236582 | `workflow_dispatch` on `m7b-credit-notes-p1-candidate`, `064b5f1` | 1 | success | success |
+| 43759859862 | push to `main`, `064b5f1` | 1 | failure at step 30 (tenant entry) | success |
+| 43759859862 | the same | 2 (one owner-authorized failed-job rerun) | success, run fresh (22:24:51–22:51:23 UTC) | carried from attempt 1 (same job times) |
+
+- **Main, attempt 1.** `quality` failed at step 30, "Tenant entry runtime against disposable PostgreSQL". 14 of the 16 cases passed. M7TE-14's login and M7TE-C1's customer create on the compiled entry each got 503 `service_unavailable` (expected 200 and 201). Steps 31 onward were skipped, so attempt 1 verified nothing after the tenant entry. The original log is kept.
+- **The 503 cause is UNCONFIRMED.**
+  - The CI output carries neither the server's logged refusal reason for those requests nor any database log line for them.
+  - The same tree passed every step in the candidate run.
+  - A local investigation reproduced the same refusal class on both `04bd9d6` and `064b5f1`, but only under induced disk-write load: the rate limiter's 500 ms fail-closed write budget was exceeded and the request refused as `rate_limit_timeout`. This is consistent with the CI failure but does not establish its cause.
+- **Main, attempt 2.** Every `quality` step passed and none was skipped. The log has no failing test and exactly one skipped test case. By suite:
+  - Tenant entry: 16 of 16, M7TE-14 and M7TE-C1 included.
+  - Payment registration HTTP (IRH): 13 of 13.
+  - Credit-note migration smoke (ICS): 2 of 2.
+  - Credit-note routines (ICR): 28 of 28.
+  - Credit-note cutover (ICC): 11 of 11. This includes CN-34s1 (ICC-08), CN-34s2 (ICC-09) and ICC-07, which is tagged with both.
+  - Credit-note HTTP (ICH): 13 tests, 12 passed, 0 failed, 1 skipped. The passes include CN-10c (ICH-01: a real store-scope `store_owner` through the tenant entry). The skip is the single test case ICH-11, the CN-34s1 and CN-34s2 HTTP variant, reported "NOT ATTEMPTED — not stageable over the real tenant entry"; the rest of the suite ran. The HTTP cutover variant stays UNVERIFIED.
+  - Rate-limited runtime (M6RS): 17 of 17.
+  - Payment proof durability: 14 of 14.
+  - The shop browser file: 104 of 104 in Firestore-emulator mode (the emulator started). This includes CN-P1's additions to it (the payment summary's "Invoice total" and "Credited" labels and the Credited value, CN-31). Its R-DB-1 teardown, which now expects 038's void barrier, passed.
+  - The Firestore emulator suite: 41 of 41.
+  - The deterministic suites: 185 of 185.
+  - The shop suites: 1,388 cases, ratchet passed.
+  - Builds: build integrity passed, both builds succeeded, and the forbidden-artifact scan passed.
+  - The dependency audit passed with 0 Critical. The production tree has 0 High, 14 moderate and 3 low; the full tree has 10 High, 32 moderate and 3 low. G-APPSEC stays PARTIAL and production-blocking.
+- **`appsec` (attempt 1, carried into attempt 2).** Semgrep rule tests 6 of 6, the repository scan reconciled against its manifest, and Gitleaks reconciled.
+- **CI on earlier heads (history).** Each run stopped at or before the first credit-note suite, so the credit-note routine, cutover and HTTP suites (ICR, ICC, ICH) did not run. The follow-ups correct test timing preconditions and, in `064b5f1`, one teardown expectation; none changes product code. The M6RS-07 failure is not attributed to any follow-up.
+  - `c20b7f7`: run 43722088580. Attempt 1 failed at M6RS-07; attempt 2, a failed-job rerun, failed at IRH-11.
+  - `2773871`: run 43741302186. Attempt 1 failed in the credit-note migration smoke itself (ICS-02), before ICR, ICC and ICH.
+
+**Open items, unchanged by this closeout.**
+- ICH-11, the HTTP cutover variant, stays UNVERIFIED. CN-38, the cutover runbook rehearsal, stays a deployment prerequisite.
+- G-APPSEC stays PARTIAL and production-blocking.
+- F-2 and F-5 stay missing inputs, and CN-30 (the F-2 sign-off) stays pending. DA-187 stays OPEN: as §12.3 records, it and F-5 must still widen to credit notes before live use.
+- Live store-scope owner provisioning stays subject to deployment review.
+- 37 gates: 29 OPEN, 7 PARTIAL and 1 PASS at repository level; no gate row changes.
+- Deployment is not authorized. Nothing is deployed, and no managed database is touched.
+
+**Next slice.** Under D-CN-11 A, the next slice is CN-P2, the shop's issue control and recovery. It is not started and needs its own approval.
+
+**Not claimed:** deployment, production readiness, M7b completion, any jurisdiction's rules, the tax split's correctness, the HTTP cutover variant, or the cutover runbook.
