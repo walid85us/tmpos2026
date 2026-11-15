@@ -901,9 +901,13 @@ async function teardownDatabase() {
           (select count(*) from tmpos_invoice_void.issued_invoice_void where tenant_id = any(${TENANTS}::uuid[]))::int as voids,
           (select count(*) from public.audit_event where action_id = ${VOID_ACTION} and tenant_id = any(${TENANTS}::uuid[]))::int as audits,
           (select pg_catalog.string_agg(g.tgname::text || ':' || g.tgenabled::text, ',' order by g.tgname) from pg_catalog.pg_trigger g
-            where g.tgrelid = 'tmpos_invoice_void.issued_invoice_void'::regclass and not g.tgisinternal) as guards`;
-        assert.deepEqual({ ...state }, { voids: 0, audits: 0, guards: 'trg_issued_invoice_void_guard:A,trg_issued_invoice_void_truncate:A' },
-          'R-DB-1: no void record or void audit of this file is left, and both void guards are ALWAYS again');
+            where g.tgrelid = 'tmpos_invoice_void.issued_invoice_void'::regclass and not g.tgisinternal) as guards,
+          exists (select 1 from public.schema_migrations where version = '038') as at038`;
+        const { at038, ...rest } = state;
+        // 038 adds its cutover barrier (enabled ALWAYS) to the void table, beside 035's two guards.
+        const guards = `${at038 ? 'trg_issued_invoice_void_credit_note_barrier:A,' : ''}trg_issued_invoice_void_guard:A,trg_issued_invoice_void_truncate:A`;
+        assert.deepEqual(rest, { voids: 0, audits: 0, guards },
+          'R-DB-1: no void record or void audit of this file is left, and every void trigger is ALWAYS again (038\'s barrier when 038 is applied)');
       });
       await step(async () => { // R8, checked rather than assumed
         const [{ present }] = await owner`select to_regclass('tmpos_invoice_draft.invoice_draft') is not null as present`;

@@ -458,16 +458,27 @@ const openPaymentRegistration = async (reg) => (await owner`select count(*)::int
 
 // 038's credit-note writers (B, the store-scope store owner).
 async function cnRegister(f, who, gross = CREDIT, reason = 'pricing_error') {
+  // PRECONDITION: before the registration, the proving backend runs 038's proof routine once for an unregistered id (it can only
+  // answer not_found, asserted). After a 038 down and up, the first call on a backend compiles the routine and reads its TOAST
+  // rows, pruning the dead ones the down left: xid-less WAL its own transaction writes before it samples its target, which only a
+  // later flush covers (037's documented self-prune, which the adapter meets with one fresh transaction). Here that prune lands
+  // before the registration, whose COMMIT flushes it, so cnIssue's real call writes no such prune ahead of its own target.
+  // Without it ICC-02's proof answered not_durable after its 1,000 ms in CI-order replays of run 43741302186 (a prune of
+  // pg_toast_1255 block 31).
+  const [warm] = await prover.unsafe(`select o_outcome, pg_catalog.pg_backend_pid() as pid from ${CN}.m7b_invoice_credit_note_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
+    [who.key, f.S, f.invoice, f.T, randomUUID(), 0]);
+  assert.equal(warm.o_outcome, 'not_found', 'the proof routine resolved on the proving backend before the registration');
   const registration = randomUUID();
   const attempt = randomUUID();
   const [r] = await runtime.unsafe(`select o_outcome from ${CN}.m7b_invoice_credit_note_register($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::bigint, $8::text, $9::uuid)`,
     [who.key, f.S, f.invoice, f.T, registration, attempt, String(gross), reason, randomUUID()]);
   assert.equal(r.o_outcome, 'applied', 'credit-note registered');
-  return { who, registration, attempt, gross: String(gross), reason };
+  return { who, registration, attempt, gross: String(gross), reason, proverPid: warm.pid };
 }
 async function cnIssue(f, reg) {
-  const [pr] = await prover.unsafe(`select o_outcome, o_proof from ${CN}.m7b_invoice_credit_note_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
+  const [pr] = await prover.unsafe(`select o_outcome, o_proof, pg_catalog.pg_backend_pid() as pid from ${CN}.m7b_invoice_credit_note_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
     [reg.who.key, f.S, f.invoice, f.T, reg.registration, 1000]);
+  assert.equal(pr.pid, reg.proverPid, 'the proof is asked on the backend that resolved the routine before the registration');
   assert.equal(pr.o_outcome, 'proof', 'the credit-note proof issues');
   const creditNote = randomUUID();
   const [iss] = await runtime.unsafe(`select o_outcome from ${CN}.m7b_invoice_credit_note_issue($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::bigint, $9::text, $10::text, $11::uuid)`,
