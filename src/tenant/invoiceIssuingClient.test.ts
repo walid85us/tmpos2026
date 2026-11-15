@@ -1097,6 +1097,58 @@ test('IIC-32. M7B-PAYMENTS-P1: the void\'s sealed 409 exactly {"error":"payments
   }
 });
 
+test('IIC-32b. M7B-CREDITNOTES-P1 (CN-27a): the void\'s sealed 409 exactly {"error":"credit_notes_recorded"} (replayed too) is its own outcome, credit-notes-recorded; the chain\'s envelope, an extra key, another status or a near word is never it, and payments_recorded stays its own — each ONE fetch, never retried', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [sealed(409, 'credit_notes_recorded'), { kind: 'credit-notes-recorded' }],
+    [json(409, { error: 'credit_notes_recorded' }, { 'idempotent-replayed': 'true' }), { kind: 'credit-notes-recorded' }],
+    [new Response('{"error":"credit_notes_recorded"}', { status: 409, headers: { 'content-type': 'application/json' } }), { kind: 'credit-notes-recorded' }],
+    [sealed(409, 'payments_recorded'), { kind: 'payments-recorded' }],
+    [refused(409, 'credit_notes_recorded'), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'credit_notes_recorded', more: 1 }), { kind: 'unknown', responded: true }],
+    [sealed(409, 'credit_note_recorded'), { kind: 'unknown', responded: true }],
+    [sealed(409, 'CREDIT_NOTES_RECORDED'), { kind: 'unknown', responded: true }],
+    [sealed(409, 'already_issued'), { kind: 'unknown', responded: true }], // the issue's word, never the void's
+    [sealed(422, 'credit_notes_recorded'), { kind: 'unknown', responded: true }],
+    [sealed(200, 'credit_notes_recorded'), { kind: 'unknown', responded: true }],
+    [new Response('{"error":"credit_notes_recorded"}', { status: 409 }), { kind: 'unknown', responded: true }], // no JSON content type
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.voidInvoice(STORE, INVOICE, KEY, VOID_BODY, CSRF), outcome, name);
+    assert.equal(calls.length, 1, name);
+  }
+});
+
+// CN-20 (doc 16 §8): a shop built BEFORE CN-P1 fails closed against the new server. These two functions are a frozen copy of the
+// pre-CN-P1 shop's logic at 04bd9d6 (invoiceIssuingClient.ts, paymentsPageOf's amounts check and voidInvoice's sealed 409s):
+// the exact four-key amounts check, and the three sealed words it knew; anything else fell to `unknown`.
+const OLD_SHOP_AMOUNT_KEYS = ['currency', 'dueCents', 'appliedCents', 'remainingCents'];
+const oldShopAcceptsAmounts = (amounts: Record<string, unknown>): boolean => {
+  const keys = Object.keys(amounts);
+  if (keys.length !== OLD_SHOP_AMOUNT_KEYS.length || !OLD_SHOP_AMOUNT_KEYS.every((k) => Object.prototype.hasOwnProperty.call(amounts, k)) || amounts.currency !== 'USD') return false;
+  const { dueCents, appliedCents, remainingCents } = amounts as Record<string, number>;
+  return Number.isSafeInteger(dueCents) && Number.isSafeInteger(appliedCents) && Number.isSafeInteger(remainingCents) && dueCents >= 0 && appliedCents >= 0 && remainingCents >= 0
+    && appliedCents <= dueCents && remainingCents === dueCents - appliedCents;
+};
+const OLD_SHOP_SEALED_VOID_WORDS = ['invalid_state', 'write_conflict', 'payments_recorded'];
+
+test('IIC-32c. CN-20: a shop as it was before CN-P1 refuses the new amounts shape (so it shows the read as unavailable, never a wrong amount) and does not know credit_notes_recorded (so it fails closed); the frozen copy is checked against the old shape, then the new decoder is shown to accept what the old refuses', async () => {
+  // Control: the frozen copy accepts the old shape the old server wrote, so its refusal below is the new key, not a bug in the copy.
+  assert.equal(oldShopAcceptsAmounts({ currency: 'USD', dueCents: 2176, appliedCents: 300, remainingCents: 1876 }), true);
+  // The new server's amounts: the key creditedCents alone makes the old exact-keys check refuse, with or without a credit.
+  const fresh = amountsOf(2176, 300, 500);
+  assert.equal(oldShopAcceptsAmounts(fresh), false);
+  assert.equal(oldShopAcceptsAmounts(amountsOf(2176, 300)), false); // creditedCents 0: refused all the same
+  assert.equal(oldShopAcceptsAmounts(amountsOf(2176, 0, 2176)), false);
+  // The void's new sealed word is not one the old shop knew: it falls past them (to `unknown`, which the shop never shows as a result).
+  assert.equal(OLD_SHOP_SEALED_VOID_WORDS.includes('credit_notes_recorded'), false);
+  // And the current decoder, handed the same bodies, accepts the new shape and no longer the old one.
+  const { client } = scripted(json(200, paymentsBody({ amounts: fresh, paymentStatus: 'recorded_partly' })), json(200, paymentsBody({ amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300, remainingCents: 1876 } })));
+  assert.equal((await client.getPayments(STORE, INVOICE, null, CSRF)).kind, 'ok');
+  assert.equal((await client.getPayments(STORE, INVOICE, null, CSRF)).kind, 'unavailable');
+});
+
 // M7B-PAYMENTS-P2A — the payments read (server/runtime/invoicePayments.ts, doc 15 §12.3): GET …/payments[?after=<id>], the
 // exact 200 its serializer writes, the read's refusals. Read-only: nothing here records, reverses or proves a payment.
 const PAYMENTS_PATH = `/api/v1/stores/${STORE}/invoices/${INVOICE}/payments`;
@@ -1108,13 +1160,13 @@ const REVERSAL = { reversedAt: '2026-10-18T10:00:00.000001Z', reasonCode: 'dupli
 /** Issued, Total 2176, 300 recorded: 100 cash, 200 on a card terminal, and a reversed 500. */
 const paymentsBody = (over: Record<string, unknown> = {}) => ({
   invoice: { id: INVOICE, status: 'issued' },
-  amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300, remainingCents: 1876 },
+  amounts: { currency: 'USD', dueCents: 2176, creditedCents: 0, appliedCents: 300, remainingCents: 1876 },
   paymentStatus: 'recorded_partly',
   payments: [payment(1), payment(2, { amountCents: 200, method: 'external_card_terminal' }), payment(3, { amountCents: 500, reversal: REVERSAL })],
   nextCursor: null,
   ...over,
 });
-const amountsOf = (dueCents: number, appliedCents: number) => ({ currency: 'USD', dueCents, appliedCents, remainingCents: dueCents - appliedCents });
+const amountsOf = (dueCents: number, appliedCents: number, creditedCents = 0) => ({ currency: 'USD', dueCents, creditedCents, appliedCents, remainingCents: dueCents - creditedCents - appliedCents });
 /** A full page of 50 payments of 100 cents (ids 1..50), more after it: the cursor is the last id. */
 const fullPage = (applied = 9000, from = 1) => paymentsBody({
   amounts: amountsOf(10_000, applied), payments: Array.from({ length: 50 }, (_, i) => payment(from + i)), nextCursor: uuid(0x9000 + from + 49),
@@ -1142,8 +1194,11 @@ test('IIC-33. the payments read: ONE GET of …/invoices/{id}/payments with the 
     assert.ok(!call.url.includes(CSRF));
   }
   assert.deepEqual(INVOICE_PAYMENT_STATUSES, {
-    nothing_due: 'Nothing due', no_payment_recorded: 'No payment recorded', recorded_partly: 'Payment recorded in part', recorded_in_full: 'Payment recorded in full', voided: 'Voided',
+    nothing_due: 'Nothing due', no_payment_recorded: 'No payment recorded', recorded_partly: 'Payment recorded in part', recorded_in_full: 'Payment recorded in full',
+    credited_in_full: 'Credited in full', settled_by_payment_and_credit: 'Settled by payment and credit', voided: 'Voided',
   });
+  // M7B-CREDITNOTES-P1 (CN-27b's rule, held here too): no label says Paid, Unpaid or Refunded.
+  for (const label of Object.values(INVOICE_PAYMENT_STATUSES)) assert.doesNotMatch(label, /paid|refund/i);
   assert.deepEqual(Object.keys(INVOICE_PAYMENT_STATUSES).sort(), [...SERVER_PAYMENT_STATUSES].sort());
   assert.deepEqual(Object.keys(INVOICE_PAYMENT_METHODS), [...SERVER_PAYMENT_METHODS]);
   assert.deepEqual(Object.entries(INVOICE_PAYMENT_METHODS), Object.entries(INVOICE_PAYMENT_METHOD_LABELS));
@@ -1158,35 +1213,57 @@ test('IIC-33. the payments read: ONE GET of …/invoices/{id}/payments with the 
   assert.equal(none.calls.length, 0);
 });
 
-test('IIC-34. a payments 200 counts ONLY exactly as the server writes it: every extra or missing key, another invoice, a wrong word for each of the five, -0, an unsafe or out-of-range integer, a bad method, reason or time, a reversal before its recording, the order, a duplicate, the cursor rules, the voided rules and the sum rule are each unavailable', async () => {
+test('IIC-34. a payments 200 counts ONLY exactly as the server writes it: every extra or missing key, another invoice, a wrong word for each of the seven, -0, an unsafe or out-of-range integer, a bad method, reason or time, a reversal before its recording, the order, a duplicate, the cursor rules, the voided rules and the sum rule are each unavailable', async () => {
   const ok = (body: unknown, after: string | null = null) => [body, after, true] as const;
   const bad = (body: unknown, after: string | null = null) => [body, after, false] as const;
   const p1 = payment(1);
   const voided = (over: Record<string, unknown> = {}) => paymentsBody({ invoice: { id: INVOICE, status: 'voided' }, amounts: amountsOf(0, 0), paymentStatus: 'voided', payments: [payment(1, { reversal: REVERSAL })], ...over });
   const rows: Array<readonly [unknown, string | null, boolean]> = [
-    // The five words, each where it applies, and each other word refused there.
+    // The seven words, each where it applies, and each other word refused there (CN-19).
     ok(paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: 'nothing_due', payments: [] })),
     ok(paymentsBody({ amounts: amountsOf(2176, 0), paymentStatus: 'no_payment_recorded', payments: [payment(1, { reversal: REVERSAL })] })),
     ok(paymentsBody()), // recorded_partly
     ok(paymentsBody({ amounts: amountsOf(300, 300), paymentStatus: 'recorded_in_full' })),
+    ok(paymentsBody({ amounts: amountsOf(2176, 0, 2176), paymentStatus: 'credited_in_full', payments: [] })),
+    ok(paymentsBody({ amounts: amountsOf(2176, 300, 1876), paymentStatus: 'settled_by_payment_and_credit' })),
+    ok(paymentsBody({ amounts: amountsOf(2176, 0, 500), paymentStatus: 'no_payment_recorded', payments: [] })), // partly credited, nothing paid: keeps its word, the amounts show the credit
+    ok(paymentsBody({ amounts: amountsOf(2176, 300, 500), paymentStatus: 'recorded_partly' })),
     ok(voided()), ok(voided({ payments: [] })),
-    ...['no_payment_recorded', 'recorded_partly', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: w, payments: [] }))),
-    ...['nothing_due', 'recorded_partly', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(2176, 0), paymentStatus: w, payments: [] }))),
-    ...['nothing_due', 'no_payment_recorded', 'recorded_in_full', 'voided'].map((w) => bad(paymentsBody({ paymentStatus: w }))),
-    ...['nothing_due', 'no_payment_recorded', 'recorded_partly', 'voided'].map((w) => bad(paymentsBody({ amounts: amountsOf(300, 300), paymentStatus: w }))),
-    ...['nothing_due', 'no_payment_recorded', 'recorded_partly', 'recorded_in_full', 'paid', 'unpaid', 'VOIDED', null].map((w) => bad(voided({ paymentStatus: w }))),
+    ...(Object.keys(INVOICE_PAYMENT_STATUSES) as string[]).flatMap((right): Array<readonly [unknown, string | null, boolean]> => {
+      const [amounts, payments]: [unknown, unknown] = {
+        nothing_due: [amountsOf(0, 0), []], no_payment_recorded: [amountsOf(2176, 0), []], recorded_partly: [amountsOf(2176, 300), paymentsBody().payments],
+        recorded_in_full: [amountsOf(300, 300), paymentsBody().payments], credited_in_full: [amountsOf(2176, 0, 2176), []],
+        settled_by_payment_and_credit: [amountsOf(2176, 300, 1876), paymentsBody().payments], voided: [amountsOf(0, 0), []],
+      }[right] as [unknown, unknown];
+      if (right === 'voided') return [];
+      return (Object.keys(INVOICE_PAYMENT_STATUSES) as string[]).filter((w) => w !== right).map((w) => bad(paymentsBody({ amounts, paymentStatus: w, payments })));
+    }),
+    ...['nothing_due', 'no_payment_recorded', 'recorded_partly', 'recorded_in_full', 'credited_in_full', 'settled_by_payment_and_credit', 'paid', 'unpaid', 'refunded', 'VOIDED', null].map((w) => bad(voided({ paymentStatus: w }))),
     // Keys and shapes.
     bad({ ...paymentsBody(), extra: 1 }), bad((({ nextCursor: _n, ...rest }) => rest)(paymentsBody())), bad([paymentsBody()]), bad(null),
     bad(paymentsBody({ invoice: { id: INVOICE, status: 'issued', number: 7 } })), bad(paymentsBody({ invoice: { id: INVOICE } })),
     bad(paymentsBody({ invoice: { id: OTHER_STORE, status: 'issued' } })), bad(paymentsBody({ invoice: { id: INVOICE.toUpperCase(), status: 'issued' } })),
     bad(paymentsBody({ invoice: { id: INVOICE, status: 'draft' } })),
     bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), currency: 'EUR' } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), extra: 0 } })),
-    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300 } })),
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 2176, creditedCents: 0, appliedCents: 300 } })),
+    // CN-19: the old four-key shape (no creditedCents) is refused, as is any other missing or extra key.
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 2176, appliedCents: 300, remainingCents: 1876 } })),
+    bad(paymentsBody({ amounts: (({ creditedCents: _c, ...rest }) => rest)(amountsOf(2176, 300)) })), bad(paymentsBody({ amounts: (({ dueCents: _d, ...rest }) => rest)(amountsOf(2176, 300)) })),
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), creditedCents: '0' } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), creditedCents: 0.5 } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), creditedCents: -1 } })),
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), creditedCents: null } })), bad(paymentsBody({ amounts: amountsOf(MAX + 1, 300, 0) })),
     bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), remainingCents: 1875 } })), // remaining is due − applied
-    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 200, appliedCents: 300, remainingCents: -100 }, paymentStatus: 'recorded_in_full' })), // applied above due
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300, 500), remainingCents: 1876 } })), // remaining ignores the credit
+    bad(paymentsBody({ amounts: { ...amountsOf(2176, 300, 500), remainingCents: 1377 } })), // remaining is due − credited − applied
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 200, creditedCents: 0, appliedCents: 300, remainingCents: -100 }, paymentStatus: 'recorded_in_full' })), // applied above due
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 200, creditedCents: 300, appliedCents: 0, remainingCents: -100 }, paymentStatus: 'credited_in_full', payments: [] })), // credited above due
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: 600, creditedCents: 400, appliedCents: 300, remainingCents: -100 }, paymentStatus: 'settled_by_payment_and_credit' })), // credited + applied above due
+    ok(paymentsBody({ amounts: amountsOf(MAX, MAX - 5, 5), paymentStatus: 'settled_by_payment_and_credit', payments: [payment(1, { amountCents: MAX - 5 })] })), // the sum at the safe-integer edge
+    bad(paymentsBody({ amounts: { currency: 'USD', dueCents: MAX, creditedCents: MAX, appliedCents: MAX, remainingCents: 0 }, paymentStatus: 'settled_by_payment_and_credit' })), // 2 * MAX is not a safe integer: still refused
     bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), dueCents: 2176.5 } })), bad(paymentsBody({ amounts: { ...amountsOf(2176, 300), dueCents: '2176' } })),
     bad(paymentsBody({ amounts: amountsOf(MAX + 1, 300) })), ok(paymentsBody({ amounts: amountsOf(MAX, 300) })),
-    bad(voided({ amounts: amountsOf(2176, 0) })), bad(voided({ amounts: amountsOf(100, 100) })), // voided: due, applied and remaining 0
+    bad(voided({ amounts: amountsOf(2176, 0) })), bad(voided({ amounts: amountsOf(100, 100) })), // voided: due, credited, applied and remaining 0
+    bad(voided({ amounts: { currency: 'USD', dueCents: 0, creditedCents: 1, appliedCents: 0, remainingCents: -1 } })), bad(voided({ amounts: amountsOf(2176, 0, 2176) })),
+    bad(voided({ amounts: { currency: 'USD', dueCents: 0, appliedCents: 0, remainingCents: 0 } })), // a voided read in the old shape
     bad(voided({ payments: [payment(1)] })), // a voided invoice holds no unreversed payment
     // Each payment exactly.
     bad(paymentsBody({ payments: [{ ...p1, extra: 1 }], amounts: amountsOf(2176, 100) })), bad(paymentsBody({ payments: [(({ attemptId: _a, ...rest }) => rest)(p1)], amounts: amountsOf(2176, 100) })),
@@ -1230,7 +1307,7 @@ test('IIC-34. a payments 200 counts ONLY exactly as the server writes it: every 
     assert.equal(calls.length, 1, name);
   }
   // -0 anywhere is not a count (JSON.stringify never writes it).
-  for (const [from, to] of [['"dueCents":0', '"dueCents":-0'], ['"appliedCents":0', '"appliedCents":-0'], ['"remainingCents":0', '"remainingCents":-0']]) {
+  for (const [from, to] of [['"dueCents":0', '"dueCents":-0'], ['"creditedCents":0', '"creditedCents":-0'], ['"appliedCents":0', '"appliedCents":-0'], ['"remainingCents":0', '"remainingCents":-0']]) {
     const { client } = scripted(raw(200, paymentsBody({ amounts: amountsOf(0, 0), paymentStatus: 'nothing_due', payments: [] }), from, to));
     assert.deepEqual(await client.getPayments(STORE, INVOICE, null, CSRF), { kind: 'unavailable' }, to);
   }

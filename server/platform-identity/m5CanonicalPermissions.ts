@@ -132,6 +132,15 @@
 // AND Customers at View or above on the same role, decided exactly as issue_invoices is. record_invoice_payments is NOT
 // sensitive (no recent sign-in); reverse_invoice_payments IS (its POST requires the recent sign-in, judged as the void's). The
 // store guard admits each BY NAME only, with that exact sensitivity and shape; any other key, shape or sensitivity still refuses.
+//
+// M7B-CREDITNOTES-P1 UPDATE (docs/phase-4/16 D-CN-7 A, CN-I1) — THREE STORE KEYS DECIDED BY ROLE: issue_invoice_credit_notes
+// (sensitive: the credit-note registration and issue), withdraw_invoice_credit_notes (sensitive: the withdrawal) and
+// recover_invoice_credit_notes (NOT sensitive: the registration proof, the attempts lookup and the settlement), each parent
+// Invoices, threshold Full RECORDED BUT NOT COMPARED, no corequisite, decided by the STORE OWNER RULE: granted only to the role
+// store_owner (TENANT_OWNER_ROLE_ID) at limitation 'none' at STORE scope, its levels still required readable — mirroring the
+// tenant OWNER_ONLY_ROUTE_PERMISSIONS. A manager with Invoices Full is DENIED: Full is not owner-only. The store guard admits
+// exactly these three by name, in exactly that shape; Full anywhere else still refuses to load. No role data, catalog default,
+// ordering or D2/D3 grant diff changes.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -329,7 +338,21 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
     key: 'reverse_invoice_payments', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'approve' as const,
     corequisite: Object.freeze({ parent: 'customers', threshold: 'view' as const }),
   })],
+  // M7B-CREDITNOTES-P1 (D-CN-7 A): decided by the store owner rule, never by the level (STORE_OWNER_ONLY_ROUTE_PERMISSIONS).
+  ['issue_invoice_credit_notes', Object.freeze({ key: 'issue_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'full' as const })],
+  ['withdraw_invoice_credit_notes', Object.freeze({ key: 'withdraw_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'full' as const })],
+  ['recover_invoice_credit_notes', Object.freeze({ key: 'recover_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'full' as const })],
 ]));
+
+/**
+ * The store route permissions decided by the STORE OWNER RULE rather than a level (M7B-CREDITNOTES-P1, D-CN-7 A,
+ * CN-I1), each with the exact `sensitive` it must carry: the credit-note keys. Granted only to store_owner at limitation 'none'
+ * on a store-scope grant (evaluateCanonicalPermission), its levels readable; every other role — the manager at Full included —
+ * is denied.
+ */
+const STORE_OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlyMap<string, boolean> = new Map<string, boolean>([
+  ['issue_invoice_credit_notes', true], ['withdraw_invoice_credit_notes', true], ['recover_invoice_credit_notes', false],
+]);
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);
 /** The one store route permission admitted at Manage (M7B-INVOICES-DISCARD-P1): exactly this key, on Invoices, no corequisite. */
@@ -356,6 +379,16 @@ const STORE_ROUTE_APPROVE_KEYS: ReadonlyMap<string, boolean> = new Map<string, b
 export function assertStoreRoutePermissions(permissions: ReadonlyMap<string, CanonicalPermission>): void {
   for (const [key, entry] of permissions) {
     if (CANONICAL_TENANT_PERMISSIONS.has(key) || TENANT_ROUTE_PERMISSIONS.has(key)) throw new Error('store route permission collides with a tenant permission');
+    // M7B-CREDITNOTES-P1 (CN-I1): an owner-only store key is admitted BY NAME, exactly at Invoices Full with its own sensitivity
+    // and no corequisite; the owner rule, not the threshold, decides it.
+    const ownerSensitive = STORE_OWNER_ONLY_ROUTE_PERMISSIONS.get(key);
+    if (ownerSensitive !== undefined) {
+      if (entry.key !== key || entry.plane !== 'tenant' || entry.sensitive !== ownerSensitive || entry.threshold !== 'full'
+        || entry.corequisite !== undefined || entry.parent !== 'invoices') {
+        throw new Error('an owner-only store route permission is not at Invoices Full with its own sensitivity and no corequisite');
+      }
+      continue;
+    }
     const manage = key === STORE_ROUTE_MANAGE_KEY;
     // The sensitivity an Approve key must carry exactly, or undefined for every other key (which must be non-sensitive).
     const approveSensitive = STORE_ROUTE_APPROVE_KEYS.get(key);
@@ -525,6 +558,11 @@ export function evaluateCanonicalPermission(input: {
       const level = hasOwn(materialized, parent) ? materialized[parent] : 'none';
       return isPermissionLevel(level) && threshold !== null && meetsTenantPermissionLevel(level, threshold);
     };
+    // THE STORE OWNER RULE (M7B-CREDITNOTES-P1, D-CN-7 A): the store_owner role, unlimited, whose edits were readable — decided
+    // by role, never by a level, so a manager at Invoices Full is denied (the tenant owner rule below, at store scope).
+    if (STORE_OWNER_ONLY_ROUTE_PERMISSIONS.has(entry.key)) {
+      return roleId === TENANT_OWNER_ROLE_ID && limitation === 'none' && hasOwn(materialized, entry.parent) ? 'granted' : 'denied';
+    }
     const corequisite = entry.corequisite;
     if (!meets(entry.parent, entry.threshold) || (corequisite !== undefined && !meets(corequisite.parent, corequisite.threshold))) return 'denied';
     return 'granted';

@@ -71,7 +71,7 @@ test('IPU-01 (§12.2, §12.3): the two methods and six reasons in their one orde
   assert.deepEqual(INVOICE_PAYMENT_METHOD_LABELS, { cash: 'Cash', external_card_terminal: 'Card on a separate terminal' });
   assert.deepEqual([...INVOICE_PAYMENT_REVERSAL_REASON_CODES], ['recorded_in_error', 'wrong_amount', 'wrong_method', 'wrong_invoice', 'duplicate', 'other']);
   assert.deepEqual(Object.values(INVOICE_PAYMENT_REVERSAL_REASON_LABELS), ['Recorded by mistake', 'Wrong amount', 'Wrong method', 'Wrong invoice', 'Payment recorded twice', 'Other reason']);
-  assert.deepEqual([...INVOICE_PAYMENT_STATUSES], ['voided', 'nothing_due', 'no_payment_recorded', 'recorded_in_full', 'recorded_partly']);
+  assert.deepEqual([...INVOICE_PAYMENT_STATUSES], ['voided', 'nothing_due', 'no_payment_recorded', 'recorded_in_full', 'recorded_partly', 'credited_in_full', 'settled_by_payment_and_credit']); // M7B-CREDITNOTES-P1 (doc 16 D-CN-2): 038's two words follow 036's five.
   for (const frozen of [INVOICE_PAYMENT_METHODS, INVOICE_PAYMENT_METHOD_LABELS, INVOICE_PAYMENT_REVERSAL_REASON_CODES, INVOICE_PAYMENT_REVERSAL_REASON_LABELS,
     INVOICE_PAYMENT_RECORD_CONTRACT, INVOICE_PAYMENT_REVERSE_CONTRACT, INVOICE_PAYMENT_RECORD_ROUTE, INVOICE_PAYMENT_REVERSE_ROUTE]) assert.ok(Object.isFrozen(frozen));
   assert.deepEqual([INVOICE_PAYMENT_RECORD_CONTRACT.kind, INVOICE_PAYMENT_RECORD_CONTRACT.mode, INVOICE_PAYMENT_RECORD_CONTRACT.aggregateType,
@@ -247,15 +247,15 @@ const portPayment = (n: number, over: Record<string, unknown> = {}) => ({
   reversal: null, ...over,
 });
 const answerOf = (payments: unknown[], over: Record<string, unknown> = {}) => ({
-  outcome: 'payments', invoice: { id: INVOICE, status: 'issued' }, currency: 'USD', totalCents: 1000, dueCents: 1000,
+  outcome: 'payments', invoice: { id: INVOICE, status: 'issued' }, currency: 'USD', totalCents: 1000, dueCents: 1000, creditedCents: 0,
   appliedCents: payments.filter((p) => (p as { reversal: unknown }).reversal === null).reduce((s: number, p) => s + (p as { amountCents: number }).amountCents, 0),
   remainingCents: 0, paymentStatus: 'recorded_partly', payments, ...over,
 });
-/** A consistent answer: remaining and the word derived from `applied`. */
+/** A consistent answer: remaining and the word derived from `credited` and `applied` (M7B-CREDITNOTES-P1: 038's precedence). */
 function consistent(payments: unknown[], over: Record<string, unknown> = {}) {
-  const raw = answerOf(payments, over) as Record<string, unknown> & { dueCents: number; appliedCents: number };
-  const word = raw.dueCents === 0 ? 'nothing_due' : raw.appliedCents === 0 ? 'no_payment_recorded' : raw.appliedCents === raw.dueCents ? 'recorded_in_full' : 'recorded_partly';
-  return { ...raw, remainingCents: raw.dueCents - raw.appliedCents, paymentStatus: word, ...over };
+  const raw = answerOf(payments, over) as Record<string, unknown> & { dueCents: number; creditedCents: number; appliedCents: number }; const remaining = raw.dueCents - raw.creditedCents - raw.appliedCents;
+  const word = raw.dueCents === 0 ? 'nothing_due' : raw.appliedCents === 0 ? (remaining === 0 ? 'credited_in_full' : 'no_payment_recorded') : remaining !== 0 ? 'recorded_partly' : raw.creditedCents === 0 ? 'recorded_in_full' : 'settled_by_payment_and_credit';
+  return { ...raw, remainingCents: remaining, paymentStatus: word, ...over };
 }
 
 test('IPU-07 (§12.3): the read\'s query is none or exactly ?after=<canonical uuid>; its strict decoder re-derives due, remaining and the word, checks applied against due and the page, the order, uniqueness and bound — and refuses any mismatch, negative or unsafe value (null: the 503)', () => {
@@ -347,7 +347,7 @@ test('IPU-08 (§12.3): the read refuses a query (400), a scope (403), a malforme
   const one = await run();
   assert.deepEqual(one.body, {
     invoice: { id: INVOICE, status: 'issued' },
-    amounts: { currency: 'USD', dueCents: 1000, appliedCents: 400, remainingCents: 600 },
+    amounts: { currency: 'USD', dueCents: 1000, creditedCents: 0, appliedCents: 400, remainingCents: 600 },
     paymentStatus: 'recorded_partly',
     payments: [
       { id: last[0].id, attemptId: last[0].attemptId, amountCents: 400, method: 'external_card_terminal', recordedAt: TIME(1), reversal: null },
@@ -355,7 +355,7 @@ test('IPU-08 (§12.3): the read refuses a query (400), a scope (403), a malforme
     ],
     nextCursor: null,
   });
-  assert.deepEqual(Object.keys((one.body as { amounts: object }).amounts), ['currency', 'dueCents', 'appliedCents', 'remainingCents']);
+  assert.deepEqual(Object.keys((one.body as { amounts: object }).amounts), ['currency', 'dueCents', 'creditedCents', 'appliedCents', 'remainingCents']); // M7B-CREDITNOTES-P1 (doc 16 D-CN-2 A): exactly five keys, creditedCents after dueCents.
   assert.deepEqual(Object.keys((one.body as { payments: object[] }).payments[0]), ['id', 'attemptId', 'amountCents', 'method', 'recordedAt', 'reversal']);
   assert.ok(!JSON.stringify(one.body).includes(ACTOR), 'no staff id');
 });
@@ -574,3 +574,29 @@ test('IPU-10 (§12.3): the reversal over the chain — a sign-in older than 10 m
 // every use runs inside a test body, after this module has evaluated — so the owner-approved fixture line stays at :499.
 const REGISTRATION = randomUUID();
 const PROOF = 'ab'.repeat(32);
+
+// M7B-CREDITNOTES-P1 (doc 16 D-CN-2): the read's decoder re-derives the credit. These cases sit last so the owner-approved fixture line above
+// stays at :499; the two new words and the kept word for a partial credit with no payment.
+test('IPU-07b (§12.3, doc 16 D-CN-2): the decoder accepts 038\'s two new words and the kept one for a partial credit, each re-derived from due, credited and applied', () => {
+  const one = portPayment(1, { amountCents: 400 });
+  for (const [credited, payments, word] of [[1000, [], 'credited_in_full'], [600, [one], 'settled_by_payment_and_credit'], [300, [], 'no_payment_recorded'],
+    [300, [one], 'recorded_partly']] as const) {
+    const judged = invoicePaymentsOf(consistent([...payments], { creditedCents: credited }), INVOICE, null);
+    assert.ok(judged !== null && typeof judged === 'object', word);
+    assert.deepEqual([judged.creditedCents, judged.paymentStatus], [credited, word]);
+  }
+});
+
+test('IPU-07c (§12.3, doc 16 D-CN-2): the decoder refuses a credit that is not re-derived — a voided invoice with a credit, credit and payments above due, a missing or textual credit, a remaining that ignores it, the old word for a settled invoice', () => {
+  const one = portPayment(1, { amountCents: 400 });
+  const good = consistent([one]);
+  const voided = { ...consistent([portPayment(1, { reversal: { reversedAt: TIME(2), reasonCode: 'duplicate' } })]), invoice: { id: INVOICE, status: 'voided' }, dueCents: 0, appliedCents: 0, remainingCents: 0, paymentStatus: 'voided' };
+  const bad: Array<[string, unknown]> = [
+    ['a voided invoice with credited', { ...voided, creditedCents: 1 }],
+    ['credited and applied above due', { ...good, creditedCents: 700, remainingCents: 0, paymentStatus: 'settled_by_payment_and_credit' }],
+    ['remaining ignores the credit', { ...good, creditedCents: 100 }], ['credited as text', { ...good, creditedCents: '0' }],
+    ['no credited key', Object.fromEntries(Object.entries(good).filter(([k]) => k !== 'creditedCents'))],
+    ['the old word for a settled invoice', { ...consistent([one], { creditedCents: 600 }), paymentStatus: 'recorded_in_full' }],
+  ];
+  for (const [label, raw] of bad) assert.equal(invoicePaymentsOf(raw, INVOICE, null), null, label);
+});

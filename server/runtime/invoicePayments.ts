@@ -50,6 +50,12 @@
 // paymentStatus, payments, nextCursor } in that order; no staff id, audit field or correlation id. 400 for any other query,
 // a bad id or an unknown cursor; 403 forbidden; 404 not_found (missing, another store's, another tenant's alike); 503.
 //
+// M7B-CREDITNOTES-P1 (doc 16 D-CN-2 A, CN-A1/CN-A2, migration 038): the payments read is 038's m7b_invoice_payments_get_v2 and
+// `amounts` becomes exactly { currency, dueCents, creditedCents, appliedCents, remainingCents }: due is still the Total (0 once
+// voided), credited the active credit notes' gross, remaining = due − credited − applied, credited + applied ≤ due, all 0 once
+// voided; two more status words, credited_in_full and settled_by_payment_and_credit. The record calls 038's
+// m7b_invoice_payment_record_v3, whose cap counts active credits (same arguments, words and answers as record v2).
+//
 // DA-118 / DA-119 STAY OPEN (widened, doc 15 §12.9): a runtime-role holder with a live session key at the levels can call
 // 036's routines directly; they then still write their own audit record, but none of these HTTP checks apply.
 //
@@ -85,8 +91,9 @@ export const INVOICE_PAYMENT_REVERSAL_REASON_LABELS: Readonly<Record<InvoicePaym
   duplicate: 'Payment recorded twice',
   other: 'Other reason',
 });
-/** The payments read's status words (§3 D-PAY-1), in 036's order. */
-export const INVOICE_PAYMENT_STATUSES = Object.freeze(['voided', 'nothing_due', 'no_payment_recorded', 'recorded_in_full', 'recorded_partly'] as const);
+/** The payments read's status words (§3 D-PAY-1), in 036's order, and (M7B-CREDITNOTES-P1, doc 16 D-CN-2) 038's two. */
+export const INVOICE_PAYMENT_STATUSES = Object.freeze(['voided', 'nothing_due', 'no_payment_recorded', 'recorded_in_full', 'recorded_partly',
+  'credited_in_full', 'settled_by_payment_and_credit'] as const);
 export type InvoicePaymentStatus = (typeof INVOICE_PAYMENT_STATUSES)[number];
 export const isInvoicePaymentMethod = (v: unknown): v is InvoicePaymentMethod =>
   typeof v === 'string' && (INVOICE_PAYMENT_METHODS as readonly string[]).includes(v);
@@ -322,7 +329,7 @@ export function createInvoicePaymentReversalEligibilityRoute(): RouteDefinition 
  * The port to 036's session-bound payments read, handed the trusted STORE scope (its tenant and store are the routine's
  * expected ones), the presenting session's key (a SQL parameter only), the path's invoice and the cursor (null or a payment
  * id); it asks INVOICE_PAYMENTS_ASK rows. Answers are untrusted input, expected to be
- *   { outcome: 'payments', invoice: { id, status }, currency, totalCents, dueCents, appliedCents, remainingCents, paymentStatus,
+ *   { outcome: 'payments', invoice: { id, status }, currency, totalCents, dueCents, creditedCents, appliedCents, remainingCents, paymentStatus,
  *     payments: { id, attemptId, amountCents, method, recordedAt, reversal: null | { reversedAt, reasonCode } }[] (at most 51) }
  *   | { outcome: 'denied' | 'not_found' | 'cursor_unknown' }.
  * A throw is an outage.
@@ -348,6 +355,8 @@ export interface InvoicePayment {
 export interface InvoicePaymentsPage {
   readonly invoice: Readonly<{ id: string; status: 'issued' | 'voided' }>;
   readonly dueCents: number;
+  /** M7B-CREDITNOTES-P1: the active credit notes' gross (038). */
+  readonly creditedCents: number;
   readonly appliedCents: number;
   readonly remainingCents: number;
   readonly paymentStatus: InvoicePaymentStatus;
@@ -365,15 +374,22 @@ export function parseInvoicePaymentsQuery(target: string): { readonly after: str
   return match === null ? null : Object.freeze({ after: match[1] });
 }
 
-const ANSWER_KEYS: readonly string[] = ['outcome', 'invoice', 'currency', 'totalCents', 'dueCents', 'appliedCents', 'remainingCents', 'paymentStatus', 'payments'];
+const ANSWER_KEYS: readonly string[] = ['outcome', 'invoice', 'currency', 'totalCents', 'dueCents', 'creditedCents', 'appliedCents', 'remainingCents', 'paymentStatus', 'payments'];
 const PAYMENT_KEYS: readonly string[] = ['id', 'attemptId', 'amountCents', 'method', 'recordedAt', 'reversal'];
 
-/** The status word the invoice's status, due and applied amounts derive (036's rule, restated). */
-function statusWordOf(status: 'issued' | 'voided', due: number, applied: number): InvoicePaymentStatus {
+/**
+ * The status word the invoice's status, due, credited and applied amounts derive (036's rule, as 038 amends it, doc 16 D-CN-2):
+ * voided, then nothing_due, then by what remains and by which of credited and applied is above 0 — nothing applied keeps
+ * no_payment_recorded unless the credits cover the whole due (credited_in_full); with something applied, nothing remaining is
+ * recorded_in_full without a credit and settled_by_payment_and_credit with one, and anything remaining is recorded_partly.
+ */
+function statusWordOf(status: 'issued' | 'voided', due: number, credited: number, applied: number): InvoicePaymentStatus {
   if (status === 'voided') return 'voided';
   if (due === 0) return 'nothing_due';
-  if (applied === 0) return 'no_payment_recorded';
-  return applied === due ? 'recorded_in_full' : 'recorded_partly';
+  const remaining = due - credited - applied;
+  if (applied === 0) return remaining === 0 ? 'credited_in_full' : 'no_payment_recorded';
+  if (remaining !== 0) return 'recorded_partly';
+  return credited === 0 ? 'recorded_in_full' : 'settled_by_payment_and_credit';
 }
 
 function paymentOf(raw: unknown): InvoicePayment | null {
@@ -402,15 +418,16 @@ export function invoicePaymentsOf(raw: unknown, invoiceId: string, after: string
       return hasExactly(raw, ['outcome']) && (outcome !== 'cursor_unknown' || after !== null) ? outcome : null;
     }
     if (outcome !== 'payments' || !hasExactly(raw, ANSWER_KEYS)) return null;
-    const { invoice, currency, totalCents, dueCents, appliedCents, remainingCents, paymentStatus, payments } = raw;
+    const { invoice, currency, totalCents, dueCents, creditedCents, appliedCents, remainingCents, paymentStatus, payments } = raw;
     if (!isRecord(invoice) || !hasExactly(invoice, ['id', 'status']) || invoice.id !== invoiceId) return null;
     const status = invoice.status;
     if ((status !== 'issued' && status !== 'voided') || currency !== INVOICE_DRAFT_CURRENCY) return null;
-    if (!isAmount(totalCents, 0) || !isAmount(dueCents, 0) || !isAmount(appliedCents, 0) || !isAmount(remainingCents, 0)) return null;
+    if (!isAmount(totalCents, 0) || !isAmount(dueCents, 0) || !isAmount(creditedCents, 0) || !isAmount(appliedCents, 0) || !isAmount(remainingCents, 0)) return null;
     const due = status === 'voided' ? 0 : totalCents;
-    if (dueCents !== due || appliedCents > due || remainingCents !== due - appliedCents) return null;
-    if (status === 'voided' && appliedCents !== 0) return null;
-    const word = statusWordOf(status, dueCents, appliedCents);
+    // M7B-CREDITNOTES-P1: credited + applied ≤ due and remaining = due − credited − applied, compared without a float sum.
+    if (dueCents !== due || creditedCents > due || appliedCents > due - creditedCents || remainingCents !== due - creditedCents - appliedCents) return null;
+    if (status === 'voided' && (creditedCents !== 0 || appliedCents !== 0)) return null;
+    const word = statusWordOf(status, dueCents, creditedCents, appliedCents);
     if (paymentStatus !== word) return null;
     if (!Array.isArray(payments) || payments.length > INVOICE_PAYMENTS_ASK) return null;
     const page: InvoicePayment[] = [];
@@ -432,7 +449,7 @@ export function invoicePaymentsOf(raw: unknown, invoiceId: string, after: string
     const hasMore = page.length > INVOICE_PAYMENTS_PAGE_SIZE;
     if (active > BigInt(appliedCents) || (after === null && !hasMore && active !== BigInt(appliedCents))) return null;
     return Object.freeze({
-      invoice: Object.freeze({ id: invoiceId, status }), dueCents, appliedCents, remainingCents, paymentStatus: word,
+      invoice: Object.freeze({ id: invoiceId, status }), dueCents, creditedCents, appliedCents, remainingCents, paymentStatus: word,
       payments: Object.freeze(hasMore ? page.slice(0, INVOICE_PAYMENTS_PAGE_SIZE) : page), hasMore,
     });
   } catch {
@@ -469,7 +486,10 @@ export function createInvoicePaymentsRoute(ports: InvoicePaymentsPorts, options:
     const last = page.payments[page.payments.length - 1];
     res.status(200).json({
       invoice: { id: page.invoice.id, status: page.invoice.status },
-      amounts: { currency: INVOICE_DRAFT_CURRENCY, dueCents: page.dueCents, appliedCents: page.appliedCents, remainingCents: page.remainingCents },
+      amounts: {
+        currency: INVOICE_DRAFT_CURRENCY, dueCents: page.dueCents, creditedCents: page.creditedCents, appliedCents: page.appliedCents,
+        remainingCents: page.remainingCents,
+      },
       paymentStatus: page.paymentStatus,
       payments: page.payments.map((p) => ({
         id: p.id, attemptId: p.attemptId, amountCents: p.amountCents, method: p.method, recordedAt: p.recordedAt,

@@ -78,6 +78,12 @@
 // …/invoices/{id}/payment-settlement (an eighth and a ninth store command, read like the void), GET
 // …/invoices/{id}/payment-registration-proof and GET /api/v1/stores/{storeId}/payment-attempts — twenty-four store templates,
 // nine of them commands. The registration and the record are the two SESSION_BOUND_STORE_COMMANDS (D-R3-A).
+// M7B-CREDITNOTES-P1 (doc 16, migration 038) adds seven: POST …/invoices/{id}/credit-note-registrations, POST
+// …/invoices/{id}/credit-notes, POST …/invoices/{id}/credit-note-settlement and POST
+// …/invoices/{id}/credit-notes/{creditNoteId}/withdrawal (four more store commands — the withdrawal the SECOND template with a
+// second id segment, {creditNoteId}, matched by the same last rule), GET …/invoices/{id}/credit-note-registration-proof, GET
+// /api/v1/stores/{storeId}/credit-note-attempts and GET …/invoices/{id}/credit-notes — thirty-one store templates, thirteen of
+// them commands. The credit-note registration and issue join the SESSION_BOUND_STORE_COMMANDS (four).
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -261,6 +267,13 @@ export interface CommandContext {
    * untrusted as a target, like `targetId`. Absent on every other route.
    */
   readonly paymentId?: string;
+  /**
+   * Set by the runtime ONLY for the credit-note withdrawal (M7B-CREDITNOTES-P1: POST
+   * /api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal, the second template with a second id
+   * segment): the canonical lowercase uuid of its {creditNoteId} segment, bound into the fingerprint after `targetId` in the
+   * same slot as the reversal's payment. Untrusted as a target. Absent on every other route.
+   */
+  readonly creditNoteId?: string;
 }
 
 type PlanRecord = Readonly<Record<string, string | number | boolean>>;
@@ -459,6 +472,12 @@ export const STORE_SEGMENT = '/{storeId}';
  * The second id segment of exactly one store template, the payment reversal (M7B-PAYMENTS-P1); it matches what {id} matches.
  */
 export const PAYMENT_ID_SEGMENT = '/{paymentId}';
+/**
+ * The second id segment of the credit-note withdrawal (M7B-CREDITNOTES-P1), the second store template with two id segments; it
+ * matches what {id} matches. The two second-id segments, in their one lookup order.
+ */
+export const CREDIT_NOTE_ID_SEGMENT = '/{creditNoteId}';
+const SECOND_ID_SEGMENTS: readonly string[] = [PAYMENT_ID_SEGMENT, CREDIT_NOTE_ID_SEGMENT];
 /** The store templates' common prefix; the store directory (below) is exactly this literal path. */
 export const STORE_DIRECTORY_PATH = '/api/v1/stores';
 /**
@@ -495,11 +514,21 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registration-proof`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-settlement`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/payment-attempts`,
+  // M7B-CREDITNOTES-P1 (doc 16, migration 038): the credit-note registration, its proof, the issue, the caller's attempts, the
+  // settlement, the withdrawal (the second template with a second id segment) and the credit-note list.
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registrations`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registration-proof`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/credit-note-attempts`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-settlement`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes${CREDIT_NOTE_ID_SEGMENT}/withdrawal`,
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
 ]);
 /**
  * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit,
  * (M7B-INVOICES-DISCARD-P1) the draft discard, (M7B-INVOICES-ISSUE-P1) the invoice issue and (M7B-INVOICES-VOID-P1) the
- * invoice void — and (M7B-PAYMENTS-P1) the payment record and the payment reversal.
+ * invoice void — and (M7B-PAYMENTS-P1) the payment record and the payment reversal; (M7B-PAYMENTS-P2) the payment registration
+ * and its settlement; (M7B-CREDITNOTES-P1) the credit-note registration, issue, settlement and withdrawal — thirteen.
  */
 const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts`, `PATCH ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoice-drafts${PATH_ID_SEGMENT}`,
@@ -512,16 +541,23 @@ const IDEMPOTENT_STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   // M7B-PAYMENTS-P2: the payment registration and the registration's settlement.
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registrations`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-settlement`,
+  // M7B-CREDITNOTES-P1: the credit-note registration, the issue, the settlement and the withdrawal.
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registrations`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-settlement`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes${CREDIT_NOTE_ID_SEGMENT}/withdrawal`,
 ]);
 /**
  * The store COMMANDS bound to their presenting session (M7B-PAYMENTS-P2, D-R3-A): a closed set of exactly the payment
- * registration and the payment record. Each MUST declare `sessionBinding: 'required'`, and no other command may: app.ts then
+ * registration and the payment record, and (M7B-CREDITNOTES-P1, doc 16 D-CN-9 step 1) the credit-note registration and issue. Each MUST declare `sessionBinding: 'required'`, and no other command may: app.ts then
  * binds the session's digest into the idempotency fingerprint (idempotency.ts `session`), so a replacement session replaying an
  * old key is a 422, never the stored answer. The command's handler-less operation still never receives the key itself.
  */
 const SESSION_BOUND_STORE_COMMANDS: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payment-registrations`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registrations`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -744,7 +780,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly twenty-four declared strings (M7B-PAYMENTS-P2), so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly thirty-one declared strings (M7B-CREDITNOTES-P1), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
@@ -816,9 +852,10 @@ const isIdSegment = (segment: string): boolean =>
  * other lookup. M7B-INVOICES-P2: failing those, the store template with {id} before one literal last segment matches when
  * the segment before the last is an id segment and the rest is exactly that template's (the edit eligibility's GET and,
  * since M7B-INVOICES-DISCARD-P1, the discard's POST and its eligibility's GET are declared, so another method or any other
- * suffix there matches nothing). M7B-PAYMENTS-P1: failing all of those, the one store template with a second id segment
- * (…/invoices/{id}/payments/{paymentId}/reversal) matches when the fourth and second segments from the end are id segments and
- * the rest is exactly that template's literals; no path an earlier rule matched reaches it.
+ * suffix there matches nothing). M7B-PAYMENTS-P1: failing all of those, a store template with a second id segment
+ * (…/invoices/{id}/payments/{paymentId}/reversal and, M7B-CREDITNOTES-P1, …/invoices/{id}/credit-notes/{creditNoteId}/withdrawal)
+ * matches when the fourth and second segments from the end are id segments and the rest is exactly that template's literals;
+ * no path an earlier rule matched reaches it.
  */
 export function defineRoutes(defs: readonly unknown[]): RouteTable {
   const table = new Map<string, RouteDefinition>();
@@ -855,13 +892,17 @@ export function defineRoutes(defs: readonly unknown[]): RouteTable {
     const suffixed = before > 0 && isIdSegment(rest.slice(before + 1, last))
       ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, before)}${PATH_ID_SEGMENT}${rest.slice(last)}`) : undefined;
     if (suffixed !== undefined || before <= 0) return suffixed;
-    // M7B-PAYMENTS-P1, tried only after every rule above failed: the one template with a second id segment,
-    // …/{id}/<literal>/{paymentId}/<literal> — the fourth segment from the end is {id}, the second {paymentId}.
+    // M7B-PAYMENTS-P1, tried only after every rule above failed: a template with a second id segment,
+    // …/{id}/<literal>/{paymentId}/<literal> — the fourth segment from the end is {id}, the second {paymentId} — or
+    // (M7B-CREDITNOTES-P1) the same shape with {creditNoteId}; their literals differ, so at most one can match.
     const literal2 = rest.lastIndexOf('/', before - 1);
     const id = literal2 > 0 ? rest.lastIndexOf('/', literal2 - 1) : -1;
-    return id >= 0 && isIdSegment(rest.slice(id + 1, literal2)) && isIdSegment(rest.slice(before + 1, last))
-      ? storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, id)}${PATH_ID_SEGMENT}${rest.slice(literal2, before)}${PAYMENT_ID_SEGMENT}${rest.slice(last)}`)
-      : undefined;
+    if (!(id >= 0 && isIdSegment(rest.slice(id + 1, literal2)) && isIdSegment(rest.slice(before + 1, last)))) return undefined;
+    for (const second of SECOND_ID_SEGMENTS) {
+      const found = storeTemplates.get(`${method} ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${rest.slice(0, id)}${PATH_ID_SEGMENT}${rest.slice(literal2, before)}${second}${rest.slice(last)}`);
+      if (found !== undefined) return found;
+    }
+    return undefined;
   };
   return Object.freeze({
     lookup: (method: string, path: string) => {

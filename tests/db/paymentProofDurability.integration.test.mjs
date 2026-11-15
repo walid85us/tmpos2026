@@ -16,7 +16,7 @@
 // reset after them.
 //
 // PDG-09..14 then take the SAME two clusters through migration 037's REAL routines (only after PDG-01..08, which so ran with
-// no migration WAL): 001-037 by the trusted executor, the runtime's own non-owner login, a fixture built through the routines,
+// no migration WAL): 001-038 by the trusted executor, the runtime's own non-owner login, a fixture built through the routines,
 // autovacuum then off. PDG-10..12 land a real registration's COMMIT exactly on a page boundary, a segment boundary and (64 MB)
 // a 16 MB-aligned ordinary page, and the real proof routine issues within its budget. PDG-13 and PDG-14 exercise decision
 // D-R4-1 (037 :63-64: crash durability for a single primary with fsync on) against a PROCESS crash only: a proof is issued,
@@ -442,7 +442,7 @@ test('PDG-08 unrelated WAL ahead of the commit: bounded refusal, then issuance o
 // ===========================================================================
 // PDG-09..13: migration 037's REAL routines on the same two clusters, then a crash.
 // ===========================================================================
-// 001-037 by the trusted executor, the runtime login with tmpos_app and tmpos_audit_writer, both keys installed by the owner
+// 001-038 by the trusted executor, the runtime login with tmpos_app and tmpos_audit_writer, both keys installed by the owner
 // and a fixture made as the IRR suite makes it (tests/db/invoicePaymentRegistrationRoutine.integration.test.mjs): the
 // tenant, store, customer, identities and memberships synthetic; sessions, settings, invoices and every payment row only
 // through the routines.
@@ -556,7 +556,9 @@ const registerCall = (db, f, r) => sealed('PDG register', db.unsafe(`select * fr
   [f.kBoss, f.store, r.invoice, f.tenant, r.registration, r.attempt, randomUUID()]));
 const proofCall = (db, f, r, wait) => sealed('PDG proof', db.unsafe(`select * from ${NS}.m7b_invoice_payment_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
   [f.kBoss, f.store, r.invoice, f.tenant, r.registration, wait]));
-const recordCall = (db, f, r, proof, payment, amount) => sealed('PDG record', db.unsafe(`select * from ${NS}.m7b_invoice_payment_record_v2($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::bigint, $9::text, $10::text, $11::uuid)`,
+// 038 (M7B-CREDITNOTES-P1) revokes tmpos_app's EXECUTE on 037's record_v2: the runtime records a proven payment through
+// record_v3 (same arguments, same rows, same 037 proof check, plus 038's credit-note barrier, inert here), the real record path.
+const recordCall = (db, f, r, proof, payment, amount) => sealed('PDG record', db.unsafe(`select * from ${NS}.m7b_invoice_payment_record_v3($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::uuid, $8::bigint, $9::text, $10::text, $11::uuid)`,
   [f.kBoss, f.store, r.invoice, f.tenant, payment, r.registration, r.attempt, String(amount), 'cash', proof, randomUUID()]));
 const settleCall = (db, f, r, version) => sealed('PDG settle', db.unsafe(`select * from ${NS}.m7b_invoice_payment_settle($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::bigint, $7::uuid)`,
   [f.kBoss, f.store, r.invoice, f.tenant, r.attempt, String(version), randomUUID()]));
@@ -621,7 +623,7 @@ async function xactWal(c, xid, from, to) {
 /** PDG-10..14 need PDG-09's setup; without it they fail with this fixed text instead of a TypeError. */
 const appReady = (c, tag) => assert.ok(c?.ready === true, `${tag}: PDG-09's setup (migrations, runtime login, keys, fixture) did not complete on this cluster`);
 
-/** Migrations 001-037, the runtime login and its three connections, both keys, the fixture and the real register tail. */
+/** Migrations 001-038, the runtime login and its three connections, both keys, the fixture and the real register tail. */
 async function openApp(c, tag) {
   const { owner } = c;
   assert.equal(c.target.source, 'harness', `${tag}: migrations go only on a cluster this suite started`);
@@ -632,11 +634,11 @@ async function openApp(c, tag) {
   await owner.unsafe(`revoke create on database "${c.target.database}" from public`);
   await owner.unsafe(`revoke temporary on database "${c.target.database}" from public`);
   const report = await trustedApply(c).catch((e) => { throw sealDbError(`${tag} trusted apply`, e); });
-  assert.equal(report.outcome, 'complete', `${tag}: 001-037 by the trusted executor`);
+  assert.equal(report.outcome, 'complete', `${tag}: 001-038 by the trusted executor`);
   const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
   const exact = ledger.length === REQUIRED_MIGRATIONS.length
     && ledger.every((row, i) => row.version === REQUIRED_MIGRATIONS[i].version && row.checksum === REQUIRED_MIGRATIONS[i].checksum);
-  assert.ok(exact && ledger.at(-1)?.version === '037', `${tag}: the ledger is exactly REQUIRED_MIGRATIONS through 037 (${ledger.length} rows; checksums withheld)`);
+  assert.ok(exact && ledger.at(-1)?.version === '038', `${tag}: the ledger is exactly REQUIRED_MIGRATIONS through 038 (${ledger.length} rows; checksums withheld)`);
   // Autovacuum and autoanalyze of the migrated tables would add background WAL inside the measured windows.
   await owner`alter system set autovacuum = off`;
   await owner`select pg_catalog.pg_reload_conf()`;
@@ -665,7 +667,7 @@ async function openApp(c, tag) {
   c.ready = true;
 }
 
-test('PDG-09 migrations 001-037 by the trusted executor on both clusters, the runtime login, keys and fixture; still PostgreSQL 16 durable single primaries at 16 and 64 MB', async () => {
+test('PDG-09 migrations 001-038 by the trusted executor on both clusters, the runtime login, keys and fixture; still PostgreSQL 16 durable single primaries at 16 and 64 MB', async () => {
   for (const [c, segMb] of [[c16, 16n], [c64, 64n]]) {
     const tag = `PDG-09/${segMb}MB`;
     await openApp(c, tag);
@@ -687,7 +689,7 @@ test('PDG-09 migrations 001-037 by the trusted executor on both clusters, the ru
     const [app] = await c.app.registrar`select current_user::text as u, pg_catalog.current_setting('synchronous_commit') as sc,
         (select rolsuper from pg_catalog.pg_roles where rolname = current_user) as su`;
     assert.deepEqual({ ...app }, { u: APP_LOGIN, sc: 'off', su: false }, `${tag}: the registrar is the runtime login, not a superuser, synchronous_commit off`);
-    console.log(`${tag}: ledger 001-037; real register tail: pad ${c.appTail.pStar} B -> ${c.appTail.mStar} B, COMMIT ${c.appTail.commit} B`);
+    console.log(`${tag}: ledger 001-038; real register tail: pad ${c.appTail.pStar} B -> ${c.appTail.mStar} B, COMMIT ${c.appTail.commit} B`);
   }
 });
 

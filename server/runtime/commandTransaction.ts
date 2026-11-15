@@ -93,6 +93,10 @@
 // runtime's own (idempotency.ts refusalEnvelope); a mutator may answer it having written nothing, and the store records that
 // 409 as the completion and commits only it. Every other command's slots are unchanged.
 //
+// M7B-CREDITNOTES-P1 (doc 16 CN-I3) — A THIRD SHAPE AND A FIFTH VOID SLOT: `paymentRefusals: 'credit'` on a CREATE (the
+// credit-note registration and issue) mints `invalid_state` SEALED for a create (a released registration, the voided invoice),
+// `already_issued` and `amount_exceeds_remaining`; the 'void' update also mints `credit_notes_recorded` (void v3, CN-A3).
+//
 // The runtime (app.ts) acknowledges success only after 'committed'. 'conflict' is a 409 write_conflict and
 // 'not_found' (an update contract only) a 404 not_found: nothing committed, nothing recorded, and the
 // attempt's lease simply expires. 'unchanged' (an update whose plan carries an unchanged response) is that
@@ -198,28 +202,33 @@ export interface CommandContract {
   /**
    * The typed sealed 409s of the payment commands (M7B-PAYMENTS-P1, doc 15 §12.5): 'record' — a CREATE only, the payment
    * record — carries `invalid_state` sealed (the voided invoice), `already_recorded` and `amount_exceeds_remaining`; 'void' —
-   * an UPDATE only, the invoice void — adds `payments_recorded`. Absent on every other contract.
+   * an UPDATE only, the invoice void — adds `payments_recorded` and (M7B-CREDITNOTES-P1) `credit_notes_recorded`; 'credit' — a
+   * CREATE only, the credit-note registration and issue (M7B-CREDITNOTES-P1) — carries `invalid_state` sealed,
+   * `already_issued` and `amount_exceeds_remaining`. Absent on every other contract.
    */
-  readonly paymentRefusals?: 'record' | 'void';
+  readonly paymentRefusals?: 'record' | 'void' | 'credit';
 }
 
 /** The keys of the opt-in slots a variant does not carry: each forbidden, so no variant can borrow another's. */
 type NoIssuingSlots = { issuingNotConfigured?: never; amountOutOfRange?: never };
 type NoRecordSlots = { alreadyRecorded?: never; amountExceedsRemaining?: never };
-type NoVoidSlots = { paymentsRecorded?: never };
+type NoVoidSlots = { paymentsRecorded?: never; creditNotesRecorded?: never };
+type NoCreditSlots = { alreadyIssued?: never };
 
 /**
  * The sealed rejections every command carries — exactly three — or, for an issuing update (M7B-INVOICES-ISSUE-P1), exactly
  * five: both typed 409s or neither, never one. M7B-PAYMENTS-P1: a 'record' create carries five (its `invalidState` sealed,
- * plus `alreadyRecorded` and `amountExceedsRemaining`), a 'void' update four (plus `paymentsRecorded`). Their `customerNotFound`
+ * plus `alreadyRecorded` and `amountExceedsRemaining`), a 'void' update five (plus `paymentsRecorded` and, M7B-CREDITNOTES-P1,
+ * `creditNotesRecorded`), a 'credit' create five (its `invalidState` sealed, plus `alreadyIssued` and `amountExceedsRemaining`). Their `customerNotFound`
  * is always null as prepared (the store refuses any other value); the type admits `T | null` only so a spread of any variant
  * with that slot replaced still type-checks, as for the issuing variant.
  */
 export type RejectedSlots<T> =
-  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null } & NoIssuingSlots & NoRecordSlots & NoVoidSlots>
-  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; issuingNotConfigured: T; amountOutOfRange: T } & NoRecordSlots & NoVoidSlots>
-  | Readonly<{ conflict: T; invalidState: T; customerNotFound: T | null; alreadyRecorded: T; amountExceedsRemaining: T } & NoIssuingSlots & NoVoidSlots>
-  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; paymentsRecorded: T } & NoIssuingSlots & NoRecordSlots>;
+  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null } & NoIssuingSlots & NoRecordSlots & NoVoidSlots & NoCreditSlots>
+  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; issuingNotConfigured: T; amountOutOfRange: T } & NoRecordSlots & NoVoidSlots & NoCreditSlots>
+  | Readonly<{ conflict: T; invalidState: T; customerNotFound: T | null; alreadyRecorded: T; amountExceedsRemaining: T } & NoIssuingSlots & NoVoidSlots & NoCreditSlots>
+  | Readonly<{ conflict: T; invalidState: T | null; customerNotFound: T | null; paymentsRecorded: T; creditNotesRecorded: T } & NoIssuingSlots & NoRecordSlots & NoCreditSlots>
+  | Readonly<{ conflict: T; invalidState: T; customerNotFound: T | null; alreadyIssued: T; amountExceedsRemaining: T } & NoIssuingSlots & NoVoidSlots & { alreadyRecorded?: never }>;
 
 export interface CommandRegistry {
   contract(kind: string): CommandContract | undefined;
@@ -303,7 +312,9 @@ export interface TransactionCommand {
    * into them (`issuingRefusals`), each a sealed 409; every other command carries exactly the three keys above.
    *
    * M7B-PAYMENTS-P1 (`paymentRefusals`): a 'record' create carries `invalidState` SEALED (the voided invoice — the one create
-   * with a sealed invalid state), `alreadyRecorded` and `amountExceedsRemaining`; a 'void' update adds `paymentsRecorded`.
+   * with a sealed invalid state), `alreadyRecorded` and `amountExceedsRemaining`; a 'void' update adds `paymentsRecorded` and
+   * (M7B-CREDITNOTES-P1) `creditNotesRecorded`; a 'credit' create carries `invalidState` sealed, `alreadyIssued` and
+   * `amountExceedsRemaining`.
    */
   readonly rejected: RejectedSlots<string>;
   readonly mutation: TransactionMutation;
@@ -401,7 +412,10 @@ export interface PreparedCommand {
  *   - 'transaction_already_recorded' / 'transaction_amount_exceeds_remaining' — a 'record' create (M7B-PAYMENTS-P1) whose
  *     attempt was already recorded on that invoice, or whose amount exceeds what remains, the sealed 409 recorded;
  *   - 'transaction_payments_recorded' — a 'void' update (M7B-PAYMENTS-P1) whose invoice carries a recorded payment, the
- *     sealed 409 recorded.
+ *     sealed 409 recorded;
+ *   - 'transaction_already_issued' — a 'credit' create (M7B-CREDITNOTES-P1) whose registration or attempt already carries a
+ *     credit note; 'transaction_credit_notes_recorded' — a 'void' update whose invoice carries an active credit note (CN-A3);
+ *     each the sealed 409 recorded.
  * The conflict and the invalid state are M5-GIAM-D1-P2-R1: before it they rolled back and left the lease in progress, so the
  * key could later be replanned and could mutate. An adapter that cannot record the sealed refusal rolls
  * its transaction back and answers 'transaction_unavailable' instead, which changes nothing at all.
@@ -422,6 +436,8 @@ export type CommandRefusal =
   | 'transaction_already_recorded'
   | 'transaction_amount_exceeds_remaining'
   | 'transaction_payments_recorded'
+  | 'transaction_already_issued'
+  | 'transaction_credit_notes_recorded'
   | 'transaction_unchanged'
   | 'transaction_unavailable'
   | 'transaction_timeout'
@@ -466,9 +482,10 @@ function parseCommandContract(raw: unknown, events: OutboxEventRegistry): Comman
     const refusalValid = !optional.includes('sealedRefusal') || (sealedRefusal === 'customer_not_found' && mode === 'create');
     // Only an update may opt into the issuing pair (M7B-INVOICES-ISSUE-P1), and only as exactly `true`.
     const issuingValid = !optional.includes('issuingRefusals') || (issuingRefusals === true && mode === 'update');
-    // M7B-PAYMENTS-P1: 'record' on a create alone, 'void' on an update alone, never beside another opt-in.
+    // M7B-PAYMENTS-P1: 'record' on a create alone, 'void' on an update alone, never beside another opt-in; M7B-CREDITNOTES-P1:
+    // 'credit' on a create alone.
     const paymentValid = !optional.includes('paymentRefusals') || (optional.length === 1
-      && ((paymentRefusals === 'record' && mode === 'create') || (paymentRefusals === 'void' && mode === 'update')));
+      && (((paymentRefusals === 'record' || paymentRefusals === 'credit') && mode === 'create') || (paymentRefusals === 'void' && mode === 'update')));
     if (isContractName(kind) && (mode === 'create' || mode === 'update') && typeof aggregateType === 'string'
       && AGGREGATE_TYPE_RE.test(aggregateType) && schema !== null && isPlainArray(refs) && refs.length <= MAX_EVENTS_PER_COMMAND
       && scopeValid && refusalValid && issuingValid && paymentValid) {
@@ -482,7 +499,7 @@ function parseCommandContract(raw: unknown, events: OutboxEventRegistry): Comman
         kind, mode, aggregateType, changes: schema, events: Object.freeze(parsed), contextScope: contextScope as CommandContextScope,
         ...(optional.includes('sealedRefusal') ? { sealedRefusal: 'customer_not_found' as const } : {}),
         ...(optional.includes('issuingRefusals') ? { issuingRefusals: true as const } : {}),
-        ...(optional.includes('paymentRefusals') ? { paymentRefusals: paymentRefusals as 'record' | 'void' } : {}),
+        ...(optional.includes('paymentRefusals') ? { paymentRefusals: paymentRefusals as 'record' | 'void' | 'credit' } : {}),
       });
     }
   }
@@ -601,10 +618,12 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     // M7B-PAYMENTS-P1: the payment record is the one create that seals invalid_state (the voided invoice).
     const record = !update && contract.paymentRefusals === 'record';
     const voids = update && contract.paymentRefusals === 'void';
-    const invalidState = update || record ? refusalEnvelope('invalid_state') : null;
+    // M7B-CREDITNOTES-P1: the credit-note registration and issue, the second create with a sealed invalid_state.
+    const credit = !update && contract.paymentRefusals === 'credit';
+    const invalidState = update || record || credit ? refusalEnvelope('invalid_state') : null;
     const optedIn = !update && contract.sealedRefusal === 'customer_not_found';
     const customerNotFound = optedIn ? refusalEnvelope('customer_not_found') : null;
-    if (conflict === null || ((update || record) && invalidState === null) || (optedIn && customerNotFound === null)) return null;
+    if (conflict === null || ((update || record || credit) && invalidState === null) || (optedIn && customerNotFound === null)) return null;
     // An update that opted into the issuing pair (M7B-INVOICES-ISSUE-P1) seals both 409s too; every other command carries no
     // such key at all, so its `rejected` is exactly the three slots above.
     const issuing = update && contract.issuingRefusals === true;
@@ -613,9 +632,13 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
     if (issuing && (issuingNotConfigured === null || amountOutOfRange === null)) return null;
     // M7B-PAYMENTS-P1: a 'record' create seals already_recorded and amount_exceeds_remaining, a 'void' update payments_recorded.
     const alreadyRecorded = record ? refusalEnvelope('already_recorded') : null;
-    const amountExceedsRemaining = record ? refusalEnvelope('amount_exceeds_remaining') : null;
+    const amountExceedsRemaining = record || credit ? refusalEnvelope('amount_exceeds_remaining') : null;
     const paymentsRecorded = voids ? refusalEnvelope('payments_recorded') : null;
-    if ((record && (alreadyRecorded === null || amountExceedsRemaining === null)) || (voids && paymentsRecorded === null)) return null;
+    // M7B-CREDITNOTES-P1: a 'credit' create seals already_issued, a 'void' update credit_notes_recorded too.
+    const alreadyIssued = credit ? refusalEnvelope('already_issued') : null;
+    const creditNotesRecorded = voids ? refusalEnvelope('credit_notes_recorded') : null;
+    if ((record && (alreadyRecorded === null || amountExceedsRemaining === null)) || (voids && (paymentsRecorded === null || creditNotesRecorded === null))
+      || (credit && (alreadyIssued === null || amountExceedsRemaining === null))) return null;
     // The slots in the contract's one shape, from the three common ones and `map` (the envelope itself, or its sealed text).
     const slotsOf = <T>(map: (envelope: ReplayEnvelope) => T, three: { conflict: T; invalidState: T | null; customerNotFound: T | null }): RejectedSlots<T> => {
       if (issuing) {
@@ -628,7 +651,16 @@ export function prepareCommand(contract: CommandContract, events: OutboxEventReg
         });
       }
       if (voids) {
-        return Object.freeze({ conflict: three.conflict, invalidState: three.invalidState, customerNotFound: null, paymentsRecorded: map(paymentsRecorded as ReplayEnvelope) });
+        return Object.freeze({
+          conflict: three.conflict, invalidState: three.invalidState, customerNotFound: null, paymentsRecorded: map(paymentsRecorded as ReplayEnvelope),
+          creditNotesRecorded: map(creditNotesRecorded as ReplayEnvelope),
+        });
+      }
+      if (credit) {
+        return Object.freeze({
+          conflict: three.conflict, invalidState: three.invalidState as T, customerNotFound: null,
+          alreadyIssued: map(alreadyIssued as ReplayEnvelope), amountExceedsRemaining: map(amountExceedsRemaining as ReplayEnvelope),
+        });
       }
       return Object.freeze(three);
     };
@@ -694,6 +726,9 @@ export async function commitCommand(transactions: CommandTransactions, command: 
     if (outcome === 'already_recorded') return 'transaction_already_recorded';
     if (outcome === 'amount_exceeds_remaining') return 'transaction_amount_exceeds_remaining';
     if (outcome === 'payments_recorded') return 'transaction_payments_recorded';
+    // M7B-CREDITNOTES-P1: likewise only for a command carrying the matching sealed slot.
+    if (outcome === 'already_issued') return 'transaction_already_issued';
+    if (outcome === 'credit_notes_recorded') return 'transaction_credit_notes_recorded';
     if (outcome === 'unchanged') return 'transaction_unchanged';
     return outcome === 'unavailable' ? 'transaction_unavailable' : 'transaction_outcome_invalid';
   } catch {

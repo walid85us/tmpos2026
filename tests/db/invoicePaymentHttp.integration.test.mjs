@@ -39,6 +39,10 @@
 // on) and the owner installs a proof key out of band before the entry starts (it refuses without one). Every case keeps its
 // intent; the registration's own refusals, replay isolation and fail-closed paths are proved by the IRH suite.
 //
+// M7B-CREDITNOTES-P1 (migration 038) — WHAT CHANGED: the record now runs through record_v3 (its audit row keeps evaluated_by
+// m7b_invoice_payment_routine@v2), the void through void_v3, and the payments read's amounts are exactly { currency, dueCents,
+// creditedCents, appliedCents, remainingCents } (creditedCents 0 wherever no credit note exists); the table is forty-seven routes.
+//
 // It never touches a managed or remote database. Run: npx tsx scripts/run-db-tests.mjs tests/db/invoicePaymentHttp.integration.test.mjs
 
 import test from 'node:test';
@@ -307,8 +311,8 @@ async function teardown() {
           where g.tgrelid in (${PAY_TABLE}::regclass, ${REV_TABLE}::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         payments: 0, reversals: 0, payment_audits: 0, registrations: 0, registration_audits: 0, proof_keys: 0, registration_guards_always: true,
-        voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '037',
-        triggers: ['trg_invoice_payment_guard:A', 'trg_invoice_payment_reversal_guard:A', 'trg_invoice_payment_reversal_truncate:A', 'trg_invoice_payment_truncate:A'].join(','),
+        voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '038',
+        triggers: ['trg_invoice_payment_credit_note_barrier:A', 'trg_invoice_payment_guard:A', 'trg_invoice_payment_reversal_guard:A', 'trg_invoice_payment_reversal_truncate:A', 'trg_invoice_payment_truncate:A'].join(','),
       }, 'no payment, reversal, registration, proof key or payment/registration audit record anywhere, nothing of this suite left, and every payment and registration guard ALWAYS again');
     });
   } finally {
@@ -350,8 +354,8 @@ await setupStep(async () => {
   } finally {
     await handle.dispose();
   }
-  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('034', '035', '036', '037')`;
-  assert.equal(applied, 4, 'migrations 034-037 are applied: the issuing, the void, the payments and the registrations');
+  const [{ applied }] = await owner`select count(*)::int as applied from public.schema_migrations where version in ('034', '035', '036', '037', '038')`;
+  assert.equal(applied, 5, 'migrations 034-038 are applied: the issuing, the void, the payments, the registrations and the credit notes');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -768,7 +772,7 @@ function paymentsOf(reply, label) {
   const body = parseBody(reply, label);
   assert.deepEqual(Object.keys(body), ['invoice', 'amounts', 'paymentStatus', 'payments', 'nextCursor'], `${label}: the five members in order`);
   assert.deepEqual(Object.keys(body.invoice), ['id', 'status'], label);
-  assert.deepEqual(Object.keys(body.amounts), ['currency', 'dueCents', 'appliedCents', 'remainingCents'], label);
+  assert.deepEqual(Object.keys(body.amounts), ['currency', 'dueCents', 'creditedCents', 'appliedCents', 'remainingCents'], label);
   assert.equal(body.amounts.currency, 'USD', label);
   for (const p of body.payments) {
     assert.deepEqual(Object.keys(p), ['id', 'attemptId', 'amountCents', 'method', 'recordedAt', 'reversal'], `${label}: a payment's keys`);
@@ -780,7 +784,8 @@ function paymentsOf(reply, label) {
   }
   return body;
 }
-const amounts = (dueCents, appliedCents) => ({ currency: 'USD', dueCents, appliedCents, remainingCents: dueCents - appliedCents });
+// M7B-CREDITNOTES-P1 (doc 16 CN-A1-A): creditedCents sits right after dueCents and is 0 wherever no credit note exists (every case here).
+const amounts = (dueCents, appliedCents, creditedCents = 0) => ({ currency: 'USD', dueCents, creditedCents, appliedCents, remainingCents: dueCents - creditedCents - appliedCents });
 /** The wire's payment from the OWNER's rows (the read's projection, nothing else). */
 async function wirePaymentOf(payment) {
   const p = await paymentRowOf(payment);
@@ -804,8 +809,8 @@ async function issuedBytesOf(ctx, s, store, invoice) {
 // IPH-00: the shipping table
 // ===========================================================================
 
-test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ships exactly 40 routes, the five payment routes and 037\'s four registration routes among them with their body and idempotency', () => {
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 40);
+test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ships exactly 47 routes (M7B-CREDITNOTES-P1 adds seven), the five payment routes and 037\'s four registration routes among them with their body and idempotency', () => {
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 47);
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path} ${r.body} ${r.idempotency}`);
   for (const want of [
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility none none',
@@ -818,6 +823,14 @@ test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ship
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-registration-proof none none',
     'POST /api/v1/stores/{storeId}/invoices/{id}/payment-settlement json required',
     'GET /api/v1/stores/{storeId}/payment-attempts none none',
+    // M7B-CREDITNOTES-P1: the seven credit-note routes.
+    'GET /api/v1/stores/{storeId}/credit-note-attempts none none',
+    'GET /api/v1/stores/{storeId}/invoices/{id}/credit-note-registration-proof none none',
+    'GET /api/v1/stores/{storeId}/invoices/{id}/credit-notes none none',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations json required',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement json required',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/credit-notes json required',
+    'POST /api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal json required',
   ]) assert.ok(served.includes(want), want);
 });
 
@@ -825,7 +838,7 @@ test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ship
 // IPH-01: the record
 // ===========================================================================
 
-test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record (v2, through a registration) — the exact sealed 201 with no Location, one payment naming its actor, ONE audit record written by 037\'s routine (the payment and its registration its only subjects) and its completion, no outbox row; the same-key replay byte for byte; the same key with other bytes or another invoice the 422; a new key reusing the attempt the sealed already_recorded (before amount_exceeds_remaining), its own replay sealed; the same attempt on another invoice a new payment; amount_exceeds_remaining; mixed methods to recorded_in_full; the read\'s amounts and word over the history; the issued list and detail bytes unchanged', async () => {
+test('IPH-01 (PAY-01, PAY-04, PAY-08, PAY-10, PAY-11): the record (v3, through a registration) — the exact sealed 201 with no Location, one payment naming its actor, ONE audit record written by 037\'s routine (the payment and its registration its only subjects) and its completion, no outbox row; the same-key replay byte for byte; the same key with other bytes or another invoice the 422; a new key reusing the attempt the sealed already_recorded (before amount_exceeds_remaining), its own replay sealed; the same attempt on another invoice a new payment; amount_exceeds_remaining; mixed methods to recorded_in_full; the read\'s amounts and word over the history; the issued list and detail bytes unchanged', async () => {
   const w = await world('iph01');
   await withEntry(async (ctx) => {
     await ready(ctx, w);
@@ -1381,9 +1394,9 @@ test('IPH-06 (PAY-11): the read pages 50 payments oldest first by (recorded time
 // IPH-07: the Total
 // ===========================================================================
 
-// M7B-PAYMENTS-P2: the runtime's record is 037's v2.
-const RECORD_CALL = 'tmpos_invoice_payment.m7b_invoice_payment_record_v2(';
-const VOID_CALL = 'tmpos_invoice_payment.m7b_invoice_void_v2(';
+// M7B-CREDITNOTES-P1 (038): the runtime's record is 038's v3 (037's v2 is revoked from it) and its void is 038's v3.
+const RECORD_CALL = 'tmpos_invoice_payment.m7b_invoice_payment_record_v3(';
+const VOID_CALL = 'tmpos_invoice_payment.m7b_invoice_void_v3(';
 const ROLLBACK = Symbol('rollback');
 const quietly = (p) => { p.catch(() => {}); return p; };
 /** The OWNER holds `invoice`'s issued header FOR UPDATE in an open transaction until `release()` rolls it back; { pid, release }. */

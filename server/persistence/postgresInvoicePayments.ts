@@ -2,7 +2,8 @@
 // ADR-52; G-IAM, G-ISOLATION, G-PERSIST, G-AUDIT; migration 036, schema tmpos_invoice_payment): the record's and the
 // reversal's mutators (server/runtime/invoicePayments.ts), each ONE fixed call into 036's session-bound SECURITY DEFINER
 // routine, and the payments read over 036's m7b_invoice_payments_get. Every value is a bound parameter, every bigint as exact
-// decimal text; no table is named here.
+// decimal text; no table is named here. M7B-CREDITNOTES-P1 (migration 038): the record calls 038's record v3 and the read 038's
+// m7b_invoice_payments_get_v2 (o_credited_cents after o_due_cents); 036's read and 037's record v2 are revoked from tmpos_app.
 //
 // THE TWO MUTATORS are ROUTINE-AUDITED (postgresTransactionalStore.ts ROUTINE_AUDITED_KINDS; doc 15 §12.5 I2, D-PAY-8): each
 // routine writes the command's one audit record itself, in the command's transaction, under the command's correlation id
@@ -81,9 +82,10 @@ async function applyInvoicePaymentRecord(sql: PgStatement, mutation: Transaction
     || !isInt(amountCents, 1, MAX) || !isInvoicePaymentMethod(method) || !isUuid(registrationId)
     || typeof registrationProof !== 'string' || !PROOF_RE.test(registrationProof)) return 'unavailable';
   // M7B-PAYMENTS-P2: 037's record v2 (036's nine-argument record is no longer the runtime's): the registration and its proof
-  // are SQL parameters only; a mismatch of either is the routine's uniform 'not_found'.
+  // are SQL parameters only; a mismatch of either is the routine's uniform 'not_found'. M7B-CREDITNOTES-P1: 038's record v3 —
+  // the same arguments, answers and words — whose cap counts active credits (CN-A2).
   const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_payment_id, o_invoice_id, o_audit_event_id
-    from tmpos_invoice_payment.m7b_invoice_payment_record_v2(${sessionKey}::text, ${context.store}::uuid, ${invoiceId}::uuid, ${expectedTenant}::uuid,
+    from tmpos_invoice_payment.m7b_invoice_payment_record_v3(${sessionKey}::text, ${context.store}::uuid, ${invoiceId}::uuid, ${expectedTenant}::uuid,
       ${aggregateId}::uuid, ${registrationId}::uuid, ${attemptId}::uuid, ${String(amountCents)}::bigint, ${method}::text, ${registrationProof}::text,
       ${correlationId}::uuid)`;
   if (rows.length !== 1 || !hasColumns(rows[0], RECORD_COLUMNS)) return 'mismatch';
@@ -170,8 +172,9 @@ const BIGINT_TEXT_RE = /^(0|[1-9][0-9]{0,15})$/;
 const fault = (): Error => new Error('invoice payments answer invalid');
 
 type Row = Readonly<Record<string, unknown>>;
+// M7B-CREDITNOTES-P1: 038's m7b_invoice_payments_get_v2 adds o_credited_cents immediately after o_due_cents.
 const HEADER_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents',
-  'o_due_cents', 'o_applied_cents', 'o_remaining_cents', 'o_payment_status'];
+  'o_due_cents', 'o_credited_cents', 'o_applied_cents', 'o_remaining_cents', 'o_payment_status'];
 const PAYMENT_COLUMNS: readonly string[] = ['o_payment_id', 'o_attempt_id', 'o_amount_cents', 'o_method', 'o_recorded_at', 'o_reversed_at', 'o_reason_code'];
 const PAYMENTS_COLUMNS: readonly string[] = [...HEADER_COLUMNS, ...PAYMENT_COLUMNS];
 
@@ -215,7 +218,8 @@ export function invoicePaymentsAnswerOf(rows: unknown, scope: TrustedScope, invo
   });
   const answer = {
     outcome: 'payments', invoice: { id: first.o_invoice_id, status: first.o_status }, currency: first.o_currency,
-    totalCents: amountOf(first.o_total_cents, 0), dueCents: amountOf(first.o_due_cents, 0), appliedCents: amountOf(first.o_applied_cents, 0),
+    totalCents: amountOf(first.o_total_cents, 0), dueCents: amountOf(first.o_due_cents, 0), creditedCents: amountOf(first.o_credited_cents, 0),
+    appliedCents: amountOf(first.o_applied_cents, 0),
     remainingCents: amountOf(first.o_remaining_cents, 0), paymentStatus: first.o_payment_status, payments,
   };
   // The runtime's own decoder must accept it as a page (never as a refusal word).
@@ -234,9 +238,9 @@ export function createPostgresInvoicePayments(deps: { readonly client: Supervise
       if (typeof sessionKey !== 'string' || !SESSION_KEY_RE.test(sessionKey)) throw fault();
       if (!isUuid(invoiceId) || (after !== null && !isUuid(after))) throw fault();
       return client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => invoicePaymentsAnswerOf(
-        await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_applied_cents,
+        await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_credited_cents, o_applied_cents,
             o_remaining_cents, o_payment_status, o_payment_id, o_attempt_id, o_amount_cents, o_method, o_recorded_at, o_reversed_at, o_reason_code
-          from tmpos_invoice_payment.m7b_invoice_payments_get(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${invoiceId}::uuid,
+          from tmpos_invoice_payment.m7b_invoice_payments_get_v2(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${invoiceId}::uuid,
             ${after}::uuid, ${INVOICE_PAYMENTS_ASK}::integer)`,
         scope, invoiceId, after,
       ));
@@ -251,9 +255,9 @@ export async function probeInvoicePayments(client: SupervisedPgClient, signal: A
   const [tenant, store, id] = [randomUUID(), randomUUID(), randomUUID()];
   try {
     return await client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => {
-      const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_applied_cents,
+      const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_credited_cents, o_applied_cents,
           o_remaining_cents, o_payment_status, o_payment_id, o_attempt_id, o_amount_cents, o_method, o_recorded_at, o_reversed_at, o_reason_code
-        from tmpos_invoice_payment.m7b_invoice_payments_get(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${id}::uuid, ${null}::uuid, ${1}::integer)`;
+        from tmpos_invoice_payment.m7b_invoice_payments_get_v2(${absentKey}::text, ${tenant}::uuid, ${store}::uuid, ${id}::uuid, ${null}::uuid, ${1}::integer)`;
       return Array.isArray(rows) && rows.length === 1 && hasColumns(rows[0], PAYMENTS_COLUMNS) && rows[0].o_outcome === 'denied' && isRefusal(rows[0]);
     });
   } catch {

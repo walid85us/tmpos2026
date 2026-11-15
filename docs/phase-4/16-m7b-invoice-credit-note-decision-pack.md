@@ -1,9 +1,10 @@
 # 16 — Credit notes against an issued store invoice: decision pack
 
-**Status: ADOPTED — DESIGN ONLY (owner decisions of 2026-11-14, stage M7B-CREDITNOTES-D1-P0).**
+**Status: ADOPTED; CN-P1 (CANDIDATE) IMPLEMENTED — NOT DEPLOYED (owner decisions of 2026-11-14, stage M7B-CREDITNOTES-D1-P0; delivery stage M7B-CREDITNOTES-P1).**
 - The owner chose every recommendation; §12 records each choice.
-- Adoption is not delivery: nothing of CN-P1 is implemented, migrated, run or deployed. Credit notes are not available in the product.
-- CN-P1 (code, migration 038, runtime) and deployment are separate stages, built only to §12.
+- CN-P1 (candidate) implements §12.2 as built on `main` `04bd9d6`: migration 038, the server routes and commands, and the shop's decoders and display. The delivery record is §12.4 and the decision record is [10](./10-architecture-decision-records.md) ADR-53.
+- The CN-P1 candidate has had an independent review (no blocker or major finding; minor findings applied). Owner-directed manual QA (CN-29) passed 12 of 12 on synthetic data (§12.4; not UAT). The owner's review and exact-commit CI are pending. Nothing is deployed. Credit notes are not available in the product.
+- CN-P2 (the shop's issue control and recovery) and CN-P3 (the shop's withdrawal control) are not built.
 - No gate changes status. F-2 and F-5 stay missing inputs. Refunds and every money movement stay excluded.
 
 **Original status at D1-P0 (history): PROPOSED — NOT ADOPTED (stage M7B-CREDITNOTES-D1-P0, documentation only).**
@@ -15,7 +16,7 @@
 - The text from here to §11 is the proposal as written; §12 records the adoption and is the CN-P1 target contract.
 
 **Baseline.**
-- Verified remote `main`: `176c129e14d0ee56b30db98b162f1ab2bb1bdfb2` (the M7B-PAYMENTS-P2C closeout). `main` has not advanced beyond it, so the governing contracts are the ones cited here and no contract reconciliation is needed beyond the corrections this revision makes (R4: recovery, cutover, owner-only authority, voided display, sign-in timing).
+- Verified remote `main`: `176c129e14d0ee56b30db98b162f1ab2bb1bdfb2` (the M7B-PAYMENTS-P2C closeout). As at D1-P0, `main` had not advanced beyond it, so the governing contracts are the ones cited here and no contract reconciliation is needed beyond the corrections this revision makes (R4: recovery, cutover, owner-only authority, voided display, sign-in timing).
 - P2C implementation: `9c4d2010149c42aee362566a5f40f6897b8243ce`.
 - P2C documentation CI: run 43630725465 (push to `main`, attempt 1, success). This run is as given by the stage brief; it was supplied by the owner and is not re-checked here.
 - Gates, as [15](./15-m7b-invoice-payment-recording-decision-pack.md) line 9 and [09](./09-roadmap-m0-m9.md) line 513 record them: 37 gates, 29 OPEN, 7 PARTIAL and 1 PASS at repository level. Nothing is deployed.
@@ -679,11 +680,63 @@ D-CN-12 duties and limits:     ACCEPT A
   - **CN-A2** (ADR-52 decision 2; D-PAY-2): the payment cap counts active credits; 038 replaces 037's `record_v2`.
   - **CN-A3** (ADR-52 decision 5; D-PAY-5; A2/A3; ADR-51 decision 8's precedence): a void is also refused while a credit note is active, with `credit_notes_recorded`, through void v3.
 - Until then the shipped behaviour is unchanged: 036's and 037's payments read, the payments-only cap of 037's `record_v2`, and 036's `m7b_invoice_void_v2` (§2 rows "Amount due", "The live cap" and "Void and payments").
-- The contract changes CN-I1 to CN-I5 (§6) are recorded at CN-P1 in its ADR (next free: ADR-53).
+- The contract changes CN-I1 to CN-I5 (§6) are recorded at CN-P1 in its ADR (ADR-53).
 
 ### 12.3 Carried, not claimed
 
 - CN-10c, CN-34s1 and CN-34s2 are planned, not run; the HTTP cutover variant stays UNVERIFIED; CN-38 is a deployment prerequisite.
+- The tax split is interim; F-2 sign-off (CN-30) comes before deployment.
+- F-5 and DA-187 must widen to credit notes before live use.
+- The unresolved items that could change 038's shape stay listed in D-CN-10; any change is a later additive migration, never an edit of 038.
+- Live store-scope owner provisioning stays subject to deployment review.
+- No gate changes status. Nothing is deployed.
+
+### 12.4 CN-P1 delivery record (candidate)
+
+**Status.** CN-P1 (candidate) is implemented to §12.2 on a candidate built on `main` `04bd9d6`. The decisions it made beyond this text, and the contract changes CN-I1 to CN-I5 as built, are in [10](./10-architecture-decision-records.md) ADR-53. An independent review found no blocker or major issue and its minor findings are applied; owner-directed manual QA (CN-29) is recorded below; the owner's review and exact-commit CI (CN-28) are pending. Nothing is deployed, no managed database is touched, and credit notes are not available in the product.
+
+**Changed areas.**
+- **Migration 038** (`server/platform-identity/migrations/038_m7b_invoice_credit_note.{up,down}.sql`): schema `tmpos_invoice_credit_note` with the credit-note, withdrawal, counter and registration tables; the register, proof, issue, attempts, settle, withdraw and list routines; the replacements `m7b_invoice_payment_record_v3`, `m7b_invoice_void_v3` and `m7b_invoice_payments_get_v2` with the three revocations; the insert-time barrier triggers on the payment and void tables; the rollback-order anchor; two audit subject columns.
+- **Server:** `server/persistence/postgresInvoiceCreditNotes.ts`, `server/runtime/invoiceCreditNotes.ts` (seven new store routes), the route table and session-bound command list, the transactional store and command kernel, the canonical permissions (three keys, the store owner rule), the payments and void runtime decoders, the tenant entry and the startup preflight (ledger 001–038 and the approved grants).
+- **Shop:** the payments decoder and display (`creditedCents`, the two new status words, "Invoice total" and "Credited", the voided-invoice rule) and the void refusal for `credit_notes_recorded`; no issue, withdrawal or recovery control.
+- **Tests and CI:** server and persistence unit suites for the credit-note routes and store, database suites for the routine, the cutover, the HTTP surface and the migration smoke, edits to the existing database and unit suites for the 001–038 ledger and the new amounts shape, new steps in the CI workflow, and `MIN_SUITES` 185.
+
+**Evidence.** Each row of §8 is recorded here, with its level and limits, only once it has run. No result is claimed in this text.
+
+Recorded 2026-11-15 on the uncommitted candidate (Node 20.20.0, PostgreSQL 16, every database suite on its own disposable socket-only cluster; durable, `fsync` on, where proofs need it). Pinned 038 checksums: up `f0d6988cd8ba514e4516d8be67997478a53ec04d86324b04bab806be147a77f9`, down `34654e6d2ab14fae5496e022ef47c095baef0079249d0cab67d7812eef7549e7`. This is local evidence, not CI.
+
+- **Full local run:** typecheck and its contract 0 errors; the deterministic suites 185 of 185; the shop suites 1,388 of 1,388; the 56 database suites of the CI list (1,048 tests) 1,047 passed, 0 failed, 1 skipped (ICH-11, below). The new suites: migration smoke (ICS) 2 of 2, routines (ICR) 28 of 28, cutover (ICC) 11 of 11, HTTP through the real tenant entry (ICH) 12 of 13 with ICH-11 skipped.
+- **Run, database layer (ICR, ICC):** CN-01, CN-02 and CN-03 (separate connections, the second call shown waiting before release); CN-04; CN-06; CN-07a; CN-08 (the writers); CN-09; CN-10 and CN-10b (tenant and store `read_only`, `overdue` and store `suspended` refused, each beside a passing owner control; only the four built-in roles exist, so a custom role is not stageable); CN-11; CN-13; CN-14; CN-15; CN-16; CN-17 (seeded property test, seed `0x0c4e0038`, plus E16 and E17 and a forced `data_corrupted`); CN-18 (E1–E14, E16 and E17 exact through the routines; E15 as a comparison fixture); CN-21; CN-22 to CN-25; CN-32; CN-33; CN-35; CN-36.
+- **Run, cutover:** CN-34 (i)–(iv) call the retained routines after the migration (ICC-01–03, ICC-06). Distinct from them, CN-34s1 (ICC-08) and CN-34s2 (ICC-09) stage a call admitted before 038 and paused on 016's hold: 038 commits while the call is still blocked, a credit commits, and the call then fails 23000 at the barrier with nothing of its own written; the counterfactual with the barrier lifted commits and breaks I-CN. ICC-07, a property check tagged with both, shows 038 applies while `app_user`, `platform_identity`, `issuer_key`, `tenant_session` and the session tables are held.
+- **Run, HTTP layer (ICH):** CN-10c (a real store-scope `store_owner`, signed in through the tenant entry, registers, proves, issues, lists, looks up, confirms and withdraws within the sign-in window; one routine audit row per mutation, none for the list and lookup), on the same invoice and store as CN-10b's manager denials; CN-04; CN-05; CN-06; CN-07a; CN-09 (real foreign ids); CN-10; CN-11; CN-12; CN-13; CN-15; CN-16; CN-23; CN-24; CN-25; CN-33.
+- **Run, unit and component:** CN-19 (the server decoder cases in `server/runtime/invoicePayments.test.ts` and `server/runtime/invoiceCreditNotes.test.ts`, and the shop's IIC-34), CN-20 (a frozen copy of the pre-change shop decoder refuses the new amounts and does not know `credit_notes_recorded`; the real pre-change module was also run once outside the suite), CN-26 (the 001–038 ledger and approved-grant pins in `server/persistence/postgresStartupPreflight.test.ts`), CN-27a, CN-31 and CN-37 (component).
+- **Not run, or limited:** the HTTP cutover variant (ICH-11) stays UNVERIFIED; CN-36 and true concurrency are database-layer only; CN-04's "past 24 h" is covered by the permanent attempt constraint, not by staging key expiry; the browser assertions added for CN-27a, CN-31 and CN-37 did not run locally; CN-33's "Name not set" has no shop surface until CN-P2.
+- **Pending:** exact-commit CI (CN-28), F-2 sign-off (CN-30) and the cutover rehearsal (CN-38, deployment).
+
+**Manual QA (CN-29), recorded 2026-11-15.** Owner-directed browser QA on synthetic data, **not UAT**, not a deployment and not a legal or tax review. Isolated QA run `qa-20261115t1238-732c`, generation 1, on candidate tree `d970dc6035f6d05ad0607531f62931d4229226a8` (based on `04bd9d6`). The QA tree added one local, uncommitted, QA-only line so the disposable cluster was crash-durable (`` resolveDisposableTarget(`QA ${runId}`, { durable: true }) `` in `tests/qa/interactive/supervisor.mjs`; overlay diff sha256 `19906b48521a32dcb8dc34403737df6f5222ac63f646241b739c47308d8d6c6d`); it is not part of the candidate. The QA database applied 001–038; a read-only check at the start showed `fsync`, `synchronous_commit` and `full_page_writes` on. Credit notes were made over the real routes by the store-scope `store_owner`, since CN-P1 has no shop control for them. The owner set every result:
+
+| Case | Invoice | Result | Owner's note |
+|---|---|---|---|
+| QA-CN-01, credit only | 8 | PASS | Invoice total $108.88, Credited $20.00, Recorded $0.00, Remaining $88.88; "No payment recorded"; the total labelled "Invoice total". |
+| QA-CN-02, partial payment | 11 | PASS | Credited $30.00, Recorded $50.00, Remaining $28.88; "Payment recorded in part"; one $50.00 cash row. |
+| QA-CN-03, fully credited | 12 | PASS | "Credited in full"; $108.88 credited, $0.00 recorded and remaining; no Record payment action. |
+| QA-CN-04, mixed settlement | 13 | PASS | "Settled by payment and credit"; $20.00 credited, one $88.88 cash payment, $0.00 remaining; no Record payment action. |
+| QA-CN-05, no activity | 7 | PASS | "No payment recorded"; $0.00 credited and recorded, $108.88 remaining. |
+| QA-CN-06, zero total | 14 | PASS | "Nothing due"; total and every amount $0.00; no Record payment action. |
+| QA-CN-07, voided (CN-37) | 5 and 6 | PASS | Issued totals still shown ($50.00, $108.88); payment amount rows, Void and Record payment hidden. |
+| QA-CN-08, void with an active credit (CN-27a) | 10 | PASS | The refusal below shown; the invoice stayed issued with $20.00 credited and $88.88 remaining. |
+| QA-CN-09, payment cap | 9 | PASS | $90.00 rejected inline before any request; $88.88 cash recorded and confirmed; one payment row, $20.00 credited, $0.00 remaining. |
+| QA-CN-10, manager view (CN-10b) | 8 | PASS | Same totals as the owner; the existing payment and void actions kept; no credit-note mutation or recovery control. |
+| QA-CN-11, issued-invoice controls (CN-27b) | 8 | PASS | Neither role saw an Issue, Withdraw or Recover credit-note control in the issued-invoice views checked. |
+| QA-CN-12, narrow width (CN-31) | 13 | PASS | At 320 × 309 CSS px and 24 px text the mixed status wrapped between words, amounts stayed readable, no horizontal overflow of page or dialog. |
+
+- **Void wording (CN-27a):** approved by the owner as written: "This invoice has credit notes, so it can't be voided. If a credit note was issued by mistake, withdraw it first."
+- **Saved evidence, read-only, captured before the run was stopped** (neither action repeated). Invoice 10: the browser sent one void request, answered 409; there is no void row and no void audit row for it, and its credit note is still active. The front's request log keeps no response body, so that the 409 carried `credit_notes_recorded` rests on the owner's browser observation. Invoice 9: one payment registration, one $88.88 cash payment and one confirmation, one audit row each; no reversal, no duplicate (3 payments for 3 distinct attempts in the store), and no request and no stored row from the rejected $90.00 entry.
+- **API checks while the fixtures were made** (not browser results): the store owner issued, confirmed and listed credit notes and withdrew one; the manager was refused 403 on all six credit-note mutation and recovery routes, and the manager's list carried no staff-name field while the owner's did (CN-10b, CN-33).
+- **Separate layout observation, not a CN-P1 result.** At the QA-CN-12 size the shared dialog heading ("Invoice 13", beside Close) split inside the word. The heading markup, its dialog frame and every styling input are byte-identical to `04bd9d6`, so this is base behaviour by source comparison; a rendered comparison with `04bd9d6` was not performed. It is left outside CN-P1.
+
+**Carried, not claimed** (§12.3 as adopted; CN-10c, CN-34s1 and CN-34s2 have since run, as recorded above).
+- The HTTP cutover variant stays UNVERIFIED; CN-38 is a deployment prerequisite.
 - The tax split is interim; F-2 sign-off (CN-30) comes before deployment.
 - F-5 and DA-187 must widen to credit notes before live use.
 - The unresolved items that could change 038's shape stay listed in D-CN-10; any change is a later additive migration, never an edit of 038.

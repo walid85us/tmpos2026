@@ -94,6 +94,7 @@ function fakeServer() {
     // M7B-PAYMENTS-P2A: the payments read as server/runtime/invoicePayments.ts answers it — the amounts and word over the
     // whole history (due the Total while issued, 0 once voided), pages of 50 oldest first, the cursor the last id of a full page.
     payments: new Map<string, PaymentWire[]>(), // invoice -> its payments, oldest first
+    credits: new Map<string, number>(), // invoice -> its active credit notes' sum (M7B-CREDITNOTES-P1; the read's creditedCents)
     paymentsStatus: [] as Array<number | Response>, // what the next payments GETs answer instead
     /** The payments reads that reached the fake (path and query). */
     paymentReads(): string[] { return server.sent.filter((r) => r.method === 'GET' && /\/invoices\/[^/]+\/payments(\?|$)/.test(r.url)).map((r) => r.url); },
@@ -233,7 +234,7 @@ function fakeServer() {
           if (server.issuedDenied.has(session!.user.uid) || !server.stores[session!.user.uid]?.some((s) => s.id === storeId)) return refuse(403, 'forbidden');
           const found = server.issued.get(storeId)?.find((i) => i.id === invoiceId);
           if (found === undefined) return refuse(404, 'not_found');
-          const answer = paymentsOf(found, server.payments.get(invoiceId) ?? [], after ?? null);
+          const answer = paymentsOf(found, server.payments.get(invoiceId) ?? [], after ?? null, server.credits.get(invoiceId) ?? 0);
           return answer === null ? refuse(400, 'invalid_request') : reply(200, answer); // a cursor that is not a payment of this invoice
         });
       }
@@ -469,17 +470,21 @@ const detailOf = (i: Issued) => ({
   },
 });
 /** The payments read's 200 for `i` with `all` its payments (oldest first), the page after `after`; null for an unknown cursor. */
-function paymentsOf(i: Issued, all: PaymentWire[], after: string | null) {
+function paymentsOf(i: Issued, all: PaymentWire[], after: string | null, credited = 0) {
   const start = after === null ? 0 : all.findIndex((p) => p.id === after) + 1;
   if (start === 0 && after !== null) return null;
   const voided = i.void !== undefined;
   const due = voided ? 0 : amountsFor(subtotalOf(i), i.tax).totalCents;
   const applied = voided ? 0 : all.reduce((n, p) => n + (p.reversal === null ? p.amountCents : 0), 0);
+  const credit = voided ? 0 : credited;
+  const remaining = due - credit - applied;
   const page = all.slice(start, start + 50);
   return {
     invoice: { id: i.id, status: voided ? 'voided' : 'issued' },
-    amounts: { currency: 'USD', dueCents: due, appliedCents: applied, remainingCents: due - applied },
-    paymentStatus: voided ? 'voided' : due === 0 ? 'nothing_due' : applied === 0 ? 'no_payment_recorded' : applied === due ? 'recorded_in_full' : 'recorded_partly',
+    amounts: { currency: 'USD', dueCents: due, creditedCents: credit, appliedCents: applied, remainingCents: remaining },
+    paymentStatus: voided ? 'voided' : due === 0 ? 'nothing_due'
+      : remaining === 0 ? (credit === 0 ? 'recorded_in_full' : applied === 0 ? 'credited_in_full' : 'settled_by_payment_and_credit')
+        : applied === 0 ? 'no_payment_recorded' : 'recorded_partly',
     payments: page,
     nextCursor: start + 50 < all.length ? page[page.length - 1].id : null,
   };
@@ -2777,7 +2782,7 @@ describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-
     const rows: Array<[VoidResult, Partial<HeldVoid> | 'removed', Partial<HeldVoid> | 'removed']> = [
       [{ kind: 'voided', replayed: false }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
       [{ kind: 'voided', replayed: true }, { state: 'voided', body: '' }, { state: 'voided', body: '' }],
-      ...(['already-void', 'version-conflict', 'payments-recorded', 'tenant-conflict', 'not-found', 'key-reused', 'invalid'] as const)
+      ...(['already-void', 'version-conflict', 'payments-recorded', 'credit-notes-recorded', 'tenant-conflict', 'not-found', 'key-reused', 'invalid'] as const)
         .map((kind): [VoidResult, Partial<HeldVoid>, Partial<HeldVoid>] => [{ kind }, refusedAs(kind), refusedAs(kind)]),
       [{ kind: 'unknown', responded: true }, unresolved(VOID_NOTE_TEXT.answered), unresolved(VOID_NOTE_TEXT.answered)],
       [{ kind: 'unknown', responded: false }, unresolved(VOID_NOTE_TEXT.noAnswer), unresolved(VOID_NOTE_TEXT.noAnswer)],
@@ -2809,6 +2814,7 @@ describe('Issued invoices — the held void attempt, below any UI (M7B-INVOICES-
       [{ kind: 'already-void' }, refusedAs('already-void')],
       [{ kind: 'version-conflict' }, refusedAs('version-conflict')],
       [{ kind: 'payments-recorded' }, refusedAs('payments-recorded')], // M7B-PAYMENTS-P1: the key's sealed payments_recorded
+      [{ kind: 'credit-notes-recorded' }, refusedAs('credit-notes-recorded')], // M7B-CREDITNOTES-P1: the key's sealed credit_notes_recorded
     ];
     const unresolved: Array<[VoidResult, string]> = [
       [{ kind: 'step-up' }, VOID_NOTE_TEXT.stepUp],
@@ -3495,6 +3501,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     { name: 'a chain 404 (it may be the host\'s, R21)', answer: () => chain(404, 'not_found'), refusal: 'not-found' as const, reread: true },
     { name: 'a sealed 409 write_conflict (the version)', answer: () => sealed(409, 'write_conflict'), refusal: 'version-conflict' as const, reread: true },
     { name: 'a sealed 409 payments_recorded (M7B-PAYMENTS-P1)', answer: () => sealed(409, 'payments_recorded'), refusal: 'payments-recorded' as const, reread: false },
+    { name: 'a sealed 409 credit_notes_recorded (M7B-CREDITNOTES-P1, CN-27a)', answer: () => sealed(409, 'credit_notes_recorded'), refusal: 'credit-notes-recorded' as const, reread: false },
     { name: 'a chain 409 write_conflict (the tenant)', answer: () => chain(409, 'write_conflict'), refusal: 'tenant-conflict' as const, reread: false },
     { name: 'a 422 idempotency_key_reused', answer: () => chain(422, 'idempotency_key_reused'), refusal: 'key-reused' as const, reread: false },
     { name: 'a 400 invalid_request', answer: () => chain(400, 'invalid_request'), refusal: 'invalid' as const, reread: false },
@@ -3524,6 +3531,10 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
   });
   it('SII-152. doc 15 §12.6: the payments_recorded refusal SII-90 shows is exactly the contract\'s sentence', () => {
     expect(VOID_REFUSED_TEXT['payments-recorded']).toBe("This invoice has payments recorded, so it can't be voided. If a payment was recorded by mistake, reverse that payment first.");
+  });
+  it('SII-152b. doc 16 CN-27a: the credit_notes_recorded refusal SII-90 shows is one fixed sentence, in the payments_recorded sentence\'s style, with no control to withdraw or issue anything', () => {
+    expect(VOID_REFUSED_TEXT['credit-notes-recorded']).toBe("This invoice has credit notes, so it can't be voided. If a credit note was issued by mistake, withdraw it first.");
+    for (const text of Object.values(VOID_REFUSED_TEXT)) expect(text).not.toMatch(/\b(paid|unpaid|refunded)\b/i);
   });
 
   const UNKNOWN = [
@@ -5296,7 +5307,8 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
   const payPhase = () => screen.queryByTestId('issued-payments-state')?.getAttribute('data-phase') ?? 'none';
   const paymentsReady = () => waitFor(() => expect(payPhase()).toBe('ready'));
   const items = () => screen.queryAllByTestId('issued-payments-item');
-  const summary = () => ['issued-payments-status', 'issued-payments-due', 'issued-payments-recorded', 'issued-payments-remaining'].map((id) => tid(id).textContent);
+  // A voided invoice's read shows the word alone (CN-37): its four amount rows are absent, which is null here.
+  const summary = () => ['issued-payments-status', 'issued-payments-due', 'issued-payments-credited', 'issued-payments-recorded', 'issued-payments-remaining'].map((id) => screen.queryByTestId(id)?.textContent ?? null);
   const json200 = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   async function setup(over: (n: number) => Partial<Issued> = () => ({}), count = 3) {
     const server = seeded();
@@ -5316,17 +5328,17 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
   }
 
-  it('SII-153. each of the five words has its shop label, beside the note "Payments are recorded by staff; the product does not verify them." and the server\'s due, recorded and remaining amounts — in a "Payments" region after the invoice; never "Paid" or "Unpaid"', async () => {
+  it('SII-153. each of the five words a payment-only invoice shows has its shop label, beside the note "Payments are recorded by staff; the product does not verify them." and the server\'s total, credited, recorded and remaining amounts — in a "Payments" region after the invoice; never "Paid" or "Unpaid"', async () => {
     const { server, made } = await setup((n) => (n === 1 ? { lines: [line(1, 'Free check', 1, 0)], tax: { mode: 'none' } } : n === 5 ? { void: { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' } } : {}), 5);
     server.payments.set(made[2].id, [pay(1), pay(2, { amountCents: 500, reversal: reversed('wrong_amount') })]);
     server.payments.set(made[3].id, [pay(3, { amountCents: 2176, method: 'external_card_terminal' })]);
     server.payments.set(made[4].id, [pay(4, { amountCents: 2176, reversal: reversed('wrong_invoice') })]);
     const expected: Record<number, string[]> = {
-      1: ['Nothing due', '$0.00', '$0.00', '$0.00'],
-      2: ['No payment recorded', '$21.76', '$0.00', '$21.76'],
-      3: ['Payment recorded in part', '$21.76', '$1.00', '$20.76'],
-      4: ['Payment recorded in full', '$21.76', '$21.76', '$0.00'],
-      5: ['Voided', '$0.00', '$0.00', '$0.00'],
+      1: ['Nothing due', '$0.00', '$0.00', '$0.00', '$0.00'],
+      2: ['No payment recorded', '$21.76', '$0.00', '$0.00', '$21.76'],
+      3: ['Payment recorded in part', '$21.76', '$0.00', '$1.00', '$20.76'],
+      4: ['Payment recorded in full', '$21.76', '$0.00', '$21.76', '$0.00'],
+      5: ['Voided', null, null, null, null],
     };
     for (const n of [1, 2, 3, 4, 5]) {
       await open(n);
@@ -5337,14 +5349,56 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       expect(tid('issued-view').contains(section)).toBe(true);
       expect(tid('issued-view-note').compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy(); // after the invoice
       expect(tid('issued-payments-note')).toHaveTextContent(/^Payments are recorded by staff; the product does not verify them\.$/);
-      expect([...section.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Payment status', 'Amount due', 'Recorded', 'Remaining']);
+      // CN-31 / CN-37: "Invoice total" and "Credited", never "Amount due"; a voided invoice shows its word alone.
+      expect([...section.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(n === 5 ? ['Payment status'] : ['Payment status', 'Invoice total', 'Credited', 'Recorded', 'Remaining']);
+      expect(section.textContent).not.toMatch(/amount due/i);
       // A long amount wraps only when it cannot fit (320 px at 24 px text); never cut at the panel's edge.
-      for (const id of ['issued-payments-due', 'issued-payments-recorded', 'issued-payments-remaining']) expect(tid(id)).toHaveClass('[overflow-wrap:anywhere]');
+      if (n !== 5) for (const id of ['issued-payments-due', 'issued-payments-credited', 'issued-payments-recorded', 'issued-payments-remaining']) expect(tid(id)).toHaveClass('[overflow-wrap:anywhere]');
       expect(section.textContent).not.toMatch(/\b(un)?paid\b/i);
       expect(tid('issued-payments-state')).toHaveTextContent(n === 2 || n === 1 ? PAYMENTS_TEXT.empty : '');
       await close();
     }
     expect(server.writes()).toEqual([]);
+  });
+
+  it('SII-153b. CN-31: after a credit the summary says "Invoice total" and "Credited" with the server\'s remaining, never the Total as an amount due; the two new words have their labels; no text says Paid, Unpaid, Refunded or "Amount due"; and CN-P1 adds no credit control', async () => {
+    const { server, made } = await setup(() => ({}), 4);
+    server.credits.set(made[0].id, 500); // partly credited, nothing recorded: keeps its word, the amounts show the credit
+    server.credits.set(made[1].id, 2176); // credited in full
+    server.credits.set(made[2].id, 2076); // 20.76 credited and 1.00 recorded: settled by both
+    server.payments.set(made[2].id, [pay(1)]);
+    server.credits.set(made[3].id, 1000); // credited in part and a payment: payment recorded in part
+    server.payments.set(made[3].id, [pay(2, { amountCents: 200 })]);
+    const expected: Record<number, Array<string | null>> = {
+      1: ['No payment recorded', '$21.76', '$5.00', '$0.00', '$16.76'],
+      2: ['Credited in full', '$21.76', '$21.76', '$0.00', '$0.00'],
+      3: ['Settled by payment and credit', '$21.76', '$20.76', '$1.00', '$0.00'],
+      4: ['Payment recorded in part', '$21.76', '$10.00', '$2.00', '$9.76'],
+    };
+    for (const n of [1, 2, 3, 4]) {
+      await open(n);
+      await paymentsReady();
+      expect(summary(), `invoice ${n}`).toEqual(expected[n]);
+      const section = tid('issued-payments');
+      expect([...section.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Payment status', 'Invoice total', 'Credited', 'Recorded', 'Remaining']);
+      expect(section.textContent).not.toMatch(/amount due|\b(un)?paid\b|refund/i);
+      expect(within(section).queryAllByRole('button', { name: /credit|withdraw/i })).toEqual([]); // no issue, withdrawal or recovery control in CN-P1
+      await close();
+    }
+    expect(server.writes()).toEqual([]);
+  });
+
+  it('SII-153c. CN-37: a voided invoice shows "Payment status: Voided" and no amounts rows (no "Invoice total $0.00" under the snapshot Total); the snapshot Total stays as it was issued', async () => {
+    const { made } = await setup((n) => (n === 2 ? { void: { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' } } : {}), 2);
+    await open(2);
+    await paymentsReady();
+    const section = tid('issued-payments');
+    expect([...section.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Payment status']);
+    expect(tid('issued-payments-status')).toHaveTextContent('Voided');
+    for (const id of ['issued-payments-due', 'issued-payments-credited', 'issued-payments-recorded', 'issued-payments-remaining']) expect(screen.queryByTestId(id)).toBeNull();
+    expect(section.textContent).not.toMatch(/invoice total|credited|\$0\.00/i);
+    expect(tid('issued-view-total')).toHaveTextContent('Total $21.76'); // the snapshot Total, unchanged
+    expect(made[1].void).toBeDefined();
   });
 
   it('SII-154. the history is an ordered list, oldest first, one item per payment: the amount, "Cash" or "Card on a separate terminal", "Recorded at" its UTC time; a reversed one visibly "Reversed", with "Reversed at" and each of the six reasons\' labels', async () => {
@@ -5374,7 +5428,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     expect(screen.getAllByTestId('issued-payments-reversed-at')[0]).toHaveAttribute('datetime', '2026-10-18T10:00:00.000001Z');
     for (const amount of screen.getAllByTestId('issued-payments-amount')) expect(amount).toHaveClass('whitespace-nowrap');
     // The server's amounts: only the two standing payments are recorded.
-    expect(summary()).toEqual(['Payment recorded in part', '$21.76', '$1.75', '$20.01']);
+    expect(summary()).toEqual(['Payment recorded in part', '$21.76', '$0.00', '$1.75', '$20.01']);
     expect(screen.queryByTestId('issued-payments-load-more')).toBeNull();
     expect(tid('issued-payments').textContent).not.toMatch(/\b(un)?paid\b/i);
   });
@@ -5442,7 +5496,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     expect(screen.queryByTestId('issued-payments')).toBeNull();
     expect(server.sent.length).toBe(mark);
     cleanup();
-    const page = { invoice: { id: made[0].id, status: 'issued' as const }, amounts: { currency: 'USD' as const, dueCents: 2176, appliedCents: 0, remainingCents: 2176 }, paymentStatus: 'no_payment_recorded' as const, payments: [], nextCursor: null };
+    const page = { invoice: { id: made[0].id, status: 'issued' as const }, amounts: { currency: 'USD' as const, dueCents: 2176, creditedCents: 0, appliedCents: 0, remainingCents: 2176 }, paymentStatus: 'no_payment_recorded' as const, payments: [], nextCursor: null };
     const read = vi.fn<IssuedPaymentsCapability['read']>(async () => ({ kind: 'ok', page }));
     const payments: IssuedPaymentsCapability = { read };
     render(<StrictMode><IssuedInvoiceDialog {...base} payments={payments} /></StrictMode>);
@@ -5482,7 +5536,8 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     const cases: Array<[number | Response, string, string]> = [
       [404, 'not-found', PAYMENTS_TEXT.notFound],
       [503, 'unavailable', PAYMENTS_TEXT.unavailable],
-      [json200({ invoice: { id: made[1].id, status: 'issued' }, amounts: { currency: 'USD', dueCents: 2176, appliedCents: 0, remainingCents: 2176 }, paymentStatus: 'unpaid', payments: [], nextCursor: null }), 'unavailable', PAYMENTS_TEXT.unavailable],
+      [json200({ invoice: { id: made[1].id, status: 'issued' }, amounts: { currency: 'USD', dueCents: 2176, appliedCents: 0, remainingCents: 2176 }, paymentStatus: 'no_payment_recorded', payments: [], nextCursor: null }), 'unavailable', PAYMENTS_TEXT.unavailable], // CN-20: the old four-key amounts are refused, never shown
+      [json200({ invoice: { id: made[1].id, status: 'issued' }, amounts: { currency: 'USD', dueCents: 2176, creditedCents: 0, appliedCents: 0, remainingCents: 2176 }, paymentStatus: 'unpaid', payments: [], nextCursor: null }), 'unavailable', PAYMENTS_TEXT.unavailable],
       [400, 'unavailable', PAYMENTS_TEXT.unavailable],
     ];
     for (const [answer, phase, text] of cases) {
@@ -5496,7 +5551,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       await click('issued-payments-retry');
       await paymentsReady();
       expect(server.paymentReads()).toHaveLength(reads + 2);
-      expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$21.76']);
+      expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$0.00', '$21.76']);
       await close();
     }
     // Denied: the reads' ONE fresh check, then the alert.
@@ -5528,7 +5583,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     await paymentsReady();
     expect(items()).toHaveLength(50);
     // 50 × $1.00 on screen; the server says $120.00 recorded over the whole history — its numbers are shown, never a sum.
-    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$120.00', '$80.00']);
+    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$0.00', '$120.00', '$80.00']);
     const more = tid('issued-payments-load-more');
     expect(more).toHaveTextContent(PAYMENTS_TEXT.loadMore);
     server.hold.payments = 1;
@@ -5550,7 +5605,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     expect(screen.queryByTestId('issued-payments-load-more')).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Payments' }));
     expect(items().map((li) => li.getAttribute('data-id'))).toEqual(Array.from({ length: 120 }, (_, i) => uuid(0x9001 + i)));
-    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$120.00', '$80.00']);
+    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$0.00', '$120.00', '$80.00']);
     await settle();
     expect(server.paymentReads()).toHaveLength(3);
   });
@@ -5573,7 +5628,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     await waitFor(() => expect(payPhase()).toBe('changed'));
     expect(tid('issued-payments-state')).toHaveTextContent(/^The payments changed while loading\. Close and reopen this invoice to see them\.$/);
     expect(items()).toHaveLength(50);
-    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$60.00', '$140.00']); // the held answer's
+    expect(summary()).toEqual(['Payment recorded in part', '$200.00', '$0.00', '$60.00', '$140.00']); // the held answer's
     expect(screen.queryByTestId('issued-payments-load-more')).toBeNull();
     const reads = server.paymentReads().length;
     await settle();
@@ -5583,7 +5638,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     all.pop();
     await open(2);
     await paymentsReady();
-    const repeat = { invoice: { id: made[1].id, status: 'issued' }, amounts: { currency: 'USD', dueCents: 20_000, appliedCents: 6000, remainingCents: 14_000 }, paymentStatus: 'recorded_partly', payments: [pay(10)], nextCursor: null };
+    const repeat = { invoice: { id: made[1].id, status: 'issued' }, amounts: { currency: 'USD', dueCents: 20_000, creditedCents: 0, appliedCents: 6000, remainingCents: 14_000 }, paymentStatus: 'recorded_partly', payments: [pay(10)], nextCursor: null };
     server.paymentsStatus.push(json200(repeat));
     await click('issued-payments-load-more');
     await waitFor(() => expect(payPhase()).toBe('changed'));
@@ -5596,7 +5651,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       // never a page — refused as malformed; the rows and the cursor stay.
       ['word', pageAfter({ payments: [pay(51)], paymentStatus: 'recorded_in_full' }), 'unavailable'],
       // (ii) the invoice voided meanwhile: amounts 0, "voided", its payment reversed.
-      ['status', pageAfter({ invoice: { id: made[1].id, status: 'voided' }, amounts: { currency: 'USD', dueCents: 0, appliedCents: 0, remainingCents: 0 }, paymentStatus: 'voided', payments: [pay(51, { reversal: reversed('other') })] }), 'changed'],
+      ['status', pageAfter({ invoice: { id: made[1].id, status: 'voided' }, amounts: { currency: 'USD', dueCents: 0, creditedCents: 0, appliedCents: 0, remainingCents: 0 }, paymentStatus: 'voided', payments: [pay(51, { reversal: reversed('other') })] }), 'changed'],
       // (iii) an order break, no id again, the final total right (5000 + 1000 = 6000).
       ['order', pageAfter({ payments: [pay(0, { amountCents: 1000 })] }), 'changed'],
       // (iv) in order, no id again, but the final total across pages 5000 + 500 ≠ 6000.
@@ -5609,7 +5664,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       await click('issued-payments-load-more');
       await waitFor(() => expect(payPhase(), name).toBe(phase));
       expect(items(), name).toHaveLength(50);
-      expect(summary(), name).toEqual(['Payment recorded in part', '$200.00', '$60.00', '$140.00']);
+      expect(summary(), name).toEqual(['Payment recorded in part', '$200.00', '$0.00', '$60.00', '$140.00']);
       expect(screen.queryByTestId('issued-payments-load-more') !== null, name).toBe(phase === 'unavailable');
       await close();
     }
@@ -5634,7 +5689,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     await paymentsReady();
     server.held.shift()!.release();
     await settle();
-    expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$21.76']);
+    expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$0.00', '$21.76']);
     expect(items()).toHaveLength(0);
     await close();
     // A store change while it is out.
@@ -5721,7 +5776,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       expect(payPhase(), gone).toBe('ready');
       expect(tid('issued-payments-state').textContent, gone).toBe('');
       expect(items(), gone).toHaveLength(50);
-      expect(summary(), gone).toEqual(['Payment recorded in part', '$200.00', '$60.00', '$140.00']);
+      expect(summary(), gone).toEqual(['Payment recorded in part', '$200.00', '$0.00', '$60.00', '$140.00']);
       expect(tid('issued-payments-load-more'), gone).toHaveAttribute('aria-disabled', 'false');
       cleanup();
     }
@@ -5779,14 +5834,14 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     const { server, made } = await setup();
     await open(2);
     await paymentsReady();
-    expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$21.76']);
+    expect(summary()).toEqual(['No payment recorded', '$21.76', '$0.00', '$0.00', '$21.76']);
     await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
     await click('issued-view-void');
     await waitFor(() => expect(screen.queryByTestId('issued-void-confirm')).not.toBeNull());
     await user().click(tid('issued-void-reason-wrong_customer'));
     await click('issued-void-send');
     await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent('Voided'));
-    await waitFor(() => expect(summary()).toEqual(['Voided', '$0.00', '$0.00', '$0.00']));
+    await waitFor(() => expect(summary()).toEqual(['Voided', null, null, null, null]));
     await settle();
     expect(server.paymentReads()).toEqual([paymentsUrl(made[1].id), paymentsUrl(made[1].id)]);
   });
@@ -5802,7 +5857,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
     await user().click(tid('issued-void-reason-wrong_customer'));
     await click('issued-void-send');
     await waitFor(() => expect(tid('issued-view-status')).toHaveTextContent('Voided'));
-    await waitFor(() => expect(summary()).toEqual(['Voided', '$0.00', '$0.00', '$0.00']));
+    await waitFor(() => expect(summary()).toEqual(['Voided', null, null, null, null]));
     await settle();
     expect(server.paymentReads()).toEqual([paymentsUrl(made[1].id), paymentsUrl(made[1].id)]);
     expect(server.voidPosts()).toHaveLength(1);

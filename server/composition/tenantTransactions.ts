@@ -137,6 +137,14 @@
 // paymentProofKey, probePaymentProofKey, asked by tenantEntry.ts), so a key lost later fails register, proof and record closed while the attempts
 // read and the settlement stay available.
 //
+// M7B-CREDITNOTES-P1 UPDATE (doc 16, migration 038). Four more commands in `writes`, last, in this order: the credit-note
+// registration, POST …/invoices/{id}/credit-note-registrations; the issue, POST …/invoices/{id}/credit-notes; the settlement,
+// POST …/invoices/{id}/credit-note-settlement; and the withdrawal, POST …/invoices/{id}/credit-notes/{creditNoteId}/withdrawal —
+// each over its routine-audited store-scope mutator (postgresInvoiceCreditNotes.ts). Three more reads, last: the registration
+// proof, the caller's credit-note attempts and the credit-note list, over one new port, `invoiceCreditNotes`
+// (createPostgresInvoiceCreditNotes). The payments read and the record now call 038's v2 read and v3 record, the void 038's
+// void v3. Readiness is unchanged, and the proof key is 037's, asked at startup only (tenantEntry.ts): no new key.
+//
 // Its readiness is the adapters' own probes (probeCustomerDirectory, probeCustomerDetail, probeCustomerProfile, probeCustomerSearch, probeStoreDirectory, probeInvoiceDrafts, probeInvoiceIssuing, then probeInvoicePayments), answered over the same kernel. The routes are
 // declared over a port that answers nothing before any client exists, so the permission census and the table check run
 // with nothing to close.
@@ -190,6 +198,15 @@ import {
   createInvoicePaymentReversalEligibilityRoute, createInvoicePaymentsRoute,
 } from '../runtime/invoicePayments.js';
 import type { InvoicePaymentRegistrationsPorts, InvoicePaymentsPorts } from '../runtime/invoicePayments.js';
+import {
+  INVOICE_CREDIT_NOTE_ISSUE_ROUTE, INVOICE_CREDIT_NOTE_REGISTER_ROUTE, INVOICE_CREDIT_NOTE_SETTLE_ROUTE, INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE,
+  createInvoiceCreditNoteAttemptsRoute, createInvoiceCreditNoteProofRoute, createInvoiceCreditNotesRoute,
+} from '../runtime/invoiceCreditNotes.js';
+import type { InvoiceCreditNotesPorts } from '../runtime/invoiceCreditNotes.js';
+import {
+  INVOICE_CREDIT_NOTE_ISSUE_MUTATOR, INVOICE_CREDIT_NOTE_REGISTER_MUTATOR, INVOICE_CREDIT_NOTE_SETTLE_MUTATOR, INVOICE_CREDIT_NOTE_WITHDRAW_MUTATOR,
+  createPostgresInvoiceCreditNotes,
+} from '../persistence/postgresInvoiceCreditNotes.js';
 import { ISSUING_SETTINGS_UPDATE_ROUTE, createIssuingSettingsReadRoute } from '../runtime/issuingSettings.js';
 import type { IssuingSettingsPorts } from '../runtime/issuingSettings.js';
 import type { RouteDefinition } from '../runtime/routes.js';
@@ -203,7 +220,8 @@ import type { ReadInventory, ReadTransactions } from './transactionKernel.js';
  * and the payments read's (M7B-PAYMENTS-P1).
  */
 type TenantReadPorts = CustomerDirectoryPorts & CustomerDetailPorts & CustomerProfilePorts & RoleLevelDirectoryPorts & InvoiceRoleLevelDirectoryPorts
-  & StoreDirectoryPorts & InvoiceDraftPorts & IssuingSettingsPorts & InvoiceIssuePorts & InvoicePaymentsPorts & InvoicePaymentRegistrationsPorts;
+  & StoreDirectoryPorts & InvoiceDraftPorts & IssuingSettingsPorts & InvoiceIssuePorts & InvoicePaymentsPorts & InvoicePaymentRegistrationsPorts
+  & InvoiceCreditNotesPorts;
 
 const notComposed = (): never => { throw new Error('read port not composed'); };
 /** A port that answers nothing: the routes' declarations are built over it, before any client exists. */
@@ -219,6 +237,7 @@ const INERT: TenantReadPorts = Object.freeze({
   invoiceIssuing: Object.freeze({ preview: notComposed, page: notComposed, invoice: notComposed }),
   invoicePayments: Object.freeze({ payments: notComposed }),
   invoicePaymentRegistrations: Object.freeze({ proof: notComposed, attempts: notComposed }),
+  invoiceCreditNotes: Object.freeze({ proof: notComposed, attempts: notComposed, list: notComposed }),
 });
 
 /** A role's catalog default on `domain`: the tenant authorizer's own materializer, with no edit, unlimited. */
@@ -267,9 +286,9 @@ const probeTenantReads = async (client: SupervisedPgClient, signal: AbortSignal)
 // eligibility routes and the preview too — and the evaluator denies it create, edit, discard, issue, void, record and reverse,
 // the same 403.
 export const TENANT_INVENTORY: ReadInventory<TenantReadPorts> = Object.freeze({
-  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftDiscardEligibilityRoute, createIssuingSettingsReadRoute, createInvoiceIssueEligibilityRoute, createInvoiceIssuePreviewRoute, createIssuedInvoiceListRoute, createIssuedInvoiceDetailRoute, createInvoiceVoidEligibilityRoute, createInvoicePaymentEligibilityRoute, createInvoicePaymentReversalEligibilityRoute, createInvoicePaymentsRoute, createInvoicePaymentRegistrationProofRoute, createInvoicePaymentAttemptsRoute]),
-  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE, INVOICE_DRAFT_DISCARD_ROUTE, ISSUING_SETTINGS_UPDATE_ROUTE, INVOICE_ISSUE_ROUTE, INVOICE_VOID_ROUTE, INVOICE_PAYMENT_RECORD_ROUTE, INVOICE_PAYMENT_REVERSE_ROUTE, INVOICE_PAYMENT_REGISTER_ROUTE, INVOICE_PAYMENT_SETTLE_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR, INVOICE_DRAFT_DISCARD_MUTATOR, ISSUING_SETTINGS_UPDATE_MUTATOR, INVOICE_ISSUE_MUTATOR, INVOICE_VOID_MUTATOR, INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR, INVOICE_PAYMENT_REGISTER_MUTATOR, INVOICE_PAYMENT_SETTLE_MUTATOR]) }),
-  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }), invoiceDrafts: createPostgresInvoiceDrafts({ client }), issuingSettings: createPostgresIssuingSettings({ client }), invoiceIssuing: createPostgresInvoiceIssuing({ client }), invoicePayments: createPostgresInvoicePayments({ client }), invoicePaymentRegistrations: createPostgresInvoicePaymentRegistrations({ client }) }),
+  reads: Object.freeze([createCustomerDirectoryRoute, createCustomerDetailRoute, createCustomerProfileRoute, createRoleLevelDirectoryRoute, createInvoiceRoleLevelDirectoryRoute, createStoreDirectoryRoute, createInvoiceDraftListRoute, createInvoiceDraftDetailRoute, createInvoiceDraftEligibilityRoute, createInvoiceDraftEditEligibilityRoute, createInvoiceDraftDiscardEligibilityRoute, createIssuingSettingsReadRoute, createInvoiceIssueEligibilityRoute, createInvoiceIssuePreviewRoute, createIssuedInvoiceListRoute, createIssuedInvoiceDetailRoute, createInvoiceVoidEligibilityRoute, createInvoicePaymentEligibilityRoute, createInvoicePaymentReversalEligibilityRoute, createInvoicePaymentsRoute, createInvoicePaymentRegistrationProofRoute, createInvoicePaymentAttemptsRoute, createInvoiceCreditNoteProofRoute, createInvoiceCreditNoteAttemptsRoute, createInvoiceCreditNotesRoute]),
+  writes: Object.freeze({ routes: Object.freeze([CUSTOMER_CREATE_ROUTE, CUSTOMER_UPDATE_ROUTE, ROLE_LEVEL_UPDATE_ROUTE, INVOICE_DRAFT_CREATE_ROUTE, INVOICE_DRAFT_UPDATE_ROUTE, INVOICE_DRAFT_DISCARD_ROUTE, ISSUING_SETTINGS_UPDATE_ROUTE, INVOICE_ISSUE_ROUTE, INVOICE_VOID_ROUTE, INVOICE_PAYMENT_RECORD_ROUTE, INVOICE_PAYMENT_REVERSE_ROUTE, INVOICE_PAYMENT_REGISTER_ROUTE, INVOICE_PAYMENT_SETTLE_ROUTE, INVOICE_CREDIT_NOTE_REGISTER_ROUTE, INVOICE_CREDIT_NOTE_ISSUE_ROUTE, INVOICE_CREDIT_NOTE_SETTLE_ROUTE, INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE]), mutators: Object.freeze([CUSTOMER_CREATE_MUTATOR, CUSTOMER_UPDATE_MUTATOR, ROLE_LEVEL_UPDATE_MUTATOR, INVOICE_DRAFT_CREATE_MUTATOR, INVOICE_DRAFT_UPDATE_MUTATOR, INVOICE_DRAFT_DISCARD_MUTATOR, ISSUING_SETTINGS_UPDATE_MUTATOR, INVOICE_ISSUE_MUTATOR, INVOICE_VOID_MUTATOR, INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR, INVOICE_PAYMENT_REGISTER_MUTATOR, INVOICE_PAYMENT_SETTLE_MUTATOR, INVOICE_CREDIT_NOTE_REGISTER_MUTATOR, INVOICE_CREDIT_NOTE_ISSUE_MUTATOR, INVOICE_CREDIT_NOTE_SETTLE_MUTATOR, INVOICE_CREDIT_NOTE_WITHDRAW_MUTATOR]) }),
+  ports: (client: SupervisedPgClient) => Object.freeze({ customers: createPostgresCustomerDirectory({ client }), customerDetail: createPostgresCustomerDetail({ client }), customerProfile: createPostgresCustomerProfile({ client }), roleLevels: withCatalogDefaults('customers', createPostgresRoleLevelDirectory({ client }, 'customers')), invoiceRoleLevels: withCatalogDefaults('invoices', createPostgresRoleLevelDirectory({ client }, 'invoices')), stores: createPostgresStoreDirectory({ client }), invoiceDrafts: createPostgresInvoiceDrafts({ client }), issuingSettings: createPostgresIssuingSettings({ client }), invoiceIssuing: createPostgresInvoiceIssuing({ client }), invoicePayments: createPostgresInvoicePayments({ client }), invoicePaymentRegistrations: createPostgresInvoicePaymentRegistrations({ client }), invoiceCreditNotes: createPostgresInvoiceCreditNotes({ client }) }),
   inert: INERT,
   probe: probeTenantReads,
   roleLevels: Object.freeze({ read: (client: SupervisedPgClient) => createPostgresRoleLevels({ client }), held: readRoleLevels }),

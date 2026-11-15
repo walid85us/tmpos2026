@@ -38,6 +38,10 @@
 // 'invalid_state' and before 'conflict', passed through as the sealed 409 its completion alone commits (the mutator declares
 // `paymentRefusals: 'void'`). 036 revokes tmpos_app's EXECUTE on 035's m7b_invoice_void, so the older entry point is gone.
 //
+// M7B-CREDITNOTES-P1 (migration 038, doc 16 CN-A3): the call is 038's tmpos_invoice_payment.m7b_invoice_void_v3 — void v2
+// argument for argument and word for word, plus 'credit_notes_recorded' (an active credit note on the invoice), checked after
+// 'payments_recorded', passed through as the sealed 409 its completion alone commits. 038 revokes tmpos_app's EXECUTE on v2.
+//
 // No driver error message, row value, key or body is ever logged. IT CONSTRUCTS NOTHING AND READS NOTHING at import.
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
 import { INVOICE_VOID_CONTRACT, isInvoiceVoidReasonCode } from '../runtime/invoiceVoid.js';
@@ -58,7 +62,7 @@ const MAX = Number.MAX_SAFE_INTEGER;
 
 const VOID_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_actor_id', 'o_membership_id', 'o_version', 'o_invoice_id'];
 /** The routine's refusals, each with every other column null; 'tenant_mismatch' is the store's 'precondition_failed'. */
-const VOID_REFUSALS: ReadonlySet<string> = new Set(['not_found', 'invalid_state', 'payments_recorded', 'conflict', 'refused']);
+const VOID_REFUSALS: ReadonlySet<string> = new Set(['not_found', 'invalid_state', 'payments_recorded', 'credit_notes_recorded', 'conflict', 'refused']);
 
 async function applyInvoiceVoid(sql: PgStatement, mutation: TransactionMutation, authority?: MutationAuthority): Promise<unknown> {
   const context = authority?.context ?? null;
@@ -72,7 +76,7 @@ async function applyInvoiceVoid(sql: PgStatement, mutation: TransactionMutation,
     || !isInt(authNotAfter, 1, MAX)) return 'unavailable';
   if (!isUuid(aggregateId) || !isUuid(expectedTenant) || !isInvoiceVoidReasonCode(reasonCode) || !isInt(expectedVersion, 1, MAX - 1)) return 'unavailable';
   const rows = await sql`select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version, o_invoice_id
-    from tmpos_invoice_payment.m7b_invoice_void_v2(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid, ${expectedTenant}::uuid,
+    from tmpos_invoice_payment.m7b_invoice_void_v3(${sessionKey}::text, ${context.store}::uuid, ${aggregateId}::uuid, ${expectedTenant}::uuid,
       ${String(expectedVersion)}::bigint, ${reasonCode}::text)`;
   if (rows.length !== 1 || !hasColumns(rows[0], VOID_COLUMNS)) return 'mismatch';
   const {

@@ -108,9 +108,13 @@ const UP_036 = readFileSync(`${MIG_DIR}/036_m7b_invoice_payment.up.sql`, 'utf8')
 /** M7B-PAYMENTS-P2: 037 (payment registration, in 036's schema) sits above 036: it rolls back before it and is re-applied after it. */
 const DOWN_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.down.sql`, 'utf8');
 const UP_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.up.sql`, 'utf8');
+/** M7B-CREDITNOTES-P1: 038 (credit notes, in its own schema) sits above 037: it rolls back before it and is re-applied after it. */
+const DOWN_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.down.sql`, 'utf8');
+const UP_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.up.sql`, 'utf8');
 const has037 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`)[0].present;
-const down036 = async (sql) => { if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
-const up036 = async (sql) => { await sql.unsafe(UP_036).simple(); if (!(await has037(sql))) await sql.unsafe(UP_037).simple(); };
+const has038 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_credit_note.invoice_credit_note') is not null as present`)[0].present;
+const down036 = async (sql) => { if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
+const up036 = async (sql) => { await sql.unsafe(UP_036).simple(); if (!(await has037(sql))) await sql.unsafe(UP_037).simple(); if (!(await has038(sql))) await sql.unsafe(UP_038).simple(); };
 const DOWN_023 = readFileSync(`${MIG_DIR}/023_m7a_customer_contact.down.sql`, 'utf8');
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_024 = UP_024.slice(UP_024.lastIndexOf('do $$'));
@@ -552,9 +556,9 @@ const applyReport = await trustedApply();
 test('M7CE-01: 024 applied by the trusted executor over a populated 001-023, its checksum its up bytes; its postcondition holds and refuses the widenings it names; a second apply is refused', async () => {
   assert.equal(applyThrough023.outcome, 'complete', JSON.stringify(applyThrough023).slice(0, 400));
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
-  assert.deepEqual(applyReport.applied, ['024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037'], `024 (and 025, 026, 027, 028, 029, 030, 031, 032, 033 and 034 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
+  assert.deepEqual(applyReport.applied, ['024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038'], `024 (and 025, 026, 027, 028, 029, 030, 031, 032, 033 and 034 above it, M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1) applied over the populated 001-023 chain (rolled back at setup: ${JSON.stringify(rolledBackAtSetup)})`);
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 37 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 38 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.equal(ledger[23].checksum, createHash('sha256').update(readFileSync(`${MIG_DIR}/024_m7a_customer_edit.up.sql`)).digest('hex'));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'the ledger records the pinned chain');
   // M7B-INVOICES-P1: 028 adds its composite-key UNIQUE (customer_tenant_customer_key) to the customer table, which 024's exact
@@ -631,7 +635,8 @@ test('M7CE-02: the upgrade over populated rows sets every row_version to 1 and r
   // M7B-INVOICES-ISSUE-P1: the head also carries 034's two audit subject columns; they are 034's, named here, and nothing else is allowed beyond 028's one.
   // M7B-PAYMENTS-P1: and 036's one (subject_invoice_payment_id), named here likewise.
   // M7B-PAYMENTS-P2: and 037's one (subject_invoice_payment_registration_id), named here likewise.
-  assert.deepEqual(with028.auditColumns.filter((c) => !['subject_invoice_draft_id', 'subject_issued_invoice_id', 'subject_store_id', 'subject_invoice_payment_id', 'subject_invoice_payment_registration_id'].includes(c.name)), now.auditColumns, '028 adds one audit column (and 034 two, 036 one, 037 one)');
+  // M7B-CREDITNOTES-P1: and 038's two (subject_invoice_credit_note_id, subject_invoice_credit_note_registration_id), named here likewise.
+  assert.deepEqual(with028.auditColumns.filter((c) => !['subject_invoice_draft_id', 'subject_issued_invoice_id', 'subject_store_id', 'subject_invoice_payment_id', 'subject_invoice_payment_registration_id', 'subject_invoice_credit_note_id', 'subject_invoice_credit_note_registration_id'].includes(c.name)), now.auditColumns, '028 adds one audit column (and 034 two, 036 one, 037 one, 038 two)');
   assert.deepEqual(now.columns, [...SURFACE_023.columns,
     { name: 'row_version', type: 'bigint', not_null: true, has_default: true, acl: null }]);
   const [{ dflt }] = await owner`select pg_catalog.pg_get_expr(d.adbin, d.adrelid) as dflt from pg_catalog.pg_attrdef d
@@ -1349,7 +1354,7 @@ test('M7CE-11: 024\'s down refuses while a customer is edited or an audit record
     'customers with contacts, creation times and unknown creation times remain');
   const { rolledBack: down, restore } = await rollBackAbove(owner, MIG_DIR, '023');
   try {
-    assert.deepEqual(down, ['037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024'], 'newest first: 034 above 033 above 032 above 031 above 030 above 029 above 028 above 027 above 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1)');
+    assert.deepEqual(down, ['038', '037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024'], 'newest first: 034 above 033 above 032 above 031 above 030 above 029 above 028 above 027 above 026 above 025 above 024 (M7A-CUSTOMERS-P8, M5-INVOICES-AUTH-P1, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1)');
     assert.deepEqual(await keptRows(), kept, 'the rollback dropped no name, contact or creation time');
     assert.deepEqual(await surface(owner), SURFACE_023, 'exactly 001-023');
   } finally {

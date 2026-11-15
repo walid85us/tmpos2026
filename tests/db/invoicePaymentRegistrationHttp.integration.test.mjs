@@ -280,7 +280,7 @@ async function teardown() {
         (select count(*) from public.audit_event where tenant_id = any(${TENANTS}::uuid[]))::int as audits,
         (select max(version) from public.schema_migrations) as latest,
         pg_catalog.current_setting('wal_writer_delay') as wal_writer_delay`;
-      assert.deepEqual({ ...state }, { registrations: 0, payments: 0, keys: 0, payment_audits: 0, audits: 0, latest: '037', wal_writer_delay: '200ms' },
+      assert.deepEqual({ ...state }, { registrations: 0, payments: 0, keys: 0, payment_audits: 0, audits: 0, latest: '038', wal_writer_delay: '200ms' },
         'no registration, payment, proof key or payment audit record anywhere, nothing of this suite left, the WAL writer reset');
     });
   } finally {
@@ -337,7 +337,7 @@ await setupStep(async () => {
     await handle.dispose();
   }
   const [{ latest }] = await owner`select max(version) as latest from public.schema_migrations`;
-  assert.equal(latest, '037', 'migrations through 037 are applied');
+  assert.equal(latest, '038', 'migrations through 038 are applied');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -677,8 +677,9 @@ async function registeredWithProof(ctx, s, w, invoice, label, attempt = randomUU
 // IRH-00: the shipping table
 // ===========================================================================
 
-test('IRH-00: the tenant entry ships exactly 40 routes — the record (v2) and the four PRQ-1 routes with their body and idempotency', () => {
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 40);
+// M7B-CREDITNOTES-P1: the table is forty-seven routes (seven credit-note routes added); this case still pins the payment routes it names.
+test('IRH-00: the tenant entry ships exactly 47 routes — the record (now v3, 038) and the four PRQ-1 routes with their body and idempotency', () => {
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 47);
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path} ${r.body} ${r.idempotency}`);
   for (const want of [
     'POST /api/v1/stores/{storeId}/invoices/{id}/payments json required',

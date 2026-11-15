@@ -115,12 +115,14 @@ const isVoidReasonCode = (value: unknown): value is InvoiceVoidReasonCode => typ
  */
 const VOID_TARGET_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const isVoidTarget = (value: unknown): value is string => typeof value === 'string' && VOID_TARGET_RE.test(value);
-/** The payments read's five status words and their shop labels (doc 15 §3 D-PAY-1): each says "recorded", never "paid". */
+/** The payments read's seven status words and their shop labels (doc 15 D-PAY-1, doc 16 D-CN-2): none says "Paid", "Unpaid" or "Refunded". */
 export const INVOICE_PAYMENT_STATUSES = Object.freeze({
   nothing_due: 'Nothing due',
   no_payment_recorded: 'No payment recorded',
   recorded_partly: 'Payment recorded in part',
   recorded_in_full: 'Payment recorded in full',
+  credited_in_full: 'Credited in full',
+  settled_by_payment_and_credit: 'Settled by payment and credit',
   voided: 'Voided',
 } as const);
 export type InvoicePaymentStatus = keyof typeof INVOICE_PAYMENT_STATUSES;
@@ -226,7 +228,8 @@ export interface InvoicePayment {
  */
 export interface PaymentsPage {
   readonly invoice: { readonly id: string; readonly status: IssuedStatus };
-  readonly amounts: { readonly currency: 'USD'; readonly dueCents: number; readonly appliedCents: number; readonly remainingCents: number };
+  /** `dueCents` is the invoice Total (M7B-CREDITNOTES-P1: shown as "Invoice total"); remaining = due - credited - applied. */
+  readonly amounts: { readonly currency: 'USD'; readonly dueCents: number; readonly creditedCents: number; readonly appliedCents: number; readonly remainingCents: number };
   readonly paymentStatus: InvoicePaymentStatus;
   readonly payments: readonly InvoicePayment[];
   readonly nextCursor: string | null;
@@ -262,14 +265,15 @@ export type PaymentsResult = { readonly kind: 'ok'; readonly page: PaymentsPage 
 /**
  * One void answer (M7B-INVOICES-VOID-P2). `voided`: the exact 200 for the invoice asked — it says nothing of when or why
  * (a read does). Sealed: `already-void` (invalid_state), `version-conflict` (write_conflict), `payments-recorded`
- * (payments_recorded, M7B-PAYMENTS-P1: the invoice has a standing payment). The chain's: `tenant-conflict`
+ * (payments_recorded, M7B-PAYMENTS-P1: the invoice has a standing payment), `credit-notes-recorded` (credit_notes_recorded,
+ * M7B-CREDITNOTES-P1: the invoice has an active credit note). The chain's: `tenant-conflict`
  * (409 write_conflict), `in-progress`, `key-reused` (422), `not-found`, `step-up` (403 step_up_required), `denied` (any other
  * 403), `signed-out`, `invalid` (400/413/415) and the 429. `not-sent`: refused here, nothing sent. Anything else `unknown`.
  */
 export type VoidResult =
   | { readonly kind: 'voided'; readonly replayed: boolean }
   | {
-    readonly kind: 'already-void' | 'version-conflict' | 'payments-recorded' | 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'step-up' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
+    readonly kind: 'already-void' | 'version-conflict' | 'payments-recorded' | 'credit-notes-recorded' | 'tenant-conflict' | 'in-progress' | 'key-reused' | 'not-found' | 'step-up' | 'denied' | 'signed-out' | 'invalid' | 'not-sent';
   }
   | RateLimited
   | { readonly kind: 'unknown'; readonly responded: boolean };
@@ -710,13 +714,20 @@ function paymentOf(value: unknown): InvoicePayment | null {
   return Object.freeze({ id, attemptId, amountCents, method, recordedAt, reversal: Object.freeze({ reversedAt: reversal.reversedAt, reasonCode: reversal.reasonCode }) });
 }
 
-/** The word the invoice's status, due and applied amounts derive (server statusWordOf, restated). */
-const paymentStatusOf = (status: IssuedStatus, due: number, applied: number): InvoicePaymentStatus =>
-  status === 'voided' ? 'voided' : due === 0 ? 'nothing_due' : applied === 0 ? 'no_payment_recorded' : applied === due ? 'recorded_in_full' : 'recorded_partly';
+/**
+ * The word the invoice's status and amounts derive (server statusWordOf, restated; doc 16 D-CN-2): voided, nothing_due, then
+ * by remaining and by which of credited and applied is above 0. A partly credited invoice with no payment keeps
+ * no_payment_recorded; the amounts show the credit.
+ */
+const paymentStatusOf = (status: IssuedStatus, due: number, credited: number, applied: number, remaining: number): InvoicePaymentStatus =>
+  status === 'voided' ? 'voided'
+    : due === 0 ? 'nothing_due'
+      : remaining === 0 ? (credited === 0 ? 'recorded_in_full' : applied === 0 ? 'credited_in_full' : 'settled_by_payment_and_credit')
+        : applied === 0 ? 'no_payment_recorded' : 'recorded_partly';
 
 /**
  * `{ invoice, amounts, paymentStatus, payments, nextCursor }` exactly, for the invoice asked (server invoicePaymentsOf,
- * restated): due, applied and remaining their own arithmetic (all 0 when voided), the word the one they derive; at most 50
+ * restated): due, credited, applied and remaining their own arithmetic (all 0 when voided), the word the one they derive; at most 50
  * payments, ids distinct and never `after`, strictly ascending by (recordedAt, id); the page's unreversed sum within
  * applied (none on a voided invoice) and equal to it when the page is the whole history; a cursor only behind a full page,
  * naming its last payment. Otherwise null.
@@ -726,11 +737,13 @@ function paymentsPageOf(body: unknown, invoiceId: string, after: string | null):
   const { invoice, amounts, paymentStatus, payments, nextCursor } = body;
   if (!isPlain(invoice) || !hasKeys(invoice, ['id', 'status']) || invoice.id !== invoiceId || (invoice.status !== 'issued' && invoice.status !== 'voided')) return null;
   const status: IssuedStatus = invoice.status === 'voided' ? 'voided' : 'issued';
-  if (!isPlain(amounts) || !hasKeys(amounts, ['currency', 'dueCents', 'appliedCents', 'remainingCents']) || amounts.currency !== 'USD') return null;
-  const { dueCents, appliedCents, remainingCents } = amounts;
-  if (!isCents(dueCents) || !isCents(appliedCents) || !isCents(remainingCents) || appliedCents > dueCents || remainingCents !== dueCents - appliedCents) return null;
-  if (status === 'voided' && dueCents !== 0) return null; // and so applied and remaining
-  const word = paymentStatusOf(status, dueCents, appliedCents);
+  if (!isPlain(amounts) || !hasKeys(amounts, ['currency', 'dueCents', 'creditedCents', 'appliedCents', 'remainingCents']) || amounts.currency !== 'USD') return null;
+  const { dueCents, creditedCents, appliedCents, remainingCents } = amounts;
+  if (!isCents(dueCents) || !isCents(creditedCents) || !isCents(appliedCents) || !isCents(remainingCents)) return null;
+  // credited + applied <= due (both are safe integers, so the sum is exact only below 2^53: compare in BigInt) and remaining their difference.
+  if (BigInt(creditedCents) + BigInt(appliedCents) > BigInt(dueCents) || BigInt(remainingCents) !== BigInt(dueCents) - BigInt(creditedCents) - BigInt(appliedCents)) return null;
+  if (status === 'voided' && (dueCents !== 0 || creditedCents !== 0)) return null; // and so applied and remaining
+  const word = paymentStatusOf(status, dueCents, creditedCents, appliedCents, remainingCents);
   if (paymentStatus !== word) return null;
   if (!Array.isArray(payments) || payments.length > PAYMENTS_PAGE_SIZE) return null;
   const rows: InvoicePayment[] = [];
@@ -749,7 +762,7 @@ function paymentsPageOf(body: unknown, invoiceId: string, after: string | null):
   if (active > BigInt(appliedCents) || (status === 'voided' && active !== 0n) || (after === null && nextCursor === null && active !== BigInt(appliedCents))) return null;
   return Object.freeze({
     invoice: Object.freeze({ id: invoiceId, status }),
-    amounts: Object.freeze({ currency: 'USD', dueCents, appliedCents, remainingCents }),
+    amounts: Object.freeze({ currency: 'USD', dueCents, creditedCents, appliedCents, remainingCents }),
     paymentStatus: word, payments: Object.freeze(rows), nextCursor: nextCursor === null ? null : next,
   });
 }
@@ -1193,6 +1206,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     if (status === 409 && sealed('invalid_state')) return Object.freeze({ kind: 'already-void' });
     if (status === 409 && sealed('write_conflict')) return Object.freeze({ kind: 'version-conflict' });
     if (status === 409 && sealed('payments_recorded')) return Object.freeze({ kind: 'payments-recorded' }); // M7B-PAYMENTS-P1
+    if (status === 409 && sealed('credit_notes_recorded')) return Object.freeze({ kind: 'credit-notes-recorded' }); // M7B-CREDITNOTES-P1
     if (status === 409 && chain('write_conflict')) return Object.freeze({ kind: 'tenant-conflict' });
     if (status === 409 && chain('request_in_progress')) return Object.freeze({ kind: 'in-progress' });
     if (status === 422 && chain('idempotency_key_reused')) return Object.freeze({ kind: 'key-reused' });

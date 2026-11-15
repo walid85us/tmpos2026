@@ -678,6 +678,15 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     // the harness's DURABLE disposable cluster through the SAME trusted executor and assertDisposableTestDsn, then drives the
     // composed tenant entry. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
     'tests/db/invoicePaymentRegistrationHttp.integration.test.mjs',
+    // M7B-CREDITNOTES-P1: the four credit-note suites (migration 038) each stand up the directory's migrations on the
+    // harness's disposable cluster through the SAME trusted executor and assertDisposableTestDsn — the migration smoke
+    // (apply, checksum, rollback, re-apply), the routine suite (the credit-note routines over the real catalog), the cutover
+    // suite (038's replacement routines and revoked grants) and the HTTP suite (the composed tenant entry). Same category
+    // (tests/db/ suites), same reasoning as the payment suites above; the containment property is untouched.
+    'tests/db/invoiceCreditNoteMigrationSmoke.integration.test.mjs',
+    'tests/db/invoiceCreditNoteRoutine.integration.test.mjs',
+    'tests/db/invoiceCreditNoteCutover.integration.test.mjs',
+    'tests/db/invoiceCreditNoteHttp.integration.test.mjs',
     // M7B-PAYMENTS-P2 PRQ-1: the payment proof durability suite stands up every migration in the directory (037 included) on
     // the two DURABLE disposable clusters it starts itself, then crash-restarts them, through the SAME trusted executor and
     // assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.

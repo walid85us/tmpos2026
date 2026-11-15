@@ -60,7 +60,7 @@ test('IVP-01 the void mutator: store scope, update of the issued invoice, the vo
   assert.equal(await INVOICE_VOID_MUTATOR.apply(r.sql, voidMutation(), authority()), 'applied', 'the bare word: the audit names the invoice alone');
   assert.equal(r.texts.length, 2, 'the routine, then the clock');
   assert.equal(squash(r.texts[0]), 'select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_version, o_invoice_id '
-    + 'from tmpos_invoice_payment.m7b_invoice_void_v2(?::text, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text)', 'the exact statement (M7B-PAYMENTS-P1: 036\'s v2)');
+    + 'from tmpos_invoice_payment.m7b_invoice_void_v3(?::text, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text)', 'the exact statement (M7B-CREDITNOTES-P1: 038\'s v3)');
   assert.deepEqual(r.values[0], [KEY, STORE, INVOICE, TENANT, '1', 'issued_in_error']);
   assert.equal(squash(r.texts[1]), 'select (pg_catalog.clock_timestamp() <= pg_catalog.to_timestamp(?::bigint / 1000.0)) as fresh', 'the deadline, after the routine');
   assert.deepEqual(r.values[1], [String(DEADLINE)]);
@@ -85,7 +85,9 @@ test('IVP-02 a sign-in that went stale while the routine waited refuses the void
   }
   // M7B-PAYMENTS-P1: payments_recorded (an unreversed payment) is passed through as the sealed word, never asking the clock.
   for (const [word, answer] of [['tenant_mismatch', 'precondition_failed'], ['not_found', 'not_found'], ['invalid_state', 'invalid_state'], ['conflict', 'conflict'],
-    ['refused', 'refused'], ['payments_recorded', 'payments_recorded']] as const) {
+    ['refused', 'refused'], ['payments_recorded', 'payments_recorded'],
+    // M7B-CREDITNOTES-P1 (CN-A3): void v3's active-credit refusal, passed through the same way.
+    ['credit_notes_recorded', 'credit_notes_recorded']] as const) {
     const r = recorder([refusal(word)], [{ fresh: false }]);
     assert.equal(await INVOICE_VOID_MUTATOR.apply(r.sql, voidMutation(), authority()), answer, word);
     assert.equal(r.texts.length, 1, `${word}: no clock`);

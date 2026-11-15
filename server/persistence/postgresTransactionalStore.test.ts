@@ -997,13 +997,15 @@ test('M7B-INVOICES-P2, M7B-INVOICES-DISCARD-P1, M7B-INVOICES-ISSUE-P1, M7B-INVOI
   // INVOICE_VOID_CONTRACT, kind store.invoice.void) are pinned by their kinds here.
   // M7B-PAYMENTS-P1: and the payment reversal's (invoicePayments.ts INVOICE_PAYMENT_REVERSE_CONTRACT); M7B-PAYMENTS-P2: and the registration
   // settlement's (INVOICE_PAYMENT_SETTLE_CONTRACT).
+  // M7B-CREDITNOTES-P1 (doc 16 CN-I3, D-CN-9): and the credit-note withdrawal's and its registration settlement's.
   const contracts = [INVOICE_DRAFT_UPDATE_CONTRACT.kind, INVOICE_DRAFT_DISCARD_CONTRACT.kind, 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse',
-    'store.invoice_payment.settle'];
+    'store.invoice_payment.settle', 'store.invoice_credit_note.withdraw', 'store.invoice_credit_note.settle'];
   assert.deepEqual([...PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'the store\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS].sort(), [...contracts].sort(), 'app.ts\'s');
   assert.deepEqual([...APP_PRECONDITION_UPDATE_KINDS], [...PRECONDITION_UPDATE_KINDS], 'the two copies, in one order');
   assert.deepEqual(contracts, ['store.invoice_draft.update', 'store.invoice_draft.discard', 'store.invoice.issue', 'store.invoice.void', 'store.invoice_payment.reverse',
-    'store.invoice_payment.settle'], 'the contracts\', as the audit action ids migrations 029, 033, 034, 035, 036 and 037 document');
+    'store.invoice_payment.settle', 'store.invoice_credit_note.withdraw', 'store.invoice_credit_note.settle'],
+  'the contracts\', as the audit action ids migrations 029, 033, 034, 035, 036, 037 and 038 document');
   assert.ok(Object.isFrozen(PRECONDITION_UPDATE_KINDS) && Object.isFrozen(APP_PRECONDITION_UPDATE_KINDS), 'frozen');
   for (const kind of ['store.invoice_draft.create', 'store.invoice_draft.reprice', 'tenant.customer.update', 'store.invoice_payment.record', 'store.invoice_payment.register', '']) {
     assert.equal(PRECONDITION_UPDATE_KINDS.includes(kind) || APP_PRECONDITION_UPDATE_KINDS.includes(kind), false, `closed: ${kind}`);
@@ -1300,11 +1302,13 @@ test('M7B-INVOICES-ISSUE-P1: not_found is admitted from the settings write\'s cr
 
 test('M7B-INVOICES-ISSUE-P1: the create kinds the store admits not_found from and app.ts\'s 404 mapping\'s kinds are one closed set — exactly the settings write\'s', () => {
   // M7B-PAYMENTS-P1: and the payment record's (its path invoice); M7B-PAYMENTS-P2: and the payment registration's (its path invoice).
-  assert.deepEqual([...NOT_FOUND_CREATE_KINDS], ['tenant.issuing_settings.update', 'store.invoice_payment.record', 'store.invoice_payment.register'], 'the store\'s');
+  // M7B-CREDITNOTES-P1 (doc 16 CN-I3, D-CN-9): and the credit-note issue's and its registration's (their path invoice).
+  assert.deepEqual([...NOT_FOUND_CREATE_KINDS], ['tenant.issuing_settings.update', 'store.invoice_payment.record', 'store.invoice_payment.register',
+    'store.invoice_credit_note.issue', 'store.invoice_credit_note.register'], 'the store\'s');
   assert.deepEqual([...APP_NOT_FOUND_CREATE_KINDS], [...NOT_FOUND_CREATE_KINDS], 'app.ts\'s');
   assert.ok(Object.isFrozen(NOT_FOUND_CREATE_KINDS) && Object.isFrozen(APP_NOT_FOUND_CREATE_KINDS), 'frozen');
   for (const kind of ['store.invoice_draft.create', 'tenant.customer.create', 'tenant.role_levels.update', 'store.invoice.issue', 'store.invoice_payment.reverse',
-    'store.invoice_payment.settle', '']) {
+    'store.invoice_payment.settle', 'store.invoice_credit_note.withdraw', 'store.invoice_credit_note.settle', '']) {
     assert.equal(NOT_FOUND_CREATE_KINDS.includes(kind) || APP_NOT_FOUND_CREATE_KINDS.includes(kind), false, `closed: ${kind}`);
   }
 });
@@ -1513,7 +1517,9 @@ function payVoiding(): TransactionCommand {
 const decided = (client: { texts: string[] }): string[] => client.texts.filter((t) => t === 'commit' || t === 'rollback');
 
 test('M7B-PAYMENTS-P1 (I2), M7B-PAYMENTS-P2: ROUTINE_AUDITED_KINDS is exactly the four payment kinds (record, reversal, registration, settlement), frozen; the mutator table admits routineAudited exactly for them (at store scope, no typed audit subject) and the payment opt-ins only in their own mode — every other declaration refuses to build', () => {
-  assert.deepEqual([...ROUTINE_AUDITED_KINDS], ['store.invoice_payment.record', 'store.invoice_payment.reverse', 'store.invoice_payment.register', 'store.invoice_payment.settle']);
+  // M7B-CREDITNOTES-P1 (doc 16 CN-I2, D-CN-8 A): and the four credit-note kinds.
+  assert.deepEqual([...ROUTINE_AUDITED_KINDS], ['store.invoice_payment.record', 'store.invoice_payment.reverse', 'store.invoice_payment.register', 'store.invoice_payment.settle',
+    'store.invoice_credit_note.register', 'store.invoice_credit_note.issue', 'store.invoice_credit_note.settle', 'store.invoice_credit_note.withdraw']);
   assert.ok(Object.isFrozen(ROUTINE_AUDITED_KINDS), 'frozen');
   const client = untouched().client;
   assert.doesNotThrow(() => tenantStore(client, [recordMutator('applied'), reverseMutator('applied')]), 'the two payment mutators');
@@ -1536,6 +1542,9 @@ test('M7B-PAYMENTS-P1 (I2), M7B-PAYMENTS-P2: ROUTINE_AUDITED_KINDS is exactly th
     // M7B-PAYMENTS-P2: the registration and the settlement are routine-audited too, so either without the declaration refuses.
     ['the registration without routineAudited', recordMutator('applied', { kind: 'store.invoice_payment.register', routineAudited: undefined })],
     ['the settlement without routineAudited', Object.freeze({ kind: 'store.invoice_payment.settle', mode: 'update', aggregateType: 'invoice_payment_registration', contextScope: 'store', apply: async () => 'applied' })],
+    // M7B-CREDITNOTES-P1: the credit-note kinds are routine-audited too; 'credit' is a create's alone.
+    ['the credit-note issue without routineAudited', recordMutator('applied', { kind: 'store.invoice_credit_note.issue', paymentRefusals: 'credit', routineAudited: undefined })],
+    ['credit refusals on an update', reverseMutator('applied', { paymentRefusals: 'credit' })],
   ] as const) {
     assert.throws(() => tenantStore(client, [mutator as AggregateMutator]), TypeError, label);
   }
@@ -1609,9 +1618,14 @@ test('M7B-PAYMENTS-P1 §12.3: an applied reversal writes no store audit record a
   }
 });
 
-test('M7B-PAYMENTS-P1: the payment-aware void carries four slots and COMMITS only its sealed payments_recorded; a void mutator that did not declare it answering the word commits nothing; every slot set must match its mutator\'s declaration, and a routine-audited command carrying an event is refused — each before any statement', async () => {
+test('M7B-PAYMENTS-P1 (M7B-CREDITNOTES-P1: five slots): the payment-aware void carries its slots and COMMITS only its sealed payments_recorded; a void mutator that did not declare it answering the word commits nothing; every slot set must match its mutator\'s declaration, and a routine-audited command carrying an event is refused — each before any statement', async () => {
   const v = payVoiding();
-  assert.deepEqual(Object.keys(v.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState', 'paymentsRecorded']);
+  // M7B-CREDITNOTES-P1 (CN-A3): void v3 adds credit_notes_recorded, a fifth slot, committed alone exactly as payments_recorded.
+  assert.deepEqual(Object.keys(v.rejected).sort(), ['conflict', 'creditNotesRecorded', 'customerNotFound', 'invalidState', 'paymentsRecorded']);
+  const credited = scripted(v.lease);
+  assert.deepEqual(await tenantStore(credited, [voidMutator('credit_notes_recorded', { paymentRefusals: 'void' })]).transactions.commit(v, live()), { outcome: 'credit_notes_recorded' });
+  assert.deepEqual(credited.values[credited.texts.findIndex((t) => t.includes('m6_idempotency_complete'))], [v.scope, v.lease, v.rejected.creditNotesRecorded]);
+  assert.deepEqual(decided(credited), ['commit']);
   const client = scripted(v.lease);
   const declared = voidMutator('payments_recorded', { paymentRefusals: 'void' });
   assert.deepEqual(await tenantStore(client, [declared]).transactions.commit(v, live()), { outcome: 'payments_recorded' });
@@ -1628,7 +1642,9 @@ test('M7B-PAYMENTS-P1: the payment-aware void carries four slots and COMMITS onl
   const rv = reversing();
   for (const [label, mutator, cmd] of [
     ['a three-slot void for the declaring mutator', declared, plainVoid],
-    ['a four-slot void for the plain mutator', voidMutator('applied'), v],
+    ['a five-slot void for the plain mutator', voidMutator('applied'), v],
+    ['a void missing creditNotesRecorded', declared, { ...v, rejected: { ...v.rejected, creditNotesRecorded: undefined } }],
+    ['a record carrying the credit slot', recordMutator('applied'), { ...r, rejected: { ...r.rejected, alreadyIssued: r.rejected.conflict } }],
     ['a record missing alreadyRecorded', recordMutator('applied'), { ...r, rejected: { ...r.rejected, alreadyRecorded: undefined } }],
     ['a record without its sealed invalid_state', recordMutator('applied'), { ...r, rejected: { ...r.rejected, invalidState: null } }],
     ['a record carrying a 422 slot', recordMutator('applied'), { ...r, rejected: { ...r.rejected, customerNotFound: r.rejected.conflict } }],
@@ -1639,4 +1655,61 @@ test('M7B-PAYMENTS-P1: the payment-aware void carries four slots and COMMITS onl
     assert.deepEqual(await tenantStore(idle, [mutator]).transactions.commit(JSON.parse(JSON.stringify(cmd)) as never, live()), UNAVAILABLE, label);
   }
   assert.equal(begins(), 0, 'no transaction was opened');
+});
+
+// ---------------------------------------------------------------------------
+// M7B-CREDITNOTES-P1 — the 'credit' create's sealed refusals (doc 16 CN-I3)
+// ---------------------------------------------------------------------------
+
+const CREDIT_ISSUE_DEF = Object.freeze({
+  kind: 'store.invoice_credit_note.issue', mode: 'create', aggregateType: 'invoice_credit_note', events: Object.freeze([]), contextScope: 'store',
+  changes: Object.freeze({ invoiceId: ID_STRING, expectedTenant: ID_STRING, attemptId: ID_STRING }),
+  paymentRefusals: 'credit',
+});
+const creditCommands = defineCommands([CREDIT_ISSUE_DEF], defineOutboxEvents([]));
+const creditMutator = (answer: unknown, over: Record<string, unknown> = {}): AggregateMutator => Object.freeze({
+  kind: 'store.invoice_credit_note.issue', mode: 'create', aggregateType: 'invoice_credit_note', contextScope: 'store', paymentRefusals: 'credit',
+  routineAudited: true, apply: async () => answer, ...over,
+}) as AggregateMutator;
+function crediting(): TransactionCommand {
+  const creditNoteId = randomUUID();
+  const operation = keyring.operationOf(randomUUID(), Object.freeze({ authProvider: 'unit', authProviderUid: 'actor' }), {
+    method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', audience: 'tenant', tenant: TENANT, store: STORE_ID, actor: TRUSTED.actor,
+    body: Buffer.from('{}'), target: PAY_INVOICE,
+  });
+  const prepared = prepareCommand(creditCommands.contract('store.invoice_credit_note.issue') as never, defineOutboxEvents([]), {
+    aggregateId: creditNoteId, expectedVersion: null, events: [], changes: { invoiceId: PAY_INVOICE, expectedTenant: TENANT, attemptId: randomUUID() },
+    response: { status: 201, body: { creditNote: { id: creditNoteId } } },
+  }, {
+    scope: operation.scope, lease: digest(), newAggregateId: creditNoteId, authorization: Object.freeze({ scope: 'store', permission: 'issue_invoice_credit_notes' }),
+    context: STORE_CONTEXT, authNotAfter: 1_700_000_000_000, sessionKey: SESSION_KEY, seal: (envelope) => keyring.seal(envelope, operation),
+  });
+  assert.ok(prepared !== null, 'the issue is in contract');
+  return prepared.command;
+}
+
+test('M7B-CREDITNOTES-P1: a \'credit\' create carries five slots and COMMITS only its sealed already_issued, amount_exceeds_remaining or invalid_state; not_found rolls back; the payment words and an undeclared mutator commit nothing', async () => {
+  const c = crediting();
+  assert.deepEqual(Object.keys(c.rejected).sort(), ['alreadyIssued', 'amountExceedsRemaining', 'conflict', 'customerNotFound', 'invalidState']);
+  for (const [answer, sealed] of [['already_issued', c.rejected.alreadyIssued], ['amount_exceeds_remaining', c.rejected.amountExceedsRemaining],
+    ['invalid_state', c.rejected.invalidState], ['conflict', c.rejected.conflict]] as const) {
+    const client = scripted(c.lease);
+    assert.deepEqual(await tenantStore(client, [creditMutator(answer)]).transactions.commit(c, live()), { outcome: answer }, answer);
+    assert.deepEqual(client.values[client.texts.findIndex((t) => t.includes('m6_idempotency_complete'))], [c.scope, c.lease, sealed], answer);
+    assert.ok(!client.texts.some((t) => t.includes('insert into public.audit_event')), `${answer}: no audit`);
+    assert.deepEqual(decided(client), ['commit'], answer);
+  }
+  for (const [answer, outcome] of [['not_found', { outcome: 'not_found' }], ['precondition_failed', { outcome: 'precondition_failed' }],
+    ['already_recorded', UNAVAILABLE], ['payments_recorded', UNAVAILABLE], ['credit_notes_recorded', UNAVAILABLE], ['refused', UNAVAILABLE]] as const) {
+    const rolled = scripted(c.lease);
+    assert.deepEqual(await tenantStore(rolled, [creditMutator(answer)]).transactions.commit(c, live()), outcome, answer);
+    assert.ok(!rolled.texts.some((t) => t.includes('m6_idempotency_complete')), `${answer}: no completion`);
+    assert.deepEqual(decided(rolled), ['rollback'], answer);
+  }
+  const { client: idle } = untouched();
+  for (const [label, cmd] of [['without alreadyIssued', { ...c, rejected: { ...c.rejected, alreadyIssued: undefined } }],
+    ['without its sealed invalid_state', { ...c, rejected: { ...c.rejected, invalidState: null } }],
+    ['carrying the record slot', { ...c, rejected: { ...c.rejected, alreadyRecorded: c.rejected.conflict } }]] as const) {
+    assert.deepEqual(await tenantStore(idle, [creditMutator('applied')]).transactions.commit(JSON.parse(JSON.stringify(cmd)) as never, live()), UNAVAILABLE, label);
+  }
 });

@@ -537,13 +537,16 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-test('M7B: exactly nine store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1) and the payment reversal (M7B-PAYMENTS-P1), none shadowing a tenant key', () => {
+// M7B-CREDITNOTES-P1 (CN-I1): the inventory grows by the three owner-only credit-note keys, two of them sensitive.
+test('M7B: exactly twelve store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1), the payment reversal (M7B-PAYMENTS-P1) and the credit-note issue and withdrawal (M7B-CREDITNOTES-P1), none shadowing a tenant key', () => {
   assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()],
-    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices', 'record_invoice_payments', 'reverse_invoice_payments']);
+    ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices', 'record_invoice_payments', 'reverse_invoice_payments',
+      'issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes']);
   // M7B-INVOICES-VOID-P1 (D-VOID-2): the void at Invoices Approve with Customers View, the one sensitive store entry.
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('void_issued_invoices'),
     { key: 'void_issued_invoices', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
-  assert.deepEqual([...STORE_ROUTE_PERMISSIONS].filter(([, entry]) => entry.sensitive).map(([key]) => key), ['void_issued_invoices', 'reverse_invoice_payments'], 'the two sensitive store entries (M7B-PAYMENTS-P1: + the reversal)');
+  assert.deepEqual([...STORE_ROUTE_PERMISSIONS].filter(([, entry]) => entry.sensitive).map(([key]) => key), ['void_issued_invoices', 'reverse_invoice_payments', 'issue_invoice_credit_notes', 'withdraw_invoice_credit_notes'],
+    'the four sensitive store entries (M7B-PAYMENTS-P1: + the reversal; M7B-CREDITNOTES-P1: + the credit-note issue and withdrawal)');
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('view_invoice_drafts'),
     { key: 'view_invoice_drafts', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'view' });
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('create_invoice_drafts'),
@@ -577,6 +580,56 @@ test('M7B: exactly nine store route permissions, decided at store scope only, no
     assert.equal(canonicalPermission('store', key), null, key);
     assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission: key, limitation: 'none', levels: {} }), 'denied', key);
   }
+});
+
+// --- M7B-CREDITNOTES-P1: the store owner rule (doc 16 D-CN-7 A, CN-I1) ---------------------------------------------------
+
+test('M7B-CREDITNOTES-P1: the three credit-note keys are decided by the store owner rule — store_owner unlimited at store scope only; the manager at Invoices Full is denied', () => {
+  const keys = ['issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes'];
+  assert.deepEqual(keys.map((key) => STORE_ROUTE_PERMISSIONS.get(key)), [
+    { key: 'issue_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'full' },
+    { key: 'withdraw_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'full' },
+    { key: 'recover_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'full' },
+  ]);
+  for (const permission of keys) {
+    for (const roleId of TENANT_ROLE_IDS) {
+      for (const invoices of ['none', 'view', 'create', 'edit', 'manage', 'approve', 'full']) {
+        for (const customers of ['none', 'view', 'full']) {
+          const levels = { invoices, customers };
+          assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId, permission, limitation: 'none', levels }),
+            roleId === 'store_owner' ? 'granted' : 'denied', `${permission} ${roleId} ${JSON.stringify(levels)}`);
+          assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId, permission, limitation: 'read_only', levels }), 'denied', `${permission} ${roleId} read_only`);
+        }
+      }
+      // Tenant scope never decides a store key.
+      assert.equal(evaluateCanonicalPermission({ scope: 'tenant', roleId, permission, limitation: 'none', levels: {} }), 'denied', `${permission} ${roleId} tenant scope`);
+    }
+    // The manager's default is Invoices Full (permissionCatalog.ts): still denied, by role.
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'manager', permission, limitation: 'none', levels: {} }), 'denied', `${permission} manager default`);
+    // Unreadable levels, an unknown or custom role, and an unknown limitation are denied.
+    for (const levels of [null, [], 'invoices', undefined]) {
+      assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission, limitation: 'none', levels }), 'denied', `${permission} levels ${JSON.stringify(levels)}`);
+    }
+    for (const roleId of ['Store_owner', 'store_owner ', 'custom_role', '', 'system_owner']) {
+      assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId, permission, limitation: 'none', levels: {} }), 'denied', `${permission} ${roleId}`);
+    }
+    assert.equal(evaluateCanonicalPermission({ scope: 'store', roleId: 'store_owner', permission, limitation: 'overdue' as 'none', levels: {} }), 'denied');
+  }
+});
+
+test('M7B-CREDITNOTES-P1: the store guard admits the owner-only keys by name, in exactly their shape', () => {
+  const entry = STORE_ROUTE_PERMISSIONS.get('issue_invoice_credit_notes') as NonNullable<ReturnType<typeof STORE_ROUTE_PERMISSIONS.get>>;
+  const withEntry = (key: string, value: object) => new Map([[key, Object.freeze(value)]]) as unknown as typeof STORE_ROUTE_PERMISSIONS;
+  assert.doesNotThrow(() => assertStoreRoutePermissions(withEntry('issue_invoice_credit_notes', entry)));
+  for (const bad of [
+    { ...entry, sensitive: false }, { ...entry, threshold: 'approve' }, { ...entry, parent: 'customers' },
+    { ...entry, corequisite: { parent: 'customers', threshold: 'view' } }, { ...entry, key: 'withdraw_invoice_credit_notes' },
+  ]) {
+    assert.throws(() => assertStoreRoutePermissions(withEntry('issue_invoice_credit_notes', bad)), JSON.stringify(bad));
+  }
+  // The recovery key is NOT sensitive, and Full under any other name still refuses to load.
+  assert.throws(() => assertStoreRoutePermissions(withEntry('recover_invoice_credit_notes', { ...entry, key: 'recover_invoice_credit_notes', sensitive: true })));
+  assert.throws(() => assertStoreRoutePermissions(withEntry('credit_invoices', { ...entry, key: 'credit_invoices' })));
 });
 
 test('M7B: the store route permissions on every built-in role, both limitations, at the defaults and under the owner\'s edits — Customers View is the create\'s corequisite', () => {

@@ -87,6 +87,12 @@
 // payment reversed on a recent sign-in, the same way; the invoice and the payment are the fingerprint's two targets) and GET
 // …/invoices/{id}/payments, the invoice's payments, amounts due and payment status, read-only; the void now refuses an
 // invoice with an unreversed payment (sealed 409 payments_recorded);
+// M7B-CREDITNOTES-P1 (doc 16, migration 038): seven more store routes, the store owner's alone (D-CN-7 A) but the list —
+// GET …/invoices/{id}/credit-note-registration-proof, GET /api/v1/stores/{storeId}/credit-note-attempts, GET
+// …/invoices/{id}/credit-notes (view_issued_invoices), POST …/invoices/{id}/credit-note-registrations and POST
+// …/invoices/{id}/credit-notes (session-bound, recent sign-in), POST …/invoices/{id}/credit-note-settlement and POST
+// …/invoices/{id}/credit-notes/{creditNoteId}/withdrawal (recent sign-in); the payments read gains creditedCents and the void
+// refuses an invoice with an active credit note (sealed 409 credit_notes_recorded). They need 037's proof key (8b): no new key;
 // each store route authorized only through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
@@ -166,6 +172,15 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores/{storeId}/payment-attempts', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-settlement', access: 'session', body: 'json', idempotency: 'required' },
+  // M7B-CREDITNOTES-P1: the proof, the caller's attempts, the list, then the registration, the issue, the settlement and the
+  // withdrawal, in composition order.
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/credit-note-attempts', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement', access: 'session', body: 'json', idempotency: 'required' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal', access: 'session', body: 'json', idempotency: 'required' },
 ].map((route) => Object.freeze(route)));
 
 /**
@@ -365,7 +380,9 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     if (keyAnswer !== 'match') return await refuse('tenant_issuer_key_probe_malformed');
 
     // 8b. The payment proof key (M7B-PAYMENTS-P2, migration 037): installed out of band by the owner, never sent or read here —
-    //     only whether it is present. Without it no payment can be registered or recorded, so the entry does not start; a key
+    //     only whether it is present. M7B-CREDITNOTES-P1: the credit-note registration, proof and issue use the same key (doc 16
+    //     recovery contract, a distinct label), so this one gate covers them too.
+    //     Without it no payment can be registered or recorded, so the entry does not start; a key
     //     removed after startup fails those closed while the attempts read and the settlement keep serving.
     let proofKey: string;
     try {

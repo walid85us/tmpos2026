@@ -1078,7 +1078,8 @@ test('M7B-PAYMENTS-P1: a \'record\' create seals five slots — its invalid_stat
   const plan = { aggregateId: randomUUID(), expectedVersion: 1, changes: { name: 'n' }, events: [], response: { status: 200, body: { ok: true } } };
   const voided = prepareCommand(registered.contract(VOID_RENAME.kind) as CommandContract, events, plan, binding());
   assert.ok(voided !== null);
-  assert.deepEqual(Object.keys(voided.command.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState', 'paymentsRecorded']);
+  // M7B-CREDITNOTES-P1 (CN-A3): the void now also seals credit_notes_recorded, a fifth slot.
+  assert.deepEqual(Object.keys(voided.command.rejected).sort(), ['conflict', 'creditNotesRecorded', 'customerNotFound', 'invalidState', 'paymentsRecorded']);
   assert.deepEqual(voided.rejected.paymentsRecorded, envelope('payments_recorded'));
   assert.deepEqual(keyring.unseal(voided.command.rejected.paymentsRecorded as string, op), envelope('payments_recorded'));
   for (const [label, contract, raw] of [['the plain rename', rename, plan], ['a create', create, createPlan(b.newAggregateId)]] as const) {
@@ -1087,6 +1088,28 @@ test('M7B-PAYMENTS-P1: a \'record\' create seals five slots — its invalid_stat
     assert.deepEqual(Object.keys(plain.command.rejected).sort(), ['conflict', 'customerNotFound', 'invalidState'], `${label}: three keys, no new one`);
   }
   assert.equal(prepareCommand(create, events, createPlan(b.newAggregateId), b)?.command.rejected.invalidState, null, 'any other create seals no invalid_state');
+});
+
+// M7B-CREDITNOTES-P1 (doc 16 CN-I3): the third shape and the void's fifth slot.
+test('M7B-CREDITNOTES-P1: a \'credit\' create seals five slots — invalid_state although a create, already_issued and amount_exceeds_remaining, no 422 — a \'credit\' update is refused, and the two new words are obeyed only as exact answers', async () => {
+  const CREDIT_CREATE = Object.freeze({ ...TEST_CREATE, kind: 'store.invoice_credit_note.issue', paymentRefusals: 'credit' as const });
+  const registered = defineCommands([CREDIT_CREATE], events);
+  const b = binding();
+  const credited = prepareCommand(registered.contract(CREDIT_CREATE.kind) as CommandContract, events, createPlan(b.newAggregateId), b);
+  assert.ok(credited !== null);
+  assert.deepEqual(Object.keys(credited.command.rejected).sort(), ['alreadyIssued', 'amountExceedsRemaining', 'conflict', 'customerNotFound', 'invalidState']);
+  assert.equal(credited.command.rejected.customerNotFound, null);
+  for (const [slot, word] of [['invalidState', 'invalid_state'], ['alreadyIssued', 'already_issued'], ['amountExceedsRemaining', 'amount_exceeds_remaining']] as const) {
+    assert.deepEqual(credited.rejected[slot], { status: 409, contentType: 'application/json; charset=utf-8', headers: {}, body: JSON.stringify({ error: word }) }, slot);
+  }
+  assert.throws(() => defineCommands([{ ...TEST_RENAME, paymentRefusals: 'credit' }], events), /command_registry_invalid|EnforcementSetupError/, 'credit on an update');
+  const command = commandOf();
+  const verdictOf = (answer: unknown): Promise<unknown> =>
+    commitCommand(createCommandTransactions({ port: { commit: () => answer, probe: () => true } }), command, 1_000);
+  for (const word of ['already_issued', 'credit_notes_recorded']) {
+    assert.equal(await verdictOf({ outcome: word }), `transaction_${word}`);
+    assert.equal(await verdictOf({ outcome: word, status: 409 }), 'transaction_outcome_invalid', `${word}: exact`);
+  }
 });
 
 test('M7B-PAYMENTS-P1: the three words are obeyed only as exact answers, are reserved — an outcome may not spell them — and mint at 409 alone', async () => {

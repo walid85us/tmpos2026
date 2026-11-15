@@ -453,6 +453,8 @@ export const VOID_REFUSED_TEXT: Readonly<Record<VoidRefusal, string>> = Object.f
   'version-conflict': 'Not voided: this invoice changed on the server since it was reviewed.',
   /** M7B-PAYMENTS-P1 (doc 15 §12.6): the key's sealed 409 payments_recorded — exactly this sentence. */
   'payments-recorded': "This invoice has payments recorded, so it can't be voided. If a payment was recorded by mistake, reverse that payment first.",
+  /** M7B-CREDITNOTES-P1 (doc 16 D-CN-3, CN-27a): the key's sealed 409 credit_notes_recorded — exactly this sentence. */
+  'credit-notes-recorded': "This invoice has credit notes, so it can't be voided. If a credit note was issued by mistake, withdraw it first.",
   'tenant-conflict': "Not voided: this store isn't part of that tenant any more.",
   /** A chain 404 on the POST may be the host's refusal before any route ran (design R21): it names no invoice state. */
   'not-found': 'Not voided: the server refused this request.',
@@ -2988,7 +2990,7 @@ const paymentAfter = (a: InvoicePayment, b: InvoicePayment): boolean => a.record
 function paymentsJoin(held: PaymentsView, page: PaymentsPage): boolean {
   const was = held.page;
   if (was === null || was.invoice.status !== page.invoice.status || was.paymentStatus !== page.paymentStatus || was.amounts.dueCents !== page.amounts.dueCents
-    || was.amounts.appliedCents !== page.amounts.appliedCents || was.amounts.remainingCents !== page.amounts.remainingCents) return false;
+    || was.amounts.creditedCents !== page.amounts.creditedCents || was.amounts.appliedCents !== page.amounts.appliedCents || was.amounts.remainingCents !== page.amounts.remainingCents) return false;
   const ids = new Set(held.rows.map((p) => p.id));
   let prev: InvoicePayment | undefined = held.rows[held.rows.length - 1];
   let active = 0n;
@@ -3783,12 +3785,20 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
               <dl className="grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
                 <dt className={labelClass}>Payment status</dt>
                 <dd data-testid="issued-payments-status" className="font-bold text-slate-700 min-w-0 break-words">{INVOICE_PAYMENT_STATUSES[pay.page.paymentStatus]}</dd>
-                <dt className={labelClass}>Amount due</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-due" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.dueCents)}</span></dd>
-                <dt className={labelClass}>Recorded</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-recorded" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.appliedCents)}</span></dd>
-                <dt className={labelClass}>Remaining</dt>
-                <dd className="font-bold text-slate-700"><span data-testid="issued-payments-remaining" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.remainingCents)}</span></dd>
+                {pay.page.invoice.status === 'issued' && (
+                  // A voided invoice shows the word only (CN-37): the snapshot Total stays above; no "$0.00" amounts rows beside it.
+                  <>
+                    {/* The Total, never "due": after a credit it is not what is owed (CN-31); Remaining is. */}
+                    <dt className={labelClass}>Invoice total</dt>
+                    <dd className="font-bold text-slate-700"><span data-testid="issued-payments-due" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.dueCents)}</span></dd>
+                    <dt className={labelClass}>Credited</dt>
+                    <dd className="font-bold text-slate-700"><span data-testid="issued-payments-credited" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.creditedCents)}</span></dd>
+                    <dt className={labelClass}>Recorded</dt>
+                    <dd className="font-bold text-slate-700"><span data-testid="issued-payments-recorded" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.appliedCents)}</span></dd>
+                    <dt className={labelClass}>Remaining</dt>
+                    <dd className="font-bold text-slate-700"><span data-testid="issued-payments-remaining" className="[overflow-wrap:anywhere]">{formatCents(pay.page.amounts.remainingCents)}</span></dd>
+                  </>
+                )}
               </dl>
             )}
             <p data-testid="issued-payments-note" className={hintClass}>{PAYMENTS_TEXT.note}</p>

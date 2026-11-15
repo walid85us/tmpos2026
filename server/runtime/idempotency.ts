@@ -134,6 +134,8 @@ const RESERVED_ERRORS: ReadonlySet<string> = new Set([
   'request_in_progress', 'idempotency_key_reused', 'write_conflict', 'invalid_state', 'customer_not_found', 'issuing_not_configured', 'amount_out_of_range',
   // M7B-PAYMENTS-P1 (doc 15 §12.5): the payment commands' three sealed 409s.
   'already_recorded', 'amount_exceeds_remaining', 'payments_recorded',
+  // M7B-CREDITNOTES-P1 (doc 16 CN-I3): the credit-note commands' and the void v3's sealed 409s.
+  'already_issued', 'credit_notes_recorded',
 ]);
 /**
  * The deterministic post-authorization rejections a command seals as its own completion
@@ -154,10 +156,14 @@ const RESERVED_ERRORS: ReadonlySet<string> = new Set([
  * M7B-PAYMENTS-P1 adds three TYPED 409s (commandTransaction.ts `paymentRefusals`): `already_recorded` and
  * `amount_exceeds_remaining`, sealed only by the 'record' create, and `payments_recorded`, sealed only by the 'void' update —
  * each decided by its routine inside the committing transaction before anything is written.
+ *
+ * M7B-CREDITNOTES-P1 (doc 16 CN-I3) adds two TYPED 409s: `already_issued`, sealed only by a 'credit' create (the credit-note
+ * registration and issue), and `credit_notes_recorded`, sealed only by the 'void' update (void v3, CN-A3).
  */
 const SEALED_REFUSAL_STATUS: ReadonlyMap<string, number> = new Map([
   ['write_conflict', 409], ['invalid_state', 409], ['customer_not_found', 422], ['issuing_not_configured', 409], ['amount_out_of_range', 409],
   ['already_recorded', 409], ['amount_exceeds_remaining', 409], ['payments_recorded', 409],
+  ['already_issued', 409], ['credit_notes_recorded', 409],
 ]);
 const KEY_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // An origin-relative path: no scheme, authority, backslash, query or fragment; strict percent-encoding.
@@ -368,7 +374,8 @@ export function envelopeFromOutcome(raw: unknown): ReplayEnvelope | null {
  * a bounded response carrying exactly one refusal word and nothing else, at that word's one fixed status — 409 for the
  * two conflicts, 422 for M7B-INVOICES-P1's typed `customer_not_found`, 409 for M7B-INVOICES-ISSUE-P1's typed
  * `issuing_not_configured` and `amount_out_of_range`, 409 for M7B-PAYMENTS-P1's typed `already_recorded`,
- * `amount_exceeds_remaining` and `payments_recorded` — or null for any word that is not one of the eight. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
+ * `amount_exceeds_remaining` and `payments_recorded`, 409 for M7B-CREDITNOTES-P1's typed `already_issued` and
+ * `credit_notes_recorded` — or null for any word that is not one of the ten. envelopeOf refuses a reserved word on purpose — an operation's outcome may not borrow
  * one — and this is the single place that mints it, from a fixed token this module owns: never from a
  * plan, a port, a handler or a request.
  *

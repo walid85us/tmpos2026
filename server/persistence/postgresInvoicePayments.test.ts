@@ -77,7 +77,7 @@ test('IPP-01 the record mutator: a routine-audited store-scope CREATE of an invo
   assert.ok(Object.isFrozen(INVOICE_PAYMENT_RECORD_MUTATOR) && Object.isFrozen(INVOICE_PAYMENT_REVERSE_MUTATOR));
   // M7B-PAYMENTS-P2: the registration and the settlement joined the routine-audited kinds (postgresInvoicePaymentRegistrations.test.ts).
   assert.deepEqual([INVOICE_PAYMENT_RECORD_MUTATOR.kind, INVOICE_PAYMENT_REVERSE_MUTATOR.kind, INVOICE_PAYMENT_REGISTER_MUTATOR.kind, INVOICE_PAYMENT_SETTLE_MUTATOR.kind],
-    [...ROUTINE_AUDITED_KINDS], 'exactly the routine-audited kinds');
+    [...ROUTINE_AUDITED_KINDS].slice(0, 4), 'exactly the payment kinds among the routine-audited kinds (M7B-CREDITNOTES-P1: the four credit-note kinds follow)');
   // The store builds over both (the mutator table's I2 check).
   const client = { transaction: async () => { throw new Error('unused'); }, end: async () => undefined } as unknown as SupervisedPgClient;
   assert.doesNotThrow(() => createPostgresTransactionalStore({ client, mutators: [INVOICE_PAYMENT_RECORD_MUTATOR, INVOICE_PAYMENT_REVERSE_MUTATOR,
@@ -86,8 +86,8 @@ test('IPP-01 the record mutator: a routine-audited store-scope CREATE of an invo
   assert.equal(await INVOICE_PAYMENT_RECORD_MUTATOR.apply(r.sql, recordMutation(), authority()), 'applied');
   assert.equal(r.texts.length, 1, 'one statement, no clock');
   assert.equal(squash(r.texts[0]), 'select o_outcome, o_tenant_id, o_store_id, o_actor_id, o_membership_id, o_payment_id, o_invoice_id, o_audit_event_id '
-    + 'from tmpos_invoice_payment.m7b_invoice_payment_record_v2(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text, ?::text, ?::uuid)',
-  'the exact statement: 037\'s record v2, never 036\'s nine-argument record');
+    + 'from tmpos_invoice_payment.m7b_invoice_payment_record_v3(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::bigint, ?::text, ?::text, ?::uuid)',
+  'the exact statement: 038\'s record v3 (M7B-CREDITNOTES-P1), never 037\'s v2 or 036\'s nine-argument record');
   assert.deepEqual(r.values[0], [KEY, STORE, INVOICE, TENANT, PAYMENT, REGISTRATION, ATTEMPT, '1250', 'cash', PROOF, CORRELATION]);
   for (const method of INVOICE_PAYMENT_METHODS) {
     for (const amount of [1, MAX]) {
@@ -211,13 +211,14 @@ test('IPP-04 the reversal mutator: ONE fixed call binding the key, the REVALIDAT
 
 // --- the read and readiness ----------------------------------------------------------------------------------------------
 
-const HEADER = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_applied_cents',
+// M7B-CREDITNOTES-P1: 038's v2 read, o_credited_cents after o_due_cents.
+const HEADER = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_credited_cents', 'o_applied_cents',
   'o_remaining_cents', 'o_payment_status'];
 const PAY = ['o_payment_id', 'o_attempt_id', 'o_amount_cents', 'o_method', 'o_recorded_at', 'o_reversed_at', 'o_reason_code'];
 const T = (s: number) => `2026-11-07T10:00:${String(s).padStart(2, '0')}.123456Z`;
 const header = (over: Record<string, unknown> = {}) => ({
   o_outcome: 'payments', o_tenant_id: TENANT, o_store_id: STORE, o_invoice_id: INVOICE, o_status: 'issued', o_currency: 'USD', o_total_cents: '1000',
-  o_due_cents: '1000', o_applied_cents: '400', o_remaining_cents: '600', o_payment_status: 'recorded_partly', ...over,
+  o_due_cents: '1000', o_credited_cents: '0', o_applied_cents: '400', o_remaining_cents: '600', o_payment_status: 'recorded_partly', ...over,
 });
 const row = (n: number, over: Record<string, unknown> = {}, head: Record<string, unknown> = {}) => ({
   ...header(head), o_payment_id: `${n.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`, o_attempt_id: ATTEMPT, o_amount_cents: '400', o_method: 'cash',
@@ -247,7 +248,7 @@ function kernel(answer: (text: string) => unknown) {
 test('IPP-05 the read\'s rows: a page, a reversal and the empty page read through as the runtime\'s answer; each refusal is its one all-null row; every header disagreement, scope or invoice mismatch, malformed value, extra row or word the runtime refuses is a fault', () => {
   const page = invoicePaymentsAnswerOf([row(1), row(2, { o_reversed_at: T(3), o_reason_code: 'wrong_amount', o_method: 'external_card_terminal' })], STORE_SCOPE, INVOICE, null) as Record<string, unknown>;
   assert.deepEqual(page, {
-    outcome: 'payments', invoice: { id: INVOICE, status: 'issued' }, currency: 'USD', totalCents: 1000, dueCents: 1000, appliedCents: 400, remainingCents: 600,
+    outcome: 'payments', invoice: { id: INVOICE, status: 'issued' }, currency: 'USD', totalCents: 1000, dueCents: 1000, creditedCents: 0, appliedCents: 400, remainingCents: 600,
     paymentStatus: 'recorded_partly', payments: [
       { id: row(1).o_payment_id, attemptId: ATTEMPT, amountCents: 400, method: 'cash', recordedAt: T(1), reversal: null },
       { id: row(2).o_payment_id, attemptId: ATTEMPT, amountCents: 400, method: 'external_card_terminal', recordedAt: T(2), reversal: { reversedAt: T(3), reasonCode: 'wrong_amount' } },
@@ -270,7 +271,13 @@ test('IPP-05 the read\'s rows: a page, a reversal and the empty page read throug
     ['an unknown status', [row(1, {}, { o_status: 'paid' })], null], ['52 rows', Array.from({ length: 52 }, (_, i) => row(i + 1)), null], ['no row', [], null],
     ['an extra column', [{ ...row(1), o_recorded_by: ACTOR }], null], ['a missing column', [Object.fromEntries(Object.entries(row(1)).filter(([k]) => k !== 'o_reason_code'))], null],
     ['not an array', 'rows', null],
+    // M7B-CREDITNOTES-P1: the credited amount re-derived — a credit without its remaining, a credited amount as a number, credits over due.
+    ['a credit remaining ignores', [row(1, {}, { o_credited_cents: '100' })], null], ['credited as a number', [row(1, {}, { o_credited_cents: 0 })], null],
+    ['credited over due', [row(1, {}, { o_credited_cents: '700', o_remaining_cents: '0', o_payment_status: 'settled_by_payment_and_credit' })], null],
   ];
+  // M7B-CREDITNOTES-P1: a credit and a payment together settling the invoice reads through with its own word.
+  const settled = invoicePaymentsAnswerOf([row(1, {}, { o_credited_cents: '600', o_remaining_cents: '0', o_payment_status: 'settled_by_payment_and_credit' })], STORE_SCOPE, INVOICE, null);
+  assert.equal((settled as { creditedCents: number }).creditedCents, 600);
   for (const [label, rows, after] of faults) assert.throws(() => invoicePaymentsAnswerOf(rows, STORE_SCOPE, INVOICE, after), /invoice payments answer invalid/, label);
 });
 
@@ -280,9 +287,9 @@ test('IPP-06 the read adapter: one statement in one short read with the drafts\'
   assert.ok(Object.isFrozen(port));
   const after = randomUUID();
   await port.payments(STORE_SCOPE, KEY, INVOICE, after, live());
-  assert.equal(squash(k.statements[0].text), 'select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_applied_cents, '
+  assert.equal(squash(k.statements[0].text), 'select o_outcome, o_tenant_id, o_store_id, o_invoice_id, o_status, o_currency, o_total_cents, o_due_cents, o_credited_cents, o_applied_cents, '
     + 'o_remaining_cents, o_payment_status, o_payment_id, o_attempt_id, o_amount_cents, o_method, o_recorded_at, o_reversed_at, o_reason_code '
-    + 'from tmpos_invoice_payment.m7b_invoice_payments_get(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::integer)');
+    + 'from tmpos_invoice_payment.m7b_invoice_payments_get_v2(?::text, ?::uuid, ?::uuid, ?::uuid, ?::uuid, ?::integer)');
   assert.deepEqual(k.statements[0].values, [KEY, TENANT, STORE, INVOICE, after, 51]);
   assert.deepEqual(k.bounds, [INVOICE_DRAFT_READ_BOUNDS]);
   await port.payments(STORE_SCOPE, KEY, INVOICE, null, live());
@@ -300,7 +307,7 @@ test('IPP-06 the read adapter: one statement in one short read with the drafts\'
   const ready = kernel(() => denied);
   assert.equal(await probeInvoicePayments(ready.client, live()), true);
   assert.equal(ready.statements.length, 1);
-  assert.match(ready.statements[0].text, /from tmpos_invoice_payment\.m7b_invoice_payments_get\(/);
+  assert.match(ready.statements[0].text, /from tmpos_invoice_payment\.m7b_invoice_payments_get_v2\(/);
   assert.ok(/^[A-Za-z0-9_-]{43}$/.test(ready.statements[0].values[0] as string), 'a random key of the session-key shape');
   assert.deepEqual(ready.statements[0].values.slice(4), [null, 1]);
   for (const [label, rows] of [['not_found', [{ ...denied[0], o_outcome: 'not_found' }]], ['a page', [row(1)]], ['two rows', [...denied, ...denied]],

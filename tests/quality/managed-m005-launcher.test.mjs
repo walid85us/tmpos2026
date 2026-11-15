@@ -2918,7 +2918,7 @@ test('V2/§4 (M6-PG-P4): while 006 and 007 are pending, a clean 001-004 ledger a
   // [005 … 019]; M7A-CUSTOMERS-P3-R1 adds 020, so the derived plan became [005 … 020]; M7A-CUSTOMERS-P4 adds 021 and 022, so
   // the derived plan became [005 … 022]; M7A-CUSTOMERS-P6 adds 023, so the derived plan became [005 … 023]; M7A-CUSTOMERS-P7 adds 024, so the derived plan became [005 … 024]; M7A-CUSTOMERS-P8 adds 025, so the derived plan became [005 … 025]; M5-INVOICES-AUTH-P1 adds 026, so the derived plan became [005 … 026]; M7B-INVOICES-P1 adds 027 and 028, so the derived plan became [005 … 028]; M7B-INVOICES-P2 adds 029, so the derived plan became [005 … 029]; M7B-INVOICES-P2-R1 adds 030, so the derived plan became [005 … 030]; M7B-INVOICES-P1-R3 adds 031, so the derived plan became [005 … 031]; M7B-INVOICES-P1-R4 adds 032, so the derived plan became [005 … 032]; M7B-INVOICES-DISCARD-P1 adds 033, so the derived plan became [005 … 033]; M7B-INVOICES-ISSUE-P1 adds 034, so the derived plan became [005 … 034]; M7B-INVOICES-VOID-P1 adds 035, so the derived plan became [005 … 035]; M7B-PAYMENTS-P1 adds 036, so the derived plan is now [005 … 036]. The gate is
   // still the one written for [005] and still refuses every longer plan.
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037'], 'this tree carries 006 through 035 after 005');
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038'], 'this tree carries 006 through 035 after 005');
   const w = v2World({ argv: V2_APPLY_ARGV, ledger: V2_LEDGER_001_004, run: V2_APPLY_OK });
   assert.deepEqual(await v2Run('apply(up)', w), V2_APPLY_PLAN_REFUSED);
   assert.equal(w.calls.length, 0, 'the trusted apply runner is never reached: no lock, no migration statement, no ledger write');
@@ -3305,6 +3305,7 @@ const V2R2_STATUS_034_PENDING = Object.freeze(['stdout', '  version=034  state=u
 const V2R2_STATUS_035_PENDING = Object.freeze(['stdout', '  version=035  state=unapplied  ledger=none']);
 const V2R2_STATUS_036_PENDING = Object.freeze(['stdout', '  version=036  state=unapplied  ledger=none']);
 const V2R2_STATUS_037_PENDING = Object.freeze(['stdout', '  version=037  state=unapplied  ledger=none']);
+const V2R2_STATUS_038_PENDING = Object.freeze(['stdout', '  version=038  state=unapplied  ledger=none']);
 const V2R2_STATUS_REPORT_001_004 = Object.freeze([
   ['stdout', '  version=001  state=applied  ledger=recorded'],
   ['stdout', '  version=002  state=applied  ledger=recorded'],
@@ -3343,6 +3344,7 @@ const V2R2_STATUS_REPORT_001_004 = Object.freeze([
   V2R2_STATUS_035_PENDING,
   V2R2_STATUS_036_PENDING,
   V2R2_STATUS_037_PENDING,
+  V2R2_STATUS_038_PENDING,
 ]);
 const V2R2_STATUS_DISPOSED = Object.freeze([
   ['dispose.requested'],
@@ -3377,7 +3379,7 @@ function v2r2TrappedPorts(world) {
 }
 
 test('V2-R2/status: a successful status — the whole ordered trace, open to completion, exit 0 without forced termination', async () => {
-  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037'], 'the fixture ledger is 001-004 of this tree');
+  assert.deepEqual(V2_PAIRS.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038'], 'the fixture ledger is 001-004 of this tree');
   const w = v2World({ argv: V2R2_STATUS_ARGV, ledger: V2_LEDGER_001_004 });
   assert.deepEqual(await v2Run('status', w), [
     ...V2R2_STATUS_PREFIX,
@@ -3430,6 +3432,7 @@ test('V2-R2/status: status selects only its trusted read — one client, no runn
     V2R2_STATUS_035_PENDING,
     V2R2_STATUS_036_PENDING,
     V2R2_STATUS_037_PENDING,
+    V2R2_STATUS_038_PENDING,
     ...V2R2_STATUS_DISPOSED,
     ...V2R2_STATUS_SUCCESS_TAIL,
   ]);

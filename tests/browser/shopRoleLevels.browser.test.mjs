@@ -11166,7 +11166,7 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
       .flatMap((id) => [...s.querySelectorAll('[data-testid="' + id + '"]')].map((e) => [id, e.getBoundingClientRect()]))
       .filter(([, r]) => r.width > 0 && r.height > 0 && (r.left < pr.left - ${HOLD_TOLERANCE} || r.right > pr.right + ${HOLD_TOLERANCE})).map(([id]) => id);
     // P2A's summary values: fully inside the dialog's visible box with the panel at scrollLeft 0 (the x position does not depend on the vertical scroll).
-    const summary = Object.fromEntries(['issued-payments-due', 'issued-payments-remaining'].map((id) => {
+    const summary = Object.fromEntries(['issued-payments-due', 'issued-payments-credited', 'issued-payments-remaining'].map((id) => {
       const t = document.querySelector('[data-testid="' + id + '"]');
       if (t === null) return [id, null];
       p.scrollLeft = 0; // horizontal position only: nothing is scrolled vertically
@@ -11175,7 +11175,7 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
     }));
     // R6: no amount is clipped — neither the value nor its cell (the dd: an inline span has no scroll box) overflows sideways or downward, and
     // nothing ellipsizes them; Recorded too where present.
-    const unclipped = Object.fromEntries(['issued-payments-due', 'issued-payments-recorded', 'issued-payments-remaining'].map((id) => {
+    const unclipped = Object.fromEntries(['issued-payments-due', 'issued-payments-credited', 'issued-payments-recorded', 'issued-payments-remaining'].map((id) => {
       const t = document.querySelector('[data-testid="' + id + '"]');
       if (t === null) return [id, null];
       const cell = t.closest('dd');
@@ -11211,8 +11211,8 @@ scenario('SIS-30', 'M7B-PAYMENTS-P2B THE RECORDING FORM AT 320 PX — SIS-09\'s 
       check(m.panel.left >= -HOLD_TOLERANCE && m.panel.right <= width + HOLD_TOLERANCE, `${cell} ${phase}: the dialog lies outside the viewport ${JSON.stringify(m.panel)}`);
       check(m.page.scrollWidth <= m.page.clientWidth + HOLD_TOLERANCE, `${cell} ${phase}: the page scrolls sideways ${JSON.stringify(m.page)}`);
       check(m.mine.length === 0, `${cell} ${phase}: P2B boxes reach past the dialog ${JSON.stringify(m.mine)}`);
-      check(m.summary['issued-payments-due'] === true && m.summary['issued-payments-remaining'] === true, `${cell} ${phase}: P2A's due or remaining value is not fully inside the dialog ${JSON.stringify(m.summary)}`);
-      check(m.unclipped['issued-payments-due'] === true && m.unclipped['issued-payments-remaining'] === true && m.unclipped['issued-payments-recorded'] !== false, `${cell} ${phase}: an amount is clipped or ellipsized ${JSON.stringify(m.unclipped)}`);
+      check(m.summary['issued-payments-due'] === true && m.summary['issued-payments-credited'] === true && m.summary['issued-payments-remaining'] === true, `${cell} ${phase}: P2A's due or remaining value is not fully inside the dialog ${JSON.stringify(m.summary)}`);
+      check(m.unclipped['issued-payments-due'] === true && m.unclipped['issued-payments-credited'] === true && m.unclipped['issued-payments-remaining'] === true && m.unclipped['issued-payments-recorded'] !== false, `${cell} ${phase}: an amount is clipped or ellipsized ${JSON.stringify(m.unclipped)}`);
       if (font === null) {
         check(m.panel.scrollWidth <= m.panel.clientWidth + HOLD_TOLERANCE && m.panel.scrollLeft === 0, `${cell} ${phase}: the dialog overflows sideways ${JSON.stringify(m.panel)}`);
         check(m.outside.length === 0, `${cell} ${phase}: boxes reach past the dialog ${JSON.stringify(m.outside)}`);
@@ -11649,6 +11649,9 @@ scenario('SIS-35', 'M7B-PAYMENTS-P2C REVERSE A PAYMENT END TO END — a manager 
   record('SIS-35', { phase: 'amounts', shownAmounts, server: { applied: amounts.appliedCents, remaining: amounts.remainingCents } });
   assert.deepEqual(shownAmounts, { recorded: usd(amounts.appliedCents), remaining: usd(amounts.remainingCents) }, 'Recorded and Remaining are the server\'s re-read');
   assert.deepEqual(shownAmounts, { recorded: '$0.00', remaining: '$42.00' }, 'remaining rises by $12.50, recorded falls by it');
+  // M7B-CREDITNOTES-P1 (CN-31): the summary's labels say "Invoice total" and "Credited" — never "Amount due" — and with no credit the server's creditedCents shows $0.00.
+  assert.deepEqual(await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments"] dl dt')].map((dt) => dt.textContent)`), ['Payment status', 'Invoice total', 'Credited', 'Recorded', 'Remaining'], 'the summary labels: Invoice total and Credited, no Amount due');
+  assert.equal(await textOf(page, 'issued-payments-credited'), usd(amounts.creditedCents), 'Credited is the server\'s creditedCents');
   assert.deepEqual(await storedReversalOf(pid), { reversals: ['wrong_amount'], audits: 1 }, 'exactly ONE reversal row (wrong_amount) and ONE reverse audit for that payment');
   assert.ok((await paymentAuditsOf(tenant)).filter((a) => a === 'reverse').length === 1, 'ONE reverse audit in the tenant');
   await assertNoLeak(page);

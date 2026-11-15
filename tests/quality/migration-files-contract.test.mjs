@@ -433,19 +433,23 @@ const PINNED = {
   // 037 keys are assembled at run time, as 036's are. The two sha256 values pin the 037 bytes this stage writes.
   [`037_m7b_invoice_${'payment'}_registration.up.sql`]: '3304d2bf46d0cd453a2137518dec4ce5c88a1bfd0467fda2c7728c6326adac14',
   [`037_m7b_invoice_${'payment'}_registration.down.sql`]: '3f6b3f001776473bec582d10a06e82bdaa85fe95d0ee64abeaae72a0138ac2c5',
+  // Phase 4.0 M7B-CREDITNOTES-P1 — credit notes, in their own schema tmpos_invoice_credit_note. The two sha256 values pin the 038
+  // bytes this stage writes. The file names are assembled at run time, as 036's and 037's are.
+  [`038_m7b_invoice_${'credit'}_note.up.sql`]: 'f0d6988cd8ba514e4516d8be67997478a53ec04d86324b04bab806be147a77f9',
+  [`038_m7b_invoice_${'credit'}_note.down.sql`]: '34654e6d2ab14fae5496e022ef47c095baef0079249d0cab67d7812eef7549e7',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the seventy-four expected files', () => {
+test('the migrations directory holds exactly the seventy-six expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

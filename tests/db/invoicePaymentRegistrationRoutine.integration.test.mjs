@@ -229,7 +229,7 @@ test.after(async () => {
   const step = async (fn) => { try { await fn(); } catch (err) { failures.push(sealDbError('IRR teardown step', err)); } };
   try {
     await step(() => setWalWriterDelay(null));
-    await step(async () => { if (!(await applied037())) { const r = await trustedApply(); assert.equal(r.outcome, 'complete'); } });
+    await step(async () => { if (!(await applied037())) { const r = await trustedApply('037'); assert.equal(r.outcome, 'complete'); } });
     await step(cleanAll);
     await step(() => owner`delete from tmpos_invoice_payment.payment_proof_key where singleton`);
     if (UIDS.length > 0) {
@@ -294,7 +294,7 @@ const APPLY_REPORT = await setupStep(async () => {
   await owner.unsafe(`revoke temporary on database "${DATABASE}" from public`);
   above037 = await rollBackAbove(owner, MIG_DIR, '037');
   if (await applied037()) await downCommitted(DOWN_037, '037');
-  const report = await trustedApply();
+  const report = await trustedApply('037'); // through 037 only: 038 (M7B-CREDITNOTES-P1) sits above and is restored by rollBackAbove
   await owner.unsafe(`do $$ begin
     if exists (select 1 from pg_catalog.pg_roles where rolname = '${RUNTIME_LOGIN}') then execute 'drop owned by ${RUNTIME_LOGIN}'; end if;
   end $$;`);
@@ -516,7 +516,7 @@ test('IRR-01: 001-037 by the trusted executor, the ledger exactly REQUIRED_MIGRA
   const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
   assert.deepEqual(ledger.map((r) => r.version), Array.from({ length: 37 }, (_, i) => String(i + 1).padStart(3, '0')));
   assert.equal(ledger[36].checksum, SHA_UP_037, '037\'s ledger checksum is the sha256 of its up bytes');
-  assert.deepEqual(ledger.map((r) => [r.version, r.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the startup preflight\'s pinned chain');
+  assert.deepEqual(ledger.map((r) => [r.version, r.checksum]), REQUIRED_MIGRATIONS.slice(0, 37).map((m) => [m.version, m.checksum]), 'the startup preflight\'s pinned chain through 037');
   await owner.unsafe(POSTCONDITION_037);
   const again = await rolledBack((tx) => tx.unsafe(UP_037).simple());
   assert.deepEqual(again, { code: '55000', message: 'migration 037 refused: an object of this file already exists' });
@@ -535,7 +535,7 @@ test('IRR-02: the down while EMPTY restores 036\'s catalog exactly (v1 record EX
                        and a.attname = 'subject_invoice_payment_registration_id' and not a.attisdropped)
       and (select count(*) from pg_catalog.pg_proc p where p.pronamespace = 'tmpos_invoice_payment'::regnamespace) = 9 as g`;
   assert.equal(gone.g, true, 'every 037 object gone, 036\'s nine functions left');
-  const report = await trustedApply();
+  const report = await trustedApply('037');
   assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
   assert.deepEqual(await catalogOf(), before, 're-applied: the same catalog');
   await installProofKey(); // the down removed the installed key with its table

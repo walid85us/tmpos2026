@@ -4,8 +4,8 @@
 // PostgreSQL holding every migration in the directory (001-036), composed exactly as server/entry/tenantMain.ts composes it
 // but for its construction. The route module (server/runtime/invoiceVoid.ts), the chain (its recent sign-in, the store-scope
 // authorizer and revalidator), the tenant command transaction, the void's mutator (server/persistence/postgresInvoiceVoid.ts:
-// ONE call into migration 036's tmpos_invoice_payment.m7b_invoice_void_v2 — 035's void with the payment check (M7B-PAYMENTS-P1;
-// tmpos_app no longer executes 035's own) — then the recent sign-in judged again on the database
+// ONE call into migration 038's tmpos_invoice_payment.m7b_invoice_void_v3 — 036's v2 with the credit-note check, the same locks in the
+// same order (CN-P1; tmpos_app no longer executes 035's own nor 036's v2) — then the recent sign-in judged again on the database
 // clock), the issued reads' adapters over 035's v2 reads, the audit writer's issued-invoice-alone statement and the
 // idempotency kernel are production's own code. Every invoice is issued through the production POST …/issue on a draft saved
 // through the production POST; every store's issuing settings are written by the tenant owner through the production PUT;
@@ -127,8 +127,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const WIRE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 /** 034's o_issued_at encoding (035's voided_at on the wire), bound as a parameter of to_char. */
 const UTC_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
-/** The void routine's statement (036's v2 since M7B-PAYMENTS-P1): where a void waits for the issued header, the role's key or its INSERT's park. */
-const AT_VOID = /tmpos_invoice_payment\.m7b_invoice_void_v2\(/;
+/** The void routine's statement (038's v3 since CN-P1, which takes 036's v2 locks in its order): where a void waits for the issued header, the role's key or its INSERT's park. */
+const AT_VOID = /tmpos_invoice_payment\.m7b_invoice_void_v3\(/;
 const AT_HOLD = /m5_hold_tenant_standing/;
 /** The idempotency kernel's acquisition (006): where a same-key request waits on an in-flight attempt's fence. */
 const AT_ACQUIRE = /m6_idempotency_acquire/;
@@ -332,10 +332,10 @@ async function teardown() {
             'tmpos_invoice_void.issued_invoice_void'::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         voids: 0, void_audits: 0, settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0,
-        customers: 0, anchors: 0, latest: '037',
+        customers: 0, anchors: 0, latest: '038',
         triggers: ['trg_invoice_draft_immutable:A', 'trg_invoice_draft_line_terminal:A', 'trg_invoice_draft_terminal:A', 'trg_issued_invoice_commit_check:A',
           'trg_issued_invoice_guard:A', 'trg_issued_invoice_line_guard:A', 'trg_issued_invoice_line_truncate:A', 'trg_issued_invoice_truncate:A',
-          'trg_issued_invoice_void_guard:A', 'trg_issued_invoice_void_truncate:A',
+          'trg_issued_invoice_void_guard:A', 'trg_issued_invoice_void_truncate:A', 'trg_issued_invoice_void_credit_note_barrier:A', // 038's ALWAYS barrier
           'trg_store_invoice_counter_guard:A', 'trg_store_invoice_counter_truncate:A', 'trg_store_issuing_settings_guard:A', 'trg_store_issuing_settings_truncate:A'].sort().join(','),
       }, 'nothing of this suite blocks 035\'s or 036\'s rollback, and every guard is ALWAYS again');
     });
@@ -392,8 +392,8 @@ function startRelay() {
 }
 /** An applied void's anchor: its audit INSERT (only an applied void writes one). */
 const AUDIT_ANCHOR = Buffer.from('insert into public.audit_event');
-/** The void's one call into 036's v2 (the outage case cuts the connection as it is sent). */
-const VOID_ANCHOR = Buffer.from('tmpos_invoice_payment.m7b_invoice_void_v2(');
+/** The void's one call into 038's v3 (the outage case cuts the connection as it is sent). */
+const VOID_ANCHOR = Buffer.from('tmpos_invoice_payment.m7b_invoice_void_v3(');
 const COMMIT_PARSE = Buffer.from('\0commit\0');
 function trapCommit(relay, mode, anchor) {
   const hit = [];
@@ -2173,11 +2173,14 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
     assert.equal(KEYED_REASON.test(line), false, `${line}: a benign line passes`);
   }
   // The routine-name exemption's own proof: it removes the fixed name token (schema-qualified or bare) and nothing else.
-  const VOID_V2_NAME = /(?<![A-Za-z0-9_])(?:tmpos_invoice_payment\.)?m7b_invoice_void_v2(?![A-Za-z0-9_])/g;
+  // 038 (CN-P1) replaces the routine with v3; both fixed names are exempt, nothing else.
+  const VOID_V2_NAME = /(?<![A-Za-z0-9_])(?:tmpos_invoice_payment\.)?m7b_invoice_void_v[23](?![A-Za-z0-9_])/g;
   assert.equal('STATEMENT:  select * from tmpos_invoice_payment.m7b_invoice_void_v2($1::text, $2::uuid)'.replace(VOID_V2_NAME, '').includes('invoice_void_'), false, 'the call name is exempt');
   assert.equal('PL/pgSQL function m7b_invoice_void_v2(text) line 9'.replace(VOID_V2_NAME, '').includes('invoice_void_'), false, 'the bare name is exempt');
+  assert.equal('STATEMENT:  select * from tmpos_invoice_payment.m7b_invoice_void_v3($1::text, $2::uuid)'.replace(VOID_V2_NAME, '').includes('invoice_void_'), false, 'the v3 call name is exempt');
   for (const line of ['tmpos_invoice_payment.m7b_invoice_void_v2($1) reason_code=invoice_void_other', 'x.m7b_invoice_void_v2x invoice_void_duplicate',
-    'm7b_invoice_void_v2_invoice_void_issued_in_error', 'tmpos_invoice_payment.m7b_invoice_void_v2(invoice_void_wrong_customer)']) {
+    'm7b_invoice_void_v2_invoice_void_issued_in_error', 'tmpos_invoice_payment.m7b_invoice_void_v2(invoice_void_wrong_customer)',
+    'tmpos_invoice_payment.m7b_invoice_void_v3(invoice_void_other)', 'm7b_invoice_void_v4 invoice_void_duplicate', 'm7b_invoice_void_v23']) {
     assert.equal(line.replace(VOID_V2_NAME, '').includes('invoice_void_'), true, `${line}: a reason code beside or inside the name still refuses`);
   }
   assert.ok(ALL_LOG_LINES.length > 0 && SECRETS.size > 0, 'log lines and secrets were actually captured across the suite');
@@ -2198,17 +2201,17 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
   if (cluster !== null) {
     const text = readFileSync(`${cluster.root}/postgres.log`, 'utf8');
     assert.deepEqual(forbidden.filter((v) => text.includes(v)).map((v) => v.slice(0, 6)), [], 'the cluster\'s server log carries no secret');
-    // M7B-PAYMENTS-P1: the void's routine is now tmpos_invoice_payment.m7b_invoice_void_v2 (doc 15 §12.2, a fixed name), which
-    // contains the code prefix 'invoice_void_', and a statement the server logs names it. Exactly that name token is removed
+    // M7B-PAYMENTS-P1/CN-P1: the void's routine is tmpos_invoice_payment.m7b_invoice_void_v2, now v3 (fixed names), which
+    // contain the code prefix 'invoice_void_', and a statement the server logs names one. Exactly those name tokens are removed
     // before the reason checks; every code, label, sentence and keyed reason anywhere else in the log still refuses.
     const reasonScan = text.replace(VOID_V2_NAME, '');
     assert.deepEqual(reasonTexts.filter((v) => reasonScan.includes(v)), [], 'nor a void reason');
     assert.deepEqual(reasonSentences.filter((v) => reasonScan.includes(v)), [], 'nor a void audit sentence');
     assert.equal(KEYED_REASON.test(reasonScan), false, 'nor a keyed void reason');
   }
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 40, 'exactly the 40 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four)');
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 47, 'exactly the 47 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four, M7B-CREDITNOTES-P1 seven)');
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path}`);
-  assert.equal(new Set(served).size, 40, 'no route twice');
+  assert.equal(new Set(served).size, 47, 'no route twice');
   const detail = served.indexOf('GET /api/v1/stores/{storeId}/invoices/{id}');
   assert.ok(detail >= 0, 'the issued detail is served');
   assert.deepEqual(served.slice(detail + 1, detail + 3), ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/void'],

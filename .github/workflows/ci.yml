@@ -597,6 +597,32 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoicePaymentRegistrationHttp.integration.test.mjs
+      # M7B-CREDITNOTES-P1 — migration 038 (credit notes, in its own schema). The four suites run AFTER the payment registration
+      # steps above, which roll 037 (and so 038 above it) back and restore both themselves, and BEFORE the proof-durability and
+      # browser steps. Each suite stands up every migration on the same service, tears down what it wrote (038's down refuses while
+      # credit-note evidence exists) and leaves 038 applied; the smoke, routine and cutover suites roll 038 back and re-apply it
+      # themselves, so they run BEFORE the HTTP suite, which needs 038 applied. Synthetic data and keys made at run time only.
+      # Same binding, no new service, no secret, no permission change.
+      - name: Invoice credit note migration smoke against disposable PostgreSQL (M7B-CREDITNOTES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteMigrationSmoke.integration.test.mjs
+      - name: Invoice credit note routines against disposable PostgreSQL (M7B-CREDITNOTES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteRoutine.integration.test.mjs
+      - name: Invoice credit note cutover against disposable PostgreSQL (M7B-CREDITNOTES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteCutover.integration.test.mjs
+      - name: Invoice credit notes over HTTP against the tenant entry and disposable PostgreSQL (M7B-CREDITNOTES-P1)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteHttp.integration.test.mjs
       # M7B-PAYMENTS-P2 (PRQ-1) — the proof-durability suite: the registration's commit flushed to disk before a proof is issued,
       # measured with pg_walinspect on one 16 MB-segment cluster and one 64 MB-segment cluster. A WAL segment size is fixed by initdb
       # and the harness never reconfigures a supplied target (it refuses a segment size on one), so this step names NO

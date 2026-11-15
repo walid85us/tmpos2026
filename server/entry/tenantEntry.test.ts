@@ -201,7 +201,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 40 frozen tenant routes (36 + M7B-PAYMENTS-P2\'s four)', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 47 frozen tenant routes (36 + M7B-PAYMENTS-P2\'s four + M7B-CREDITNOTES-P1\'s seven)', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -256,8 +256,16 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 40 frozen tenant routes (36 
     { method: 'GET', path: '/api/v1/stores/{storeId}/payment-attempts', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-registrations', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/payment-settlement', access: 'session', body: 'json', idempotency: 'required' },
+    // M7B-CREDITNOTES-P1: the proof, the attempts, the list, the registration, the issue, the settlement and the withdrawal.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'GET', path: '/api/v1/stores/{storeId}/credit-note-attempts', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations', access: 'session', body: 'json', idempotency: 'required' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'json', idempotency: 'required' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement', access: 'session', body: 'json', idempotency: 'required' },
+    { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal', access: 'session', body: 'json', idempotency: 'required' },
   ]);
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 40);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 47);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });
@@ -422,7 +430,8 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
     'o_currency', 'o_line_count', 'o_subtotal_cents', 'o_tax_mode', 'o_tax_rate', 'o_tax_cents', 'o_total_cents', 'o_position', 'o_description', 'o_quantity',
     'o_unit_price_cents', 'o_line_total_cents', 'o_status', 'o_voided_at', 'o_reason_code'])],
   // M7B-PAYMENTS-P1: 036's payments read, refusing an absent key with every other column null.
-  paymentsProbe: [denied(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_applied_cents',
+  // M7B-CREDITNOTES-P1: 038's v2 read, o_credited_cents after o_due_cents.
+  paymentsProbe: [denied(['o_tenant_id', 'o_store_id', 'o_invoice_id', 'o_status', 'o_currency', 'o_total_cents', 'o_due_cents', 'o_credited_cents', 'o_applied_cents',
     'o_remaining_cents', 'o_payment_status', 'o_payment_id', 'o_attempt_id', 'o_amount_cents', 'o_method', 'o_recorded_at', 'o_reversed_at', 'o_reason_code'])],
   storeProbe: [{ ok: true }],
   // M7B-PAYMENTS-P2: 037's key-presence probe — a key installed at generation 1 (never its bytes).
