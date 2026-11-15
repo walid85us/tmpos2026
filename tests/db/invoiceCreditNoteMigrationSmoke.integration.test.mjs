@@ -3,8 +3,9 @@
 //
 //   ICS-01 001-038 by the trusted executor; the down while EMPTY restores 037's and 036's catalog (tmpos_app's EXECUTE on
 //          record v2, void v2 and the payments read, 036's pinned trigger sets); the up applies again.
-//   ICS-02 one store-scope store owner on one invoice: register -> proof (another connection, after COMMIT) -> issue; the
-//          payments read v2 shows the credit; withdraw; the read shows it gone; the down refuses (55000) while evidence exists.
+//   ICS-02 one store-scope store owner on one invoice: register -> proof (another connection, after COMMIT; that connection
+//          resolved the routine before the registration, see ICS-02) -> issue; the payments read v2 shows the credit;
+//          withdraw; the read shows it gone; the down refuses (55000) while evidence exists.
 //
 // DISPOSABLE ONLY, DURABLE (proofs need fsync on). It leaves 001-038 applied and no credit note, registration, session, login
 // or fixture of its own.
@@ -259,6 +260,16 @@ test('ICS-02: register -> proof -> issue -> amounts -> withdraw for one store-sc
   const f = await scene();
   assert.deepEqual(await amounts(f), { o_outcome: 'payments', o_due_cents: String(TOTAL), o_credited_cents: '0', o_applied_cents: '0',
     o_remaining_cents: String(TOTAL), o_payment_status: 'no_payment_recorded' }, 'before: nothing credited');
+  // PRECONDITION: the proving connection runs the proof routine once, for an unregistered id, BEFORE the registration (it can
+  // only answer not_found, asserted). Everything the real call below reads before it samples its WAL target (034's reader, the
+  // key, the registration table, the routine itself) is then resolved and cached on this one-connection pool, so that call
+  // writes no WAL of its own ahead of its target. Without it, the real call was the first lookup of the routine after ICS-01's
+  // 038 down and up, which leave the routine's previous pg_proc row dead on a page that lookup visits: it pruned that page —
+  // xid-less WAL its own transaction wrote before its target, flushed only once it ends (037's documented self-prune, which the
+  // adapter meets with one fresh transaction) — and answered not_durable after its 1,000 ms (CI run 43741302186).
+  const [warm] = await prover.unsafe(`select o_outcome from ${CN}.m7b_invoice_credit_note_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
+    [f.kBoss, f.S, f.invoice, f.T, randomUUID(), 0]);
+  assert.equal(warm.o_outcome, 'not_found', 'the proof routine resolved on the proving connection before the registration');
   const registration = randomUUID();
   const attempt = randomUUID();
   const [reg] = await runtime.unsafe(`select o_outcome, o_registration_id from ${CN}.m7b_invoice_credit_note_register($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::uuid, $7::bigint, $8::text, $9::uuid)`,
@@ -266,7 +277,8 @@ test('ICS-02: register -> proof -> issue -> amounts -> withdraw for one store-sc
   assert.deepEqual({ ...reg }, { o_outcome: 'applied', o_registration_id: registration }, 'registered');
   const [pr] = await prover.unsafe(`select o_outcome, o_attempt_id, o_proof from ${CN}.m7b_invoice_credit_note_registration_proof($1::text, $2::uuid, $3::uuid, $4::uuid, $5::uuid, $6::integer)`,
     [f.kBoss, f.S, f.invoice, f.T, registration, 1000]);
-  assert.equal(pr.o_outcome, 'proof', 'the proof issues for the committed, durable registration');
+  const [wal] = await owner`select pg_catalog.pg_current_wal_insert_lsn()::text as i, pg_catalog.pg_current_wal_flush_lsn()::text as f`;
+  assert.equal(pr.o_outcome, 'proof', `the proof issues for the committed, durable registration (after the call: insert ${wal.i}, flush ${wal.f})`);
   assert.equal(pr.o_attempt_id, attempt);
   assert.ok(/^[0-9a-f]{64}$/.test(pr.o_proof), 'a 64-hex proof (value withheld)');
   const creditNote = randomUUID();
