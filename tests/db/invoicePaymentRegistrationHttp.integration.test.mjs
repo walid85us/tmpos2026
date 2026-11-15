@@ -279,9 +279,9 @@ async function teardown() {
            or subject_invoice_payment_registration_id is not null)::int as payment_audits,
         (select count(*) from public.audit_event where tenant_id = any(${TENANTS}::uuid[]))::int as audits,
         (select max(version) from public.schema_migrations) as latest,
-        pg_catalog.current_setting('wal_writer_delay') as wal_writer_delay`;
-      assert.deepEqual({ ...state }, { registrations: 0, payments: 0, keys: 0, payment_audits: 0, audits: 0, latest: '038', wal_writer_delay: '200ms' },
-        'no registration, payment, proof key or payment audit record anywhere, nothing of this suite left, the WAL writer reset');
+        pg_catalog.current_setting('wal_writer_delay') as wal_writer_delay, pg_catalog.current_setting('autovacuum') as autovacuum`;
+      assert.deepEqual({ ...state }, { registrations: 0, payments: 0, keys: 0, payment_audits: 0, audits: 0, latest: '038', wal_writer_delay: '200ms', autovacuum: 'on' },
+        'no registration, payment, proof key or payment audit record anywhere, nothing of this suite left, the WAL writer and autovacuum reset');
     });
   } finally {
     await step(() => lagger.end({ timeout: 5 }));
@@ -1123,6 +1123,39 @@ async function withSessionTableQuiet(fn) {
   }
 }
 
+/**
+ * Autovacuum held off the WHOLE cluster for `fn`, restored exactly after. A flush-controlled window must have no WAL writer but
+ * the case's own. On a shared database (CI's one service, after every earlier suite) an autovacuum worker analyzes a run of
+ * tables each naptime, each analyze its own transaction with an xid whose synchronous COMMIT flushes all WAL before it. CI run
+ * 43722088580 attempt 2 saw seven other transactions (xids 37374-37380) flush past IRH-11's unrelated insert inside its fresh
+ * attempt, so the routine correctly issued; a CI-ordered local replay under frequent autovacuum reproduced that, and holding
+ * autovacuum off removed it. A reload stops the launcher starting workers, but a running worker keeps going (it re-reads the
+ * setting only between tables), so each one is terminated and this waits, bounded, until none is left; observedProof's samples
+ * then show that none ran in the window.
+ */
+async function withAutovacuumHeld(fn) {
+  const explicitOf = async () => (await owner`select f.setting from pg_catalog.pg_file_settings f
+     where f.name = 'autovacuum' and f.sourcefile like '%/postgresql.auto.conf'`).map((r) => r.setting);
+  const before = await explicitOf();
+  if (before.length > 0 && !/^[A-Za-z0-9_]+$/.test(before.at(-1))) throw new Error('the cluster\'s explicit autovacuum setting is not a plain word');
+  await owner.unsafe('alter system set autovacuum = off');
+  await owner`select pg_catalog.pg_reload_conf()`;
+  try {
+    for (const until = Date.now() + 30_000; ; await delay(20)) {
+      const [{ n }] = await owner`select pg_catalog.count(pg_catalog.pg_terminate_backend(a.pid))::int as n
+        from pg_catalog.pg_stat_activity a where a.backend_type = 'autovacuum worker'`;
+      if (n === 0) break;
+      if (Date.now() >= until) throw new Error('autovacuum workers still running 30 s after autovacuum was held off');
+    }
+    return await fn();
+  } finally {
+    if (before.length === 0) await owner.unsafe('alter system reset autovacuum');
+    else await owner.unsafe(`alter system set autovacuum = '${before.at(-1)}'`);
+    await owner`select pg_catalog.pg_reload_conf()`;
+    assert.deepEqual(await explicitOf(), before, 'the cluster\'s autovacuum setting restored');
+  }
+}
+
 /** Signs `who` in with its session row on a page that padSessionPage can bring to one version above the prune threshold. On a
  * shared database earlier suites' session rows can leave the free-space map pointing the login's insert at a page already below
  * that threshold, which no padding can raise. For that one insert the table's fillfactor is 10, so the insert accepts only a page
@@ -1171,7 +1204,7 @@ async function awaitStandbySnapshot() {
 }
 
 /** A side connection sampling back to back every runtime-login transaction (pid, start, xid, state, whether it runs the proof
- * routine) with the WAL insert and flush positions. `onSample` sees each sample. */
+ * routine) with the WAL insert and flush positions and the number of autovacuum workers. `onSample` sees each sample. */
 async function startPoller(onSample = () => {}) {
   const side = testClient(TARGET, { max: 1, onnotice: () => {} });
   const sample = async () => {
@@ -1179,8 +1212,9 @@ async function startPoller(onSample = () => {}) {
         pg_catalog.pg_current_wal_insert_lsn()::text as ins, pg_catalog.pg_current_wal_flush_lsn()::text as fl,
         coalesce((select pg_catalog.json_agg(pg_catalog.json_build_object('pid', a.pid, 'xs', (extract(epoch from a.xact_start) * 1000)::float8,
             'xid', a.backend_xid::text, 'proof', a.query like '%m7b_invoice_payment_registration_proof%', 'lock', a.wait_event_type = 'Lock'))
-          from pg_catalog.pg_stat_activity a where a.usename = ${RUNTIME_LOGIN} and a.xact_start is not null), '[]'::json) as tx`;
-    return { t: row.t, ins: lsnOf(row.ins), fl: lsnOf(row.fl), tx: row.tx };
+          from pg_catalog.pg_stat_activity a where a.usename = ${RUNTIME_LOGIN} and a.xact_start is not null), '[]'::json) as tx,
+        (select pg_catalog.count(*) from pg_catalog.pg_stat_activity a where a.backend_type = 'autovacuum worker')::int as av`;
+    return { t: row.t, ins: lsnOf(row.ins), fl: lsnOf(row.fl), tx: row.tx, av: row.av };
   };
   for (let i = 0; i < 3; i += 1) await sample(); // the side backend's own first catalog reads, before any window
   const samples = [];
@@ -1267,9 +1301,10 @@ async function gapRecordsOf(from, to) {
  * the prunable page. A quiet WAL window, the poller running; `during(sample, t0)` may act on each sample; `beforeLock()` runs
  * once the page is padded, before the WAL insert position is aligned to a fresh page and the lock is taken. Answers the reply, its
  * elapsed ms, the proof transactions, the stall touch and the flush position when the GET returned (before anything else commits).
+ * Autovacuum is held off the cluster throughout (withAutovacuumHeld) and no sample of the window may see a worker.
  */
 async function observedProof(ctx, s, w, invoice, registration, during = () => {}, beforeLock = async () => {}) {
-  return withSessionTableQuiet(async () => {
+  return withAutovacuumHeld(() => withSessionTableQuiet(async () => {
     await awaitStandbySnapshot();
     const page = await padSessionPage(s.key);
     const [{ validated }] = await owner`select x.validated_at::text as validated from tmpos_session.session x where x.session_key = ${s.key}`
@@ -1328,10 +1363,11 @@ async function observedProof(ctx, s, w, invoice, registration, during = () => {}
     const touched = stall === null ? null : await stall;
     assert.ok(touched !== null && touched.v === 'updated', 'the GET waited in its admission and the stall touch was written');
     assert.ok(touched.after.free < touched.after.minfree, `the stall touch took the page below the prune threshold: ${JSON.stringify(touched.after)}`);
+    assert.equal(samples.filter((x) => x.av > 0).length, 0, 'no autovacuum worker ran in the window (no writer but the case\'s own)');
     return {
       reply, elapsed, page, samples, t0, touched, aligned, from: lsnOf(from), insertAfter: lsnOf(ins), flushAfter: lsnOf(fl), txs: proofTransactionsOf(samples, t0),
     };
-  });
+  }));
 }
 
 /** One evidence line: transaction boundaries, the WAL, status and elapsed ms. */
@@ -1448,12 +1484,22 @@ test('IRH-11: SELF-PRUNE, TARGET UNFLUSHED — the same prune, then an unrelated
     const reason = o.reply.status === 200 ? '-' : ctx.reason(o.reply);
     const line = evidenceLine('IRH-11', { ...o, reason }, records, { unrelated: wrote });
     const prune = assertSelfPrune(o, records, 'IRH-11');
+    // The precondition, established before the answer is judged: the unrelated insert was written before the fresh attempt began
+    // (so that attempt's target is at or past the insert's end), and it stayed unflushed through the whole attempt — a sample
+    // whose flush reading was taken after an earlier sample found the attempt gone is below the insert's end, and the flush only
+    // advances — so no flush could have let that attempt issue; only the refusal can follow.
+    assert.equal(records.scratch.length, 1, 'IRH-11: one unrelated record in the window');
+    const fresh = o.txs[1];
+    assert.ok(fresh !== undefined && wrote !== null && wrote.atMs < fresh.start,
+      `IRH-11: the unrelated insert was written before the fresh attempt began: ${JSON.stringify({ wrote, proofTransactions: line.proofTransactions })}`);
+    const after = o.samples[fresh.last + 2];
+    assert.ok(after !== undefined && after.fl < records.scratch[0].e,
+      `IRH-11: the unrelated WAL stayed unflushed through the fresh attempt: ${JSON.stringify(line.proofTransactions)}`);
     assertRefusal(o.reply, 503, 'service_unavailable', 'IRH-11: the existing bounded retryable 503');
     assert.equal(reason, 'invoice_payment_registration_proof_unavailable', 'IRH-11: the port\'s bounded outage reason');
     assert.ok(o.elapsed < 3000, `IRH-11: within the request deadline: ${o.elapsed} ms`);
     assert.equal(o.txs.length, 2, `IRH-11: exactly two proof transactions: ${JSON.stringify(line.proofTransactions)}`);
     assert.ok(o.txs[0].last < o.txs[1].first, 'IRH-11: the first proof transaction ended before the second began');
-    assert.equal(records.scratch.length, 1, 'IRH-11: one unrelated record in the window');
     assert.match(String(wrote?.xid), /^[1-9][0-9]*$/, 'IRH-11: the unrelated transaction holds an xid');
     assert.ok(records.scratch[0].s >= prune.e && records.scratch[0].e - records.scratch[0].s < 8192n, 'IRH-11: written after the prune, well under one WAL page');
     assert.ok(o.flushAfter < records.scratch[0].e, 'IRH-11: the unrelated WAL was still unflushed when the GET returned');
@@ -1469,8 +1515,11 @@ test('IRH-11: SELF-PRUNE, TARGET UNFLUSHED — the same prune, then an unrelated
   });
 });
 
-/** With the WAL writer slowed, makes it flush once now (an asynchronous commit only it may flush; nothing else commits while
- * this waits), so that for its delay it flushes no later asynchronous commit — a proof transaction's or a revocation's. */
+/** Makes the WAL writer flush once now (an asynchronous commit only it may flush; nothing else commits while this waits). Run at
+ * the default delay, then slow the WAL writer: it flushes again only at a wake at least its new delay after this flush, so for
+ * that long it flushes no later asynchronous commit — a proof transaction's or a revocation's. (Primed while already slowed, the
+ * flush itself could take up to twice the slowed delay: the WAL writer flushes only once its delay has passed since its own
+ * last flush, which a reload or other WAL may have just reset.) */
 async function primeWalWriter() {
   assert.equal((await lagger`select pg_catalog.current_setting('synchronous_commit') as v`)[0].v, 'off');
   await lagger`select pg_catalog.pg_logical_emit_message(true, 'irh-prime', 'x')`;
@@ -1494,7 +1543,6 @@ test('IRH-12: REVALIDATION — the session is revoked (committed asynchronously,
     const before = await counts([w.T]);
     let revoking = null;
     let revoked = null;
-    await setWalWriterDelay('10s');
     let o;
     try {
       o = await observedProof(ctx, s, w, invoice, registration, (sample, t0) => {
@@ -1506,7 +1554,7 @@ test('IRH-12: REVALIDATION — the session is revoked (committed asynchronously,
           const [{ lsn, at }] = await tx`select pg_catalog.pg_current_wal_insert_lsn()::text as lsn, (extract(epoch from pg_catalog.clock_timestamp()) * 1000)::float8 as at`;
           revoked = { v, lsn: lsnOf(lsn), atMs: Math.round(at - t0), proofTransactionStartMs: Math.round(first.xs - t0) };
         }).then(() => { revoked.committedByMs = Math.round(Date.now() - t0); });
-      }, primeWalWriter);
+      }, async () => { await primeWalWriter(); await setWalWriterDelay('10s'); });
     } finally {
       await setWalWriterDelay(null);
     }
