@@ -13,18 +13,22 @@ import { readFileSync } from 'node:fs';
 import { StrictMode } from 'react';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, createEvent, fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, REVERSE_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome } from './ServerIssuedInvoices';
-import { INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
+import { ACTIVITY_TEXT, CREDIT_TEXT, creditNoteHoldsSignIns, ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, REVERSE_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome, type CreditReads } from './ServerIssuedInvoices';
+import { creditNoteIssueBodyOf, creditNoteRegisterBodyOf, settleBodyOf, utcText, INVOICE_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
-import { RECORD_ID_TEXT } from './ServerInvoiceDrafts';
+import { quiet as quietClass, RECORD_ID_TEXT } from './ServerInvoiceDrafts';
 import { TENANT_SESSION_PATHS, createTenantSessionClient, sessionEndsSoFar } from './tenantSessionClient';
 import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpired, voidHolds, type HeldVoid, type VoidHoldStore, type VoidRefusal } from './invoiceVoidHold';
 import type { ShopIdentity } from './ServerCustomerLevels';
 import { createPaymentHoldStore, judgePayment, type HeldPayment, type PaymentHoldStore } from './invoicePaymentHold';
 import { createReversalHoldStore, REVERSAL_NOTE_TEXT, seeReversal, type ReversalHoldStore } from './invoiceReversalHold';
+import {
+  CREDIT_NOTE_FIRST_SEND_MS, CREDIT_NOTE_REPLAY_MS, CREDIT_NOTE_SETTLE_REPLAY_MS, createCreditNoteHoldStore, replayWindowOpen, signInFresh,
+  type CreditNoteHoldStore, type HeldCreditNote,
+} from './invoiceCreditNoteHold';
 import { idEndingText, pickerWaitText } from './ServerCustomerPicker';
 import { sessionSubjectOf } from '../../server/runtime/sessions';
 
@@ -41,7 +45,8 @@ const activeBody = (uid: string, csrfToken: string) => ({ status: 'active', csrf
 interface Sent { readonly method: string; readonly url: string; readonly headers: Headers; readonly body: string | undefined; readonly signal: AbortSignal | null }
 interface User { uid: string; tenant: string; role: 'owner' | 'manager' }
 type View = { storeId: string; version: number; configured: true; legalName: string; storeName: string; postalAddress: string; taxRegistrationId: string | null; tax: { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number } };
-type Kind = 'stores' | 'settings' | 'put' | 'current' | 'list' | 'detail' | 'elig' | 'void' | 'payments' | 'payElig' | 'register' | 'proof' | 'record' | 'settle' | 'attempts';
+type Kind = 'stores' | 'settings' | 'put' | 'current' | 'list' | 'detail' | 'elig' | 'void' | 'payments' | 'payElig' | 'register' | 'proof' | 'record' | 'settle' | 'attempts'
+  | 'cnRegister' | 'cnProof' | 'cnIssue' | 'cnList' | 'cnSettle' | 'cnLookup' | 'activity';
 type TaxWire = { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number };
 type LineWire = { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number };
 /** One issued invoice as the fake stores it (commit B): what the list summarizes and the detail answers. */
@@ -56,7 +61,24 @@ type PaymentWire = { id: string; attemptId: string; amountCents: number; method:
 /** What the next PUTs do: lose the answer after deciding (committed), lose the request, answer a status in the chain's envelope, or a whole answer. */
 type PutScript = 'lose' | 'lose-before' | number | Response;
 type PayScript = PutScript | 'commit-404';
+/** One credit note as the fake keeps it (CN-P2): the list route's item, its names kept and served to the store owner only. */
+type CreditNoteWire = {
+  id: string; invoiceId: string; number: number; grossCents: number; taxCents: number; netCents: number; reason: string; issuedAt: string; issuedByName: string | null;
+  withdrawal: { withdrawnAt: string; reason: string; withdrawnByName: string | null } | null;
+};
+/** One credit-note registration (038) as the lookup lists it and the commands find it: never served with its id or proof but to its own session. */
+type CreditRegWire = {
+  id: string; uid: string; storeId: string; invoiceId: string; number: number; attemptId: string; csrf: string; state: 'open' | 'issued' | 'released' | 'confirmed';
+  registeredAt: string; settledAt: string | null; grossCents: number; reason: string; proof: string; creditNote: { id: string; issuedAt: string; withdrawnAt: string | null } | null;
+};
+type CnRoute = 'register' | 'proof' | 'issue' | 'list' | 'settle' | 'lookup';
+const CN_KIND: Record<CnRoute, Kind> = { register: 'cnRegister', proof: 'cnProof', issue: 'cnIssue', list: 'cnList', settle: 'cnSettle', lookup: 'cnLookup' };
+/** The database clock in 038's form (UTC, microseconds), `i` seconds into a synthetic day: fixed width, so string order is time order. */
+const cnTime = (i: number): string => new Date(Date.UTC(2026, 10, 1) + i * 1000).toISOString().replace('Z', '000Z');
 
+/** Each mount (never a rerender) is a new generation for P2-89 (the only same-token generation change, fix list 6 C). */
+let mountEpoch = 0;
+const render: typeof rtlRender = ((ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof rtlRender>[1]) => { mountEpoch += 1; return rtlRender(ui, options); }) as typeof rtlRender;
 function fakeServer() {
   const users: Record<string, User> = {
     'tok-a': { uid: 'uid-a', tenant: TENANT_A, role: 'owner' }, 'tok-m': { uid: 'uid-m', tenant: TENANT_A, role: 'manager' }, 'tok-b': { uid: 'uid-b', tenant: TENANT_B, role: 'owner' },
@@ -90,7 +112,8 @@ function fakeServer() {
     loginStatus: [] as number[], // what the next logins answer instead (in the chain's envelope): nothing is signed in
     retryAfter: null as string | null,
     staleLogins: false, // a plain login's sign-in is older than the recent-auth window (a reauthentication's never is)
-    hold: { stores: 0, settings: 0, put: 0, current: 0, list: 0, detail: 0, elig: 0, void: 0, payments: 0, payElig: 0, register: 0, proof: 0, record: 0, settle: 0, attempts: 0 } as Record<Kind, number>,
+    hold: { stores: 0, settings: 0, put: 0, current: 0, list: 0, detail: 0, elig: 0, void: 0, payments: 0, payElig: 0, register: 0, proof: 0, record: 0, settle: 0, attempts: 0,
+      cnRegister: 0, cnProof: 0, cnIssue: 0, cnList: 0, cnSettle: 0, cnLookup: 0, activity: 0 } as Record<Kind, number>,
     // M7B-PAYMENTS-P2A: the payments read as server/runtime/invoicePayments.ts answers it — the amounts and word over the
     // whole history (due the Total while issued, 0 once voided), pages of 50 oldest first, the cursor the last id of a full page.
     payments: new Map<string, PaymentWire[]>(), // invoice -> its payments, oldest first
@@ -130,6 +153,69 @@ function fakeServer() {
       return server.sent.filter((r) => (r.method === 'POST' && /\/(payment-registrations|payments|payment-settlement)$/.test(r.url))
         || (r.method === 'GET' && /\/(payment-eligibility|payment-registration-proof\?|payment-attempts)/.test(r.url)))
         .filter((r) => route === undefined || (route === 'payments' ? r.method === 'POST' && r.url.endsWith('/payments') : r.url.includes(`/${route}`) && (route !== 'payment-registrations' || r.url.endsWith(route))));
+    },
+    // M7B-CREDITNOTES-CN-P2 (doc 17 §5 support F): the six credit-note routes CN-P2 uses — never the withdrawal — as
+    // server/runtime/invoiceCreditNotes.ts and 038 answer them: register and issue session-bound and recent-sign-in only,
+    // a key ledger by key, store and exact bytes (a replay answers the stored response with Idempotent-Replayed), sealed 409s
+    // exactly `{ error }`, the proof of the registering session only, the settlement's `unchanged`, the caller's own
+    // attempts and the invoice's notes in pages of 50 with their cursors. Defaults: the lookup 403 (nobody in `cnOwners`)
+    // and an empty list, so the older describes keep their control inventories.
+    creditNotes: new Map<string, CreditNoteWire[]>(), // invoice -> its notes (served by issuedAt, then id)
+    cnRegs: [] as CreditRegWire[],
+    /** Who holds the store-owner credit-note keys (opt-in): an owner at a writable store; everyone else's lookup is 403. */
+    cnOwners: new Set<string>(),
+    /** Users whose list pages carry no names (a demotion the session read cannot show). */
+    cnNamesHidden: new Set<string>(),
+    /** The staff names the list shows the owner (null: never set). */
+    cnNames: { 'uid-a': 'Ada Owner', 'uid-m': 'Max Manager' } as Record<string, string | null>,
+    /** What the next requests of each route do: a status in the chain's envelope after the session (and, for commands, the chain), a whole answer, 'lose' (decide, then lose the answer), 'lose-before', 'commit-404'. */
+    cnScripts: { register: [], proof: [], issue: [], list: [], settle: [], lookup: [] } as Record<CnRoute, PayScript[]>,
+    cnPage: 50,
+    cnAttemptsPage: 50,
+    cnBodyViolations: [] as string[],
+    cnClock: 0,
+    cnNumber: 0,
+    /** The database clock's next instant (after every seeded one). */
+    cnTick(): string { server.cnClock += 1; return cnTime(100_000 + server.cnClock); },
+    mayCredit(user: User, storeId: string): boolean {
+      const entry = server.stores[user.uid]?.find((s) => s.id === storeId);
+      return entry !== undefined && !entry.readOnly && user.role === 'owner' && server.cnOwners.has(user.uid);
+    },
+    /** `count` notes on `invoiceId`, numbered on from the store's last, a second apart from `at` (the payments read's credited amount is left as it is). */
+    addCreditNotes(invoiceId: string, count: number, over: (i: number) => Partial<CreditNoteWire> = () => ({}), at = 0): CreditNoteWire[] {
+      const made = Array.from({ length: count }, (_, i): CreditNoteWire => {
+        server.cnNumber += 1;
+        return { id: uuid(0xc000 + server.cnNumber), invoiceId, number: server.cnNumber, grossCents: 100, taxCents: 8, netCents: 92, reason: 'goodwill', issuedAt: cnTime(at + i), issuedByName: 'Ada Owner', withdrawal: null, ...over(i) };
+      });
+      server.creditNotes.set(invoiceId, [...(server.creditNotes.get(invoiceId) ?? []), ...made]);
+      return made;
+    },
+    /** One registration of `uid` (an open one, registered now, unless `over` says otherwise). */
+    addCreditReg(over: Partial<CreditRegWire> & { invoiceId: string }): CreditRegWire {
+      const g: CreditRegWire = {
+        id: uuid(0x7e000 + server.cnRegs.length + 1), uid: 'uid-a', storeId: STORE_1, number: 1, attemptId: uuid(0x6e000 + server.cnRegs.length + 1), csrf: '', state: 'open',
+        registeredAt: server.cnTick(), settledAt: null, grossCents: 100, reason: 'goodwill', proof: randomBytes(32).toString('hex'), creditNote: null, ...over,
+      };
+      server.cnRegs.push(g);
+      return g;
+    },
+    // Doc 18: the store-wide credit activity (GET /api/v1/stores/{id}/credit-notes, no invoice segment) as the route and
+    // 039 answer it under D-CA-1 A: the store owner with the credit-note keys at a writable store (mayCredit) gets every
+    // note of the store's issued invoices, newest number first, 50 a page, `nextCursor` the 50th id only when a 51st
+    // exists; everyone else 403. Scripts answer after the chain (a status in its envelope, or a whole answer).
+    activityScripts: [] as Array<number | Response>,
+    activityPage: 50,
+    /** The activity reads that reached the fake, as sent (the store-wide path only: never an invoice's list). */
+    activityReads(): Sent[] { return server.sent.filter((r) => /^\/api\/v1\/stores\/[^/]+\/credit-notes(\?|$)/.test(r.url)); },
+    /** The credit-note requests that reached the fake, as sent (one route's when given; never the store-wide activity). */
+    cnRequests(route?: CnRoute): Sent[] {
+      return server.sent.filter((r) => {
+        const at = /\/(credit-note-registrations|credit-note-registration-proof|credit-notes|credit-note-settlement|credit-note-attempts)(\?|$)/.exec(r.url);
+        if (at === null || /^\/api\/v1\/stores\/[^/]+\/credit-notes(\?|$)/.test(r.url)) return false;
+        const named: CnRoute = at[1] === 'credit-note-registrations' ? 'register' : at[1] === 'credit-note-registration-proof' ? 'proof' : at[1] === 'credit-note-settlement' ? 'settle'
+          : at[1] === 'credit-note-attempts' ? 'lookup' : r.method === 'POST' ? 'issue' : 'list';
+        return route === undefined || route === named;
+      });
     },
     /** Whether `user` may void at `storeId` now: the stored levels (an owner's by default) and a writable store. */
     mayVoid(user: User, storeId: string): boolean {
@@ -171,7 +257,25 @@ function fakeServer() {
       }
       return answer();
     },
+    /** P2-89's request log: the credit-note lookup, issue and settlement answers (status and body text), by the request sent. */
+    cnAnswers: new Map<Sent, { readonly status: number; readonly text: string }>(),
+    /** Per request: the mount it was sent from (the generation, fix list 6 C) and, once answered, `sent.length` at delivery. */
+    cnMeta: new Map<Sent, { readonly epoch: number; answeredAt: number | null }>(),
     fetch: (async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+      const at = server.sent.length;
+      const epoch = mountEpoch;
+      const pending = server.serve(input, init);
+      const sent = server.sent[at];
+      const meta = { epoch, answeredAt: null as number | null };
+      if (sent !== undefined) server.cnMeta.set(sent, meta);
+      const answer = await pending;
+      if (sent !== undefined && /\/(credit-note-attempts|credit-notes|credit-note-settlement)(\?|$)/.test(sent.url) && (sent.method === 'POST' || sent.url.includes('credit-note-attempts'))) {
+        server.cnAnswers.set(sent, { status: answer.status, text: await answer.clone().text() });
+      }
+      meta.answeredAt = server.sent.length; // delivered to the page now: evidence only for what is sent after this
+      return answer;
+    }) as typeof globalThis.fetch,
+    serve: (async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
       const method = init.method ?? 'GET';
       const url = String(input);
       const headers = new Headers(init.headers);
@@ -397,6 +501,160 @@ function fakeServer() {
         if (script === 'commit-404') { decide(); return refuse(404, 'not_found'); } // committed, answered as a scope miss
         return server.maybeHold(kind, url, decide);
       }
+      const activityPath = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/credit-notes(?:\?(.*))?$/.exec(url);
+      if (activityPath !== null) {
+        if (method !== 'GET') return refuse(404);
+        return server.maybeHold('activity', url, () => {
+          const refused = gate();
+          if (refused !== null) return refused;
+          const [, storeId, query] = activityPath;
+          if (!server.mayCredit(session!.user, storeId)) return refuse(403, 'forbidden'); // authorization: the owner rule (PERM:563-565)
+          const scripted = server.activityScripts.shift();
+          if (scripted !== undefined) return typeof scripted === 'number' ? refuse(scripted) : scripted;
+          const q = query === undefined ? null : /^after=([0-9a-f-]{36})$/.exec(query);
+          if (query !== undefined && q === null) return refuse(400, 'invalid_request');
+          const invoices = server.issued.get(storeId) ?? [];
+          const all = invoices.flatMap((i) => (server.creditNotes.get(i.id) ?? []).map((c) => ({ c, invoiceNumber: i.number }))).sort((a, b) => b.c.number - a.c.number);
+          const start = q === null ? 0 : all.findIndex((x) => x.c.id === q[1]) + 1;
+          if (q !== null && start === 0) return refuse(400, 'invalid_request'); // cursor_unknown
+          const page = all.slice(start, start + server.activityPage);
+          return reply(200, {
+            store: { id: storeId },
+            creditNotes: page.map(({ c, invoiceNumber }) => ({
+              id: c.id, number: c.number, invoiceId: c.invoiceId, invoiceNumber, grossCents: c.grossCents, reason: c.reason, issuedAt: c.issuedAt, issuedByName: c.issuedByName,
+              withdrawal: c.withdrawal === null ? null : { withdrawnAt: c.withdrawal.withdrawnAt, reason: c.withdrawal.reason, withdrawnByName: c.withdrawal.withdrawnByName },
+            })),
+            nextCursor: start + server.activityPage < all.length && page.length > 0 ? page[page.length - 1].id : null,
+          });
+        });
+      }
+      // M7B-CREDITNOTES-CN-P2: the credit-note routes (support F above).
+      const cnLookup =/^\/api\/v1\/stores\/([0-9a-f-]{36})\/credit-note-attempts(?:\?(.*))?$/.exec(url);
+      const cnRoute = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices\/([0-9a-f-]{36})\/(credit-note-registrations|credit-note-registration-proof|credit-notes|credit-note-settlement)(?:\?(.*))?$/.exec(url);
+      if ((cnLookup !== null && method === 'GET') || cnRoute !== null) {
+        const storeId = (cnLookup ?? cnRoute)![1];
+        const invoiceId = cnRoute?.[2] ?? '';
+        const query = (cnLookup ?? cnRoute)![cnLookup !== null ? 2 : 4];
+        const at = cnRoute?.[3];
+        const route: CnRoute = cnLookup !== null ? 'lookup' : at === 'credit-note-registrations' ? 'register' : at === 'credit-note-registration-proof' ? 'proof'
+          : at === 'credit-note-settlement' ? 'settle' : method === 'GET' ? 'list' : 'issue';
+        if ((route === 'proof' || route === 'list' || route === 'lookup') !== (method === 'GET')) return refuse(404);
+        const script = server.cnScripts[route].shift();
+        if (script === 'lose-before') throw new TypeError('network');
+        // The chain first: the session and its token (every route is session-bound or an unsafe method), the intent header,
+        // the route's authority (the list: any reader of issued invoices; the rest: the store owner's keys), then a register's
+        // or an issue's recent sign-in — all before any key.
+        const chain = (): Response | null => {
+          const refused = gate();
+          if (refused !== null) return refused;
+          if (method === 'POST' && headers.get('x-tmpos-csrf') !== '1') return refuse(403, 'forbidden');
+          const user = session!.user;
+          if (route === 'list' ? server.issuedDenied.has(user.uid) || !server.stores[user.uid]?.some((s) => s.id === storeId) : !server.mayCredit(user, storeId)) return refuse(403, 'forbidden');
+          if ((route === 'register' || route === 'issue') && !session!.fresh) return refuse(403, 'step_up_required');
+          return null;
+        };
+        if (typeof script === 'number') return server.maybeHold(CN_KIND[route], url, () => chain() ?? refuse(script));
+        if (script instanceof Response) return server.maybeHold(CN_KIND[route], url, () => chain() ?? script);
+        const decide = (): Response => {
+          const refused = chain();
+          if (refused !== null) return refused;
+          const uid = session!.user.uid;
+          const found = server.issued.get(storeId)?.find((i) => i.id === invoiceId);
+          if (route === 'lookup') {
+            const q = query === undefined ? null : /^after=([0-9a-f-]{36})\.([0-9a-f-]{36})$/.exec(query);
+            if (query !== undefined && q === null) return refuse(400, 'invalid_request');
+            const own = server.cnRegs.filter((g) => g.uid === uid && g.storeId === storeId)
+              .sort((a, b) => (a.registeredAt < b.registeredAt ? -1 : a.registeredAt > b.registeredAt ? 1 : a.invoiceId < b.invoiceId ? -1 : a.invoiceId > b.invoiceId ? 1 : a.attemptId < b.attemptId ? -1 : 1));
+            const start = q === null ? 0 : own.findIndex((g) => g.invoiceId === q[1] && g.attemptId === q[2]) + 1;
+            if (q !== null && start === 0) return refuse(400, 'invalid_request'); // not one of the caller's rows
+            const page = own.slice(start, start + server.cnAttemptsPage);
+            const last = page[page.length - 1];
+            return reply(200, {
+              attempts: page.map((g) => ({
+                invoiceId: g.invoiceId, invoiceNumber: g.number, attemptId: g.attemptId, state: g.state, version: g.state === 'open' ? 1 : g.state === 'issued' ? 2 : 3,
+                registeredAt: g.registeredAt, settledAt: g.settledAt, grossCents: g.grossCents, reason: g.reason, creditNote: g.creditNote,
+              })),
+              nextCursor: start + server.cnAttemptsPage < own.length && last !== undefined ? `${last.invoiceId}.${last.attemptId}` : null,
+            });
+          }
+          if (route === 'list') {
+            if (found === undefined) return refuse(404, 'not_found');
+            const q = query === undefined ? null : /^after=([0-9a-f-]{36})$/.exec(query);
+            if (query !== undefined && q === null) return refuse(400, 'invalid_request');
+            const all = [...(server.creditNotes.get(invoiceId) ?? [])].sort((a, b) => (a.issuedAt < b.issuedAt ? -1 : a.issuedAt > b.issuedAt ? 1 : a.id < b.id ? -1 : 1));
+            const start = q === null ? 0 : all.findIndex((c) => c.id === q[1]) + 1;
+            if (q !== null && start === 0) return refuse(400, 'invalid_request'); // not a note of this invoice
+            const page = all.slice(start, start + server.cnPage);
+            // Names only for the store owner (038 :1923-1925): both keys present, a string or null; else both absent.
+            const named = session!.user.role === 'owner' && !server.cnNamesHidden.has(uid);
+            return reply(200, {
+              invoice: { id: invoiceId },
+              creditNotes: page.map((c) => ({
+                id: c.id, number: c.number, grossCents: c.grossCents, taxCents: c.taxCents, netCents: c.netCents, reason: c.reason, issuedAt: c.issuedAt,
+                ...(named ? { issuedByName: c.issuedByName } : {}),
+                withdrawal: c.withdrawal === null ? null : { withdrawnAt: c.withdrawal.withdrawnAt, reason: c.withdrawal.reason, ...(named ? { withdrawnByName: c.withdrawal.withdrawnByName } : {}) },
+              })),
+              nextCursor: start + server.cnPage < all.length && page.length > 0 ? page[page.length - 1].id : null,
+            });
+          }
+          if (route === 'proof') {
+            const q = /^registration=([0-9a-f-]{36})$/.exec(query ?? '');
+            if (q === null) return refuse(400, 'invalid_request');
+            // Open, this caller's, on this invoice, made in THIS session (038: every other case is the same 404).
+            const g = server.cnRegs.find((r) => r.id === q[1] && r.uid === uid && r.invoiceId === invoiceId && r.state === 'open' && r.csrf === session!.csrf);
+            return g === undefined ? refuse(404, 'not_found') : reply(200, { registration: { id: g.id, invoiceId, attemptId: g.attemptId }, proof: g.proof });
+          }
+          if (query !== undefined) return refuse(400, 'invalid_request');
+          const key = headers.get('idempotency-key') ?? '';
+          const bound = route === 'settle' ? '' : session!.csrf; // register and issue bind the session into the fingerprint; the settlement does not
+          const fingerprint = `${uid}\ncn-${route}\n${storeId}\n${invoiceId}\n${bound}\n${body}`;
+          const known = server.keys.get(key);
+          if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+          if (known !== undefined) return reply(known.status, known.body, { 'idempotent-replayed': 'true' });
+          const parsed = JSON.parse(body ?? '{}') as Record<string, unknown>;
+          const order = { register: 'expectedTenant,attemptId,grossCents,reason', issue: 'expectedTenant,registrationId,attemptId,grossCents,reason,registrationProof', settle: 'expectedTenant,attemptId,expectedVersion' }[route];
+          if (Object.keys(parsed).join(',') !== order) server.cnBodyViolations.push(route);
+          const entry = server.stores[uid]?.find((s) => s.id === storeId);
+          if (entry === undefined || parsed.expectedTenant !== entry.tenantId) return refuse(409, 'write_conflict'); // unsealed: nothing stored
+          if (found === undefined) return refuse(404, 'not_found');
+          const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, status, body: sealed }); return reply(status, sealed); };
+          const mine = server.cnRegs.filter((r) => r.uid === uid && r.invoiceId === invoiceId);
+          const own = mine.find((r) => r.attemptId === parsed.attemptId);
+          if (route === 'register') {
+            if (own?.creditNote != null) return seal(409, { error: 'already_issued' });
+            if (mine.some((r) => r.state === 'open' || r.state === 'issued')) return seal(409, { error: 'write_conflict' }); // the slot rule
+            if (own !== undefined || found.void !== undefined) return seal(409, { error: 'invalid_state' });
+            const g = server.addCreditReg({ uid, storeId, invoiceId, number: found.number, attemptId: parsed.attemptId as string, csrf: session!.csrf, grossCents: parsed.grossCents as number, reason: parsed.reason as string });
+            return seal(201, { registration: { id: g.id, invoiceId, attemptId: g.attemptId, grossCents: g.grossCents, reason: g.reason, state: 'open' } });
+          }
+          if (route === 'issue') {
+            if (own === undefined || own.id !== parsed.registrationId || own.csrf !== session!.csrf || parsed.registrationProof !== own.proof) return refuse(404, 'not_found');
+            if (own.creditNote !== null) return seal(409, { error: 'already_issued' });
+            if (own.state === 'released') return seal(409, { error: 'invalid_state' });
+            if (parsed.grossCents !== own.grossCents || parsed.reason !== own.reason) return seal(409, { error: 'write_conflict' });
+            if (found.void !== undefined) return seal(409, { error: 'invalid_state' });
+            const due = amountsFor(subtotalOf(found), found.tax).totalCents;
+            const applied = (server.payments.get(invoiceId) ?? []).reduce((n, p) => n + (p.reversal === null ? p.amountCents : 0), 0);
+            const credited = server.credits.get(invoiceId) ?? 0;
+            if (credited + applied + own.grossCents > due) return seal(409, { error: 'amount_exceeds_remaining' });
+            const [note] = server.addCreditNotes(invoiceId, 1, () => ({ grossCents: own.grossCents, taxCents: 0, netCents: own.grossCents, reason: own.reason, issuedAt: server.cnTick(), issuedByName: server.cnNames[uid] ?? null }));
+            server.credits.set(invoiceId, credited + own.grossCents);
+            own.state = 'issued';
+            own.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+            return seal(201, { creditNote: { id: note.id, invoiceId, attemptId: own.attemptId, grossCents: own.grossCents, reason: own.reason } });
+          }
+          if (own === undefined) return refuse(404, 'not_found');
+          const want = parsed.expectedVersion === 1 ? 'released' : 'confirmed';
+          if (own.state === want) return seal(200, { settlement: { invoiceId, attemptId: own.attemptId, state: want } }); // `unchanged`: the same 200
+          if (own.state !== (want === 'released' ? 'open' : 'issued')) return seal(409, { error: 'write_conflict' });
+          own.state = want;
+          own.settledAt = server.cnTick();
+          return seal(200, { settlement: { invoiceId, attemptId: own.attemptId, state: want } });
+        };
+        if (script === 'lose') { decide(); throw new TypeError('network'); } // committed (or read), but the answer is lost
+        if (script === 'commit-404') { decide(); return refuse(404, 'not_found'); }
+        return server.maybeHold(CN_KIND[route], url, decide);
+      }
       const settingsPath = /^\/api\/v1\/issuing-settings\/([0-9a-f-]{36})$/.exec(url);
       if (settingsPath === null) return refuse(404);
       const storeId = settingsPath[1];
@@ -450,6 +708,11 @@ function fakeServer() {
 type Server = ReturnType<typeof fakeServer>;
 
 /** The server's continuation for a page ending at `id` (invoiceIssuing.ts encodeIssuedInvoiceCursor). */
+/** DIS-16 (doc 17 D-P2-4, Appendix A): the ONLY button names inside Payments that may say "credit"; none may say "withdraw" (CN-P3). */
+const CREDIT_BUTTON_NAMES: readonly string[] = ['Issue credit note', 'Issue another credit note', 'Confirm credit note'];
+/** Every button in `section` named /credit|withdraw/i that is not one of those three exact names. */
+const creditNamedOutside = (section: HTMLElement): string[] =>
+  within(section).queryAllByRole('button', { name: /credit|withdraw/i }).map((b) => b.textContent ?? '').filter((name) => !CREDIT_BUTTON_NAMES.includes(name));
 const cursorOf = (id: string): string => Buffer.concat([Buffer.from([0x04]), Buffer.from(id.replace(/-/g, ''), 'hex')]).toString('base64url');
 /** The amounts a subtotal derives under a tax setting (doc 12 §10.8, BigInt), as the wire shows them. */
 function amountsFor(subtotal: number, tax: TaxWire) {
@@ -505,15 +768,18 @@ const issueAt = (server: Server, storeId: string, count: number, over: (n: numbe
 };
 
 const store = (id: string, name: string | null, readOnly = false, tenantId = TENANT_A): StoreEntry => ({ id, tenantId, name, readOnly });
+/** Every fake made since the current test began (a test may make several): the P2-89 checker reads each one's log. */
+const madeServers: Server[] = [];
 function seeded() {
   const server = fakeServer();
+  madeServers.push(server);
   server.stores['uid-a'] = [store(STORE_RO, 'Kiosk', true), store(STORE_1, 'Main Street'), store(STORE_2, null)];
   server.stores['uid-m'] = [store(STORE_1, 'Main Street')];
   server.stores['uid-b'] = [store(uuid(0x61), 'B Store', false, TENANT_B)];
   return server;
 }
 
-interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; revHolds: ReversalHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
+interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; revHolds: ReversalHoldStore; cnHolds: CreditNoteHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
 function rig(server: Server): Rig {
   const keys: string[] = [];
   const reauth: Array<string | null> = [];
@@ -526,15 +792,18 @@ function rig(server: Server): Rig {
   const holds = createVoidHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const payHolds = createPaymentHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const revHolds = createReversalHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
+  const cnHolds = createCreditNoteHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const identity: ShopIdentity = {
     idToken: async (uid) => tokens[uid] ?? null,
     reauthMethod: () => 'password',
     reauthenticate: async (uid, password) => { reauth.push(password); return password === 'correct horse' ? tokens[uid] ?? null : null; },
   };
   return {
-    keys, clock, reauth, holds, payHolds, revHolds,
+    keys, clock, reauth, holds, payHolds, revHolds, cnHolds,
     props: (over = {}) => ({
-      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds, reversalHolds: revHolds,
+      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds, reversalHolds: revHolds, creditNoteHolds: cnHolds,
+      // Doc 18's activity read is opt-in here: the older describes' request logs and scripted session answers stay as written.
+      creditActivity: false,
       newKey: () => { const k = ['5e1f0000', '1d2f', '4a6b', '9c8d', String(keys.length + 1).padStart(12, '0')].join('-'); keys.push(k); return k; },
       ...over,
     }),
@@ -589,12 +858,79 @@ const chain = (status: number, error: string, headers: Record<string, string> = 
 /** The texts a control's aria-describedby names, joined. */
 const describedBy = (testId: string): string =>
   (tid(testId).getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+/**
+ * Fix list 5, C (doc 17 §5 P2-89, layer C, request log): every FIRST settlement send follows a lookup read, under the same
+ * session token, that listed that attempt in the state its version acts on (open for Release, issued for Confirm) — except
+ * a Confirm after that attempt's own issue 201 under the same token; every settlement replay (same key) resends the first
+ * send's exact bytes. Bytes are compared as booleans, never printed. Returns the first sends it checked.
+ */
+function checkP289(server: Server): number {
+  const log = server.sent;
+  const token = (r: Sent) => r.headers.get('x-tmpos-session-csrf');
+  const epochOf = (r: Sent) => server.cnMeta.get(r)?.epoch ?? -1;
+  // Answered (delivered to the page) before the request at index `i` was sent.
+  const deliveredBefore = (q: Sent, i: number) => { const at = server.cnMeta.get(q)?.answeredAt; return at !== null && at !== undefined && at <= i; };
+  const isSettle = (r: Sent) => r.method === 'POST' && /\/credit-note-settlement$/.test(r.url);
+  const attemptOf = (r: Sent): string | undefined => { try { return (JSON.parse(r.body ?? '{}') as { attemptId?: string }).attemptId; } catch { return undefined; } };
+  const first = new Map<string, Sent>();
+  let checked = 0;
+  log.forEach((r, i) => {
+    if (!isSettle(r)) return;
+    const key = r.headers.get('idempotency-key') ?? '';
+    const was = first.get(key);
+    if (was !== undefined) { expect(was.body === r.body, `P2-89: settlement ${i} replays its key with the held bytes`).toBe(true); return; }
+    first.set(key, r);
+    checked += 1;
+    const { attemptId, expectedVersion } = JSON.parse(r.body ?? '{}') as { attemptId?: string; expectedVersion?: number };
+    const invoiceId = /\/invoices\/([^/]+)\/credit-note-settlement$/.exec(r.url)?.[1];
+    // Evidence: same token AND same mount (generation), its answer delivered before this send.
+    const before = log.slice(0, i).filter((q) => token(q) === token(r) && epochOf(q) === epochOf(r) && deliveredBefore(q, i));
+    const own201 = expectedVersion === 2 && before.some((q) => q.method === 'POST' && /\/credit-notes$/.test(q.url)
+      && attemptOf(q) === attemptId && server.cnAnswers.get(q)?.status === 201);
+    if (own201) return;
+    const want = expectedVersion === 2 ? 'issued' : 'open';
+    type Page = { readonly q: Sent; readonly rows: Array<{ attemptId: string; invoiceId: string; state: string }>; readonly next: string | null };
+    const pages: Page[] = before.flatMap((q) => {
+      const a = server.cnAnswers.get(q);
+      if (q.method !== 'GET' || !q.url.includes('/credit-note-attempts') || a?.status !== 200) return [];
+      const body = JSON.parse(a.text) as { attempts?: Page['rows']; nextCursor?: string | null };
+      return [{ q, rows: body.attempts ?? [], next: body.nextCursor ?? null }];
+    }); // in SEND order (fix list 7, CX6-01): reads are latest-request sequenced, so a late answer of an earlier read never decides
+    const lists = (p: Page) => p.rows.find((x) => x.attemptId === attemptId && x.invoiceId === invoiceId);
+    const last = [...pages].reverse().find(lists);
+    expect(last !== undefined, `P2-89: first settlement ${i} (version ${expectedVersion}) follows a lookup that listed its attempt, same token and mount`).toBe(true);
+    if (last === undefined) return;
+    expect(lists(last)?.state, `P2-89: the last lookup before settlement ${i} lists its attempt ${want}`).toBe(want);
+    // A complete scan (page one to nextCursor null) answered after that page and before the send that omits the attempt.
+    const after = pages.slice(pages.indexOf(last) + 1);
+    let scan: Page[] | null = null;
+    for (const p of after) {
+      if (!p.q.url.includes('?')) scan = [];
+      if (scan === null) continue;
+      scan.push(p);
+      if (p.next === null) {
+        expect(scan.some(lists), `P2-89: a complete lookup after the backing one omits settlement ${i}'s attempt`).toBe(true);
+        scan = null;
+      }
+    }
+  });
+  return checked;
+}
+/** How far the P2-89 checker reached: tests with a settlement first send, and those sends. */
+const p289 = { tests: 0, sends: 0 };
+function afterEachP289(): void {
+  const sends = madeServers.reduce((n, x) => n + checkP289(x), 0);
+  if (sends > 0) { p289.tests += 1; p289.sends += sends; }
+  madeServers.length = 0;
+}
+
 /** What the fake recorded from index `from` on, as "METHOD url". */
 const sentFrom = (server: Server, from: number): string[] => server.sent.slice(from).map((s) => `${s.method} ${s.url}`);
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  madeServers.length = 0;
   vi.restoreAllMocks();
 });
 
@@ -1227,7 +1563,8 @@ describe('Issued invoices — an unconfirmed settings write (M7B-INVOICES-ISSUE-
     expect(document.body.innerHTML).not.toContain('s'.repeat(40));
     expect(document.body.innerHTML).not.toContain(r.keys[0]);
     expect(document.body.innerHTML).not.toContain('expectedVersion');
-    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts']) { // the held void (VOID-P2) and payment (P2B) attempts too
+    // The held void (VOID-P2), payment (P2B) and reversal (P2C) attempts too, and (CN-P2, P2-49) the held credit-note attempt.
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceIssuingClient.ts', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts', 'invoiceCreditNoteHold.ts']) {
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
     }
@@ -3219,9 +3556,11 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
         await settle();
         // In order (R1 T10): the fresh check, then ONE session check the two reads started together share, the payments GET
         // and the payment eligibility GET — and (M7B-PAYMENTS-P2C R1) the open's ONE reversal eligibility GET after it.
+        // CN-P2 (doc 17 §4.1): the open's credit-note list GET shares that check too; the lookup is not asked again here (its
+        // 403 was confirmed earlier in this generation and token, §2.2).
         expect(sentFrom(server, at + 1)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${TENANT_SESSION_PATHS.current}`,
-          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payments`, `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-eligibility`,
-          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-reversal-eligibility`]);
+          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payments`, `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/credit-notes`,
+          `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-eligibility`, `GET ${STORES_PATH}/${STORE_1}/invoices/${made[2].id}/payment-reversal-eligibility`]);
       }
       server.voidDenied.delete('uid-a');
       await closeAll();
@@ -3955,7 +4294,9 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     await click('issued-void-reauth-confirm');
     await waitFor(() => expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed));
     expect(server.logins().slice(logins).map((x) => x.headers.get('x-tmpos-reauthenticate'))).toEqual(['1']);
-    expect(apart(server, mark).sort()).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort());
+    // CN-P2 (doc 17 §3.6 rule 3): the kept dialog's credit-note list and lookup are read again from page one under the new token.
+    expect(apart(server, mark).sort()).toEqual([`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`,
+      `GET ${detailUrl(STORE_1, made[1].id)}/credit-notes`, `GET ${STORES_PATH}/${STORE_1}/credit-note-attempts`].sort());
     expect(tid('issued-view')).toBeInTheDocument();
     expect(radios().map((x) => x.checked)).toEqual([false, false, false, false, false, false]);
     await waitFor(() => expect(document.activeElement).toBe(tid('issued-void-reason-issued_in_error')));
@@ -4053,7 +4394,7 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
     expect(replace).not.toHaveBeenCalled();
     for (const spy of consoles) expect(spy).not.toHaveBeenCalled();
     expect(window.location.href).toBe(href);
-    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts']) {
+    for (const file of ['ServerIssuedInvoices.tsx', 'invoiceVoidHold.ts', 'invoicePaymentHold.ts', 'invoiceReversalHold.ts', 'invoiceCreditNoteHold.ts']) { // CN-P2, P2-49: the credit-note hold too
       const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), file), 'utf8');
       expect(source, file).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|history\.|location\.(href|search|hash)|from '[^']*server\//);
     }
@@ -4966,7 +5307,9 @@ describe('Issued invoices — voiding an issued invoice: the action, the confirm
   }
   /** The fake timers still pending once those due now have run (jsdom's own 0 ms selectionchange, a dialog's focus return and the selectionchange that focus queues). */
   const timersLeft = async (): Promise<number> => { for (let i = 0; i < 3; i++) await advance(0); return vi.getTimerCount(); };
-  const renewalReads = (made: Issued[]) => [`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`].sort();
+  // CN-P2 (doc 17 §3.6 rule 3): with the invoice and its eligibility, the kept dialog's credit-note list and lookup from page one.
+  const renewalReads = (made: Issued[]) => [`GET ${detailUrl(STORE_1, made[1].id)}`, `GET ${eligUrl(STORE_1, made[1].id)}`,
+    `GET ${detailUrl(STORE_1, made[1].id)}/credit-notes`, `GET ${STORES_PATH}/${STORE_1}/credit-note-attempts`].sort();
 
   it('SII-142. R1 AC-04 (the R1-probe, kept): a provider re-authentication that never settles is waited for 30 s from Confirm sign-in and no longer — at 29 999 ms still "Confirming your sign-in…" (the field read-only, Stop waiting offered, "Void invoice…" and Check again held, a tab return checks nothing); at exactly 30 000 ms the wait is over without a remount: the confirmation says this page stopped waiting and sent nothing, the field is empty, editable and focused, a tab return checks the session again, Check again sends its own request, and Keep invoice, Close and reopen leave "Void invoice…" usable — nothing is sent on its own: no void POST, no re-authentication login, no second provider call', async () => {
     const { server, made, r, calls } = await stalled();
@@ -5382,7 +5725,7 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       const section = tid('issued-payments');
       expect([...section.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['Payment status', 'Invoice total', 'Credited', 'Recorded', 'Remaining']);
       expect(section.textContent).not.toMatch(/amount due|\b(un)?paid\b|refund/i);
-      expect(within(section).queryAllByRole('button', { name: /credit|withdraw/i })).toEqual([]); // no issue, withdrawal or recovery control in CN-P1
+      expect(creditNamedOutside(section)).toEqual([]); // DIS-16 (doc 17 Appendix A): only the three approved credit-note names; never "withdraw"
       await close();
     }
     expect(server.writes()).toEqual([]);
@@ -5445,7 +5788,10 @@ describe('Issued invoices — payments in the issued dialog (M7B-PAYMENTS-P2A)',
       // M7B-PAYMENTS-P2B: an issued invoice adds its ONE recording eligibility (4); a voided one sends none (3).
       // M7B-PAYMENTS-P2C R1: and its ONE reversal eligibility (5 issued, 3 voided).
       const recordElig = n === 3 ? [`GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/payment-eligibility')}`, `GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/payment-reversal-eligibility')}`] : [];
-      expect(sent.sort(), `invoice ${n}`).toEqual([`GET ${STORES_PATH}/${STORE_1}/invoices/${made[n - 1].id}`, `GET ${paymentsUrl(made[n - 1].id)}`, `GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/void-eligibility')}`, ...recordElig].sort());
+      // CN-P2: each open's ONE credit-note list GET (a voided invoice's too, D-P2-12) and the first open's ONE attempts lookup
+      // GET — its 403, confirmed by the one fresh check, is not asked again under this generation and token (doc 17 §2.2).
+      const credit = [`GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/credit-notes')}`, ...(n === 3 ? [`GET ${STORES_PATH}/${STORE_1}/credit-note-attempts`] : [])];
+      expect(sent.sort(), `invoice ${n}`).toEqual([`GET ${STORES_PATH}/${STORE_1}/invoices/${made[n - 1].id}`, `GET ${paymentsUrl(made[n - 1].id)}`, `GET ${paymentsUrl(made[n - 1].id).replace('/payments', '/void-eligibility')}`, ...recordElig, ...credit].sort());
       const reads = server.paymentReads().length;
       await focusEvents();
       fakeClock();
@@ -9467,5 +9813,4996 @@ describe('Issued invoices — reversing a payment: boundaries, review, outcomes,
     await settle();
     expect(heldRev(s.r)).toMatchObject({ csrf: null, state: 'unresolved', key: s.r.keys[0] });
     expect(s.posts).toHaveLength(out === 'the Retry POST' ? 2 : 1);
+  });
+});
+
+// M7B-CREDITNOTES-CN-P2 — the read side (doc 17 §2.2, §3.3, §3.6, §4.1; D-P2-1, D-P2-3, D-P2-12): the invoice's credit-note
+// list inside Payments and the owner's attempts lookup that gates the issue action, both under ONE section generation AND
+// token. The REAL section and clients over the fake's credit-note routes (support F); the issue side's refresh is driven
+// through the section's `creditReads` (what the issue side calls after a 201, a confirm, a release or a settlement).
+describe('Issued invoices — credit notes: the list and the owner\'s attempts lookup (M7B-CREDITNOTES-CN-P2)', { timeout: 30_000 }, () => {
+  beforeEach(() => { madeServers.length = 0; });
+  afterEach(afterEachP289); // fix list 5, C: the P2-89 request-log invariant over every settlement this describe sends
+  const OTHER = uuid(0x1aff); // another invoice of the store: the lookup is store-wide
+  const cnUrl = (invoiceId: string, after?: string, storeId = STORE_1) => `${STORES_PATH}/${storeId}/invoices/${invoiceId}/credit-notes${after === undefined ? '' : `?after=${after}`}`;
+  const lookupUrl = (after?: string) => `${STORES_PATH}/${STORE_1}/credit-note-attempts${after === undefined ? '' : `?after=${after}`}`;
+  const cnPhase = () => screen.queryByTestId('issued-payments-credit-state')?.getAttribute('data-phase') ?? 'none';
+  const cnReady = () => waitFor(() => expect(cnPhase()).toBe('ready'));
+  const lookupPhase = () => screen.queryByTestId('issued-payments-credit-lookup')?.getAttribute('data-phase') ?? 'none';
+  const lookupRows = () => Number(tid('issued-payments-credit-lookup').getAttribute('data-rows'));
+  const items = () => screen.queryAllByTestId('issued-payments-credit-item');
+  const numbers = () => screen.queryAllByTestId('issued-payments-credit-number').map((x) => x.textContent);
+  const names = () => screen.queryAllByTestId('issued-payments-credit-issued-by').map((x) => x.textContent);
+  const gets = (server: Server, route: 'list' | 'lookup', from = 0) => server.cnRequests(route).slice(from).map((r) => r.url);
+  /** The credit-note controls inside Payments (their test ids say so): the list's and the lookup's (the issue side's own describe pins "Issue credit note"). */
+  const cnButtons = () => within(tid('issued-payments')).queryAllByRole('button').filter((b) => (b.getAttribute('data-testid') ?? '').startsWith('issued-payments-credit-') && b.getAttribute('data-testid') !== 'issued-payments-credit-issue').map((b) => b.textContent);
+  const ok200 = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  /** The next held request's answer: the fake decides it now, or `late` stands in for it (deciding nothing). */
+  const releaseNext = async (server: Server, late?: Response) => {
+    await waitFor(() => expect(server.held.length).toBeGreaterThan(0));
+    server.held.shift()!.release(late);
+    await flush();
+  };
+  /** `count` settled rows of another invoice, oldest first: the lookup's bulk (1,001 rows are 21 pages). */
+  const bulk = (server: Server, count: number) => {
+    for (let i = 0; i < count; i++) server.addCreditReg({ invoiceId: OTHER, number: 99, registeredAt: cnTime(i), state: 'released', settledAt: cnTime(i) });
+  };
+  /** The notes of `invoiceId` as the list serves them (issuedAt, then id). */
+  const served = (server: Server, invoiceId: string) => [...(server.creditNotes.get(invoiceId) ?? [])].sort((a, b) => (a.issuedAt < b.issuedAt ? -1 : a.issuedAt > b.issuedAt ? 1 : a.id < b.id ? -1 : 1));
+  async function setup(o: { owner?: boolean; uid?: string; count?: number; storeId?: string; over?: (n: number) => Partial<Issued>; prepare?: (server: Server, made: Issued[]) => void } = {}) {
+    const server = seeded();
+    const storeId = o.storeId ?? STORE_1;
+    const made = issueAt(server, storeId, o.count ?? 2, o.over);
+    if (o.owner !== false) server.cnOwners.add('uid-a');
+    o.prepare?.(server, made);
+    const r = rig(server);
+    let api: CreditReads | null = null;
+    const page = render(<ServerIssuedInvoices {...r.props({ uid: o.uid ?? 'uid-a', creditReads: (x) => { api = x; } })} />);
+    await showAndChoose(storeId);
+    await listReady();
+    return { server, made, r, page, api: (): CreditReads => api! };
+  }
+  async function open(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+  }
+  async function close() {
+    await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+  }
+
+  it('P2-02. a non-owner (a manager; an owner without the credit-note keys alike) gets the lookup\'s 403, ONE fresh session check confirms it: hidden — no lookup text or control — and never asked again under this generation and token (another open, a focus, a tab return); the list stays readable, without names for the manager', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    for (const who of [{ uid: 'uid-m', owner: true }, { uid: 'uid-a', owner: false }]) {
+      const { server, made } = await setup({ ...who, prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+      await open(1);
+      await waitFor(() => expect(lookupPhase()).toBe('denied'));
+      await cnReady();
+      expect(gets(server, 'lookup'), who.uid).toEqual([lookupUrl()]);
+      const at = server.sent.map((x) => x.url).indexOf(lookupUrl());
+      expect(sentFrom(server, at + 1), who.uid).toContain(`GET ${TENANT_SESSION_PATHS.current}`); // the one fresh check
+      expect(tid('issued-payments-credit-lookup-alert').textContent).toBe('');
+      expect(lookupRows()).toBe(0);
+      expect(cnButtons(), who.uid).toEqual([]);
+      expect(screen.queryByTestId('issued-payments-credit-issue'), `${who.uid}: no Issue action (T-10)`).toBeNull();
+      expect(items()).toHaveLength(2);
+      expect(names(), who.uid).toEqual(who.uid === 'uid-m' ? [] : ['Issued by Ada Owner', 'Issued by Ada Owner']);
+      await focusEvents();
+      await close();
+      await open(2);
+      await cnReady();
+      await settle();
+      expect(gets(server, 'lookup'), `${who.uid}: not retried`).toEqual([lookupUrl()]);
+      expect(lookupPhase()).toBe('denied');
+      expect(gets(server, 'list').filter((u) => u === cnUrl(made[1].id))).toEqual([cnUrl(made[1].id)]);
+      cleanup();
+    }
+  });
+
+  it('P2-03. a read-only (or overdue) store: the lookup is 403 (no recover key) — hidden, no lookup control, so no action, Look up attempt or Continue checking; the list stays readable with its paging, and its Try again resumes from the page that failed', async () => {
+    const { server, made } = await setup({ storeId: STORE_RO, prepare: (s, m) => { s.addCreditNotes(m[0].id, 52); } });
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('denied'));
+    await settle();
+    await cnReady();
+    expect(items()).toHaveLength(50);
+    expect(cnButtons()).toEqual([CREDIT_TEXT.showMore]);
+    server.cnScripts.list.push(503);
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(cnPhase()).toBe('failed'));
+    // The rows stay, never as complete: the failure is said, Show more goes, Try again resumes.
+    expect(items()).toHaveLength(50);
+    expect(tid('issued-payments-credit-state')).toHaveTextContent(CREDIT_TEXT.listFailed);
+    expect(cnButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+    const from = gets(server, 'list').length;
+    await click('issued-payments-credit-retry');
+    await cnReady();
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id, served(server, made[0].id)[49].id, STORE_RO)]);
+    expect(items()).toHaveLength(52);
+    expect(cnButtons()).toEqual([]);
+    expect(server.cnRequests().filter((x) => x.method !== 'GET')).toEqual([]);
+  });
+
+  it('P2-04. a voided invoice still shows its credit notes (D-P2-12) — withdrawn ones with "Withdrawn {time}" and the withdrawal reason — and its Payments still never says "Invoice total", "Credited" or "$0.00"', async () => {
+    const { made } = await setup({
+      over: (n) => (n === 2 ? { void: { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' } } : {}),
+      prepare: (s, m) => { s.addCreditNotes(m[1].id, 2, (i) => ({ withdrawal: { withdrawnAt: cnTime(500 + i), reason: i === 0 ? 'wrong_amount' : 'entered_in_error', withdrawnByName: null } })); },
+    });
+    await open(2);
+    await cnReady();
+    expect(made[1].void).toBeDefined();
+    expect(items()).toHaveLength(2);
+    expect(screen.getAllByTestId('issued-payments-credit-status').map((x) => x.textContent)).toEqual([CREDIT_TEXT.withdrawn, CREDIT_TEXT.withdrawn]);
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawn-at')[0]).toHaveAttribute('datetime', cnTime(500));
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawal-reason').map((x) => x.textContent)).toEqual(['Wrong amount', 'Entered by mistake']);
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawn-by').map((x) => x.textContent)).toEqual(['Withdrawn by Name not set', 'Withdrawn by Name not set']);
+    expect(tid('issued-payments').textContent).not.toMatch(/invoice total|credited|\$0\.00/i);
+  });
+
+  it('P2-07. the lookup: hidden from its start until read to the end; a malformed page → lookupFailed with Try again (a new lookup from page one); a 503 mid-scan → lookupIncomplete with Continue checking, the rows found so far kept, resumed from the last good cursor; a confirmed 403 drops the rows and their actions; a 401 signs the section out', async () => {
+    const { server, made, api } = await setup({
+      prepare: (s, m) => {
+        s.addCreditReg({ invoiceId: m[0].id, registeredAt: cnTime(0), state: 'open' });
+        bulk(s, 55);
+      },
+    });
+    server.hold.cnLookup = 1;
+    await open(1);
+    await cnReady();
+    expect(lookupPhase()).toBe('loading'); // hidden from the lookup's start
+    await releaseNext(server);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(lookupRows()).toBe(1);
+    expect(tid('issued-payments-credit-lookup-alert').textContent).toBe('');
+    // A malformed page: lookupFailed (nothing claimed), Try again starts over from page one.
+    server.cnScripts.lookup.push(ok200({ attempts: 'none', nextCursor: null }));
+    act(() => { api().lookup(STORE_1, made[0].id); });
+    await waitFor(() => expect(lookupPhase()).toBe('failed'));
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupFailed);
+    expect(lookupRows()).toBe(0);
+    expect(cnButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+    expect(describedBy('issued-payments-credit-lookup-retry')).toContain(CREDIT_TEXT.lookupFailed);
+    const from = gets(server, 'lookup').length;
+    await click('issued-payments-credit-lookup-retry');
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(gets(server, 'lookup', from)).toEqual([lookupUrl(), lookupUrl(`${OTHER}.${server.cnRegs[49].attemptId}`)]);
+    expect(document.activeElement).toBe(document.getElementById('issued-payments-title')); // the pressed control went: the Payments heading
+    // A 503 on page two: incomplete, the rows of page one kept; Continue checking resumes from page one's cursor.
+    server.hold.cnLookup = 2;
+    act(() => { api().lookup(STORE_1, made[0].id); });
+    await releaseNext(server);
+    await releaseNext(server, chain(503, 'service_unavailable'));
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'));
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupIncomplete);
+    expect(lookupRows()).toBe(1);
+    const resume = gets(server, 'lookup').length;
+    await click('issued-payments-credit-lookup-continue');
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(gets(server, 'lookup', resume)).toEqual([lookupUrl(`${OTHER}.${server.cnRegs[49].attemptId}`)]);
+    expect(lookupRows()).toBe(1);
+    // A 403 the one check confirms with the same token: the rows and their actions go; nothing is asked again here.
+    server.cnScripts.lookup.push(403);
+    act(() => { api().lookup(STORE_1, made[0].id); });
+    await waitFor(() => expect(lookupPhase()).toBe('denied'));
+    expect(lookupRows()).toBe(0);
+    expect(cnButtons()).toEqual([]);
+    // A 401: the section signs out (Reconnect), every credit-note row with it.
+    await close();
+    server.cnScripts.list.push(401);
+    await user().click(openButton(2));
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.queryByTestId('issued-view')).toBeNull();
+    expect(server.cnRequests().filter((x) => x.method !== 'GET')).toEqual([]);
+  });
+
+  it('P2-76. over 20 pages: 1,001 rows stop the first batch at 20 pages (lookupIncomplete, Continue checking) and Continue checking ends it from the last good cursor; 2,001 need two continuations; ONE cursor-400 restart per lookup generation (a second → lookupFailed); a context change between presses restarts at page one', async () => {
+    const one = await setup({ prepare: (s) => bulk(s, 1001) });
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'), { timeout: 10_000 });
+    expect(gets(one.server, 'lookup')).toHaveLength(20);
+    expect(gets(one.server, 'lookup')[0]).toBe(lookupUrl());
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupIncomplete);
+    await click('issued-payments-credit-lookup-continue');
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'), { timeout: 10_000 });
+    expect(gets(one.server, 'lookup').slice(20)).toEqual([lookupUrl(`${OTHER}.${one.server.cnRegs[999].attemptId}`)]);
+    expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+    // A context change between presses (another tab's sign-in, adopted on a tab return): the generation goes with the
+    // dialog, and the next open's lookup starts at page one — the old cursor is never sent.
+    await close();
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'), { timeout: 10_000 });
+    one.server.otherTab('uid-a');
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    await focusEvents();
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull(), { timeout: 10_000 });
+    const before = gets(one.server, 'lookup').length;
+    await showAndChoose(STORE_1);
+    await listReady();
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'), { timeout: 10_000 });
+    expect(gets(one.server, 'lookup', before)[0]).toBe(lookupUrl());
+    expect(gets(one.server, 'lookup', before)).toHaveLength(20);
+    cleanup();
+    vi.restoreAllMocks();
+
+    const two = await setup({ prepare: (s) => bulk(s, 2001) });
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'), { timeout: 10_000 });
+    await click('issued-payments-credit-lookup-continue');
+    await waitFor(() => expect(gets(two.server, 'lookup')).toHaveLength(40), { timeout: 10_000 });
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'), { timeout: 10_000 });
+    await click('issued-payments-credit-lookup-continue');
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'), { timeout: 10_000 });
+    expect(gets(two.server, 'lookup')).toHaveLength(41);
+    cleanup();
+
+    // A cursor 400 restarts ONCE from page one (rows and counters discarded); a second in the same lookup generation fails.
+    const four = await setup({ prepare: (s) => bulk(s, 120) });
+    four.server.hold.cnLookup = 4;
+    await open(1);
+    await releaseNext(four.server);
+    await releaseNext(four.server, chain(400, 'invalid_request'));
+    await releaseNext(four.server);
+    await releaseNext(four.server);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'), { timeout: 10_000 });
+    const c50 = `${OTHER}.${four.server.cnRegs[49].attemptId}`;
+    expect(gets(four.server, 'lookup')).toEqual([lookupUrl(), lookupUrl(c50), lookupUrl(), lookupUrl(c50), lookupUrl(`${OTHER}.${four.server.cnRegs[99].attemptId}`)]);
+    four.server.hold.cnLookup = 4;
+    act(() => { four.api().lookup(STORE_1, four.made[0].id); });
+    await releaseNext(four.server);
+    await releaseNext(four.server, chain(400, 'invalid_request'));
+    await releaseNext(four.server);
+    await releaseNext(four.server, chain(400, 'invalid_request'));
+    await waitFor(() => expect(lookupPhase()).toBe('failed'), { timeout: 10_000 });
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupFailed);
+  });
+
+  it('P2-76 (repeat). a page that repeats an attempt the scan already loaded — even after the last one in order — fails the lookup (lookupFailed, its rows dropped); Try again starts over from page one', async () => {
+    const { server } = await setup({ prepare: (s) => bulk(s, 60) });
+    server.hold.cnLookup = 2;
+    await open(1);
+    await releaseNext(server);
+    const again = server.cnRegs[0];
+    await releaseNext(server, ok200({
+      attempts: [{ invoiceId: again.invoiceId, invoiceNumber: 99, attemptId: again.attemptId, state: 'released', version: 3, registeredAt: cnTime(60), settledAt: cnTime(60), grossCents: 100, reason: 'goodwill', creditNote: null }],
+      nextCursor: null,
+    }));
+    await waitFor(() => expect(lookupPhase()).toBe('failed'), { timeout: 10_000 });
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupFailed);
+    const from = gets(server, 'lookup').length;
+    await click('issued-payments-credit-lookup-retry');
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'), { timeout: 10_000 });
+    expect(gets(server, 'lookup', from)).toEqual([lookupUrl(), lookupUrl(`${OTHER}.${server.cnRegs[49].attemptId}`)]);
+  });
+
+  it('P2-64. the lookup decides nothing: an exhausted read with no row of this invoice only opens the gate; incomplete and failed texts claim nothing about any credit note; a page that answers after a context change (another tab\'s sign-in adopted meanwhile) is dropped, and the next open starts at page one', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    for (const said of [CREDIT_TEXT.lookupFailed, CREDIT_TEXT.lookupIncomplete]) expect(said).not.toMatch(/no credit note|not issued|was(n't| not) issued|issued/i);
+    const { server, made } = await setup({ prepare: (s, m) => { bulk(s, 60); s.addCreditReg({ invoiceId: m[0].id, state: 'open' }); } });
+    await open(2);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(lookupRows()).toBe(0); // invoice 2 has no row: the gate opens, nothing more is said
+    expect(tid('issued-payments-credit-lookup-alert').textContent).toBe('');
+    await close();
+    server.hold.cnLookup = 2;
+    await open(1);
+    await releaseNext(server);
+    await waitFor(() => expect(server.held).toHaveLength(1)); // page two out
+    server.otherTab('uid-a');
+    await focusEvents(); // this tab adopts the new token: a new generation closes the dialog
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    await releaseNext(server); // the old session's page two answers late: nothing takes it
+    await settle();
+    const before = gets(server, 'lookup').length;
+    await showAndChoose(STORE_1);
+    await listReady();
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(gets(server, 'lookup', before)).toEqual([lookupUrl(), lookupUrl(`${OTHER}.${server.cnRegs[49].attemptId}`)]);
+    expect(lookupRows()).toBe(1); // only this generation's own pages
+    expect(made).toHaveLength(2);
+  });
+
+  it('P2-45. each note in the server\'s order (oldest first) as one li of a ul under a level-4 "Credit notes" heading (Payments is level 3): "CN-<n>", "Active" or "Withdrawn" as words, the gross amount, the reason\'s label, "Issued {time}" in a time element; a withdrawal\'s "Withdrawn {time}" and its reason\'s label; tax and net never shown', async () => {
+    const reasons = Object.keys(INVOICE_CREDIT_NOTE_REASONS);
+    const why = Object.keys(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS);
+    const { made } = await setup({
+      prepare: (s, m) => {
+        s.addCreditNotes(m[0].id, 1, () => ({ grossCents: 2500, taxCents: 203, netCents: 2297 }), 50); // CN-1, issued last
+        s.addCreditNotes(m[0].id, 4, (i) => ({
+          reason: reasons[i], grossCents: 1000 + i, taxCents: 89, netCents: 911 + i,
+          withdrawal: i < 3 ? { withdrawnAt: cnTime(600 + i), reason: why[i], withdrawnByName: 'Ada Owner' } : null,
+        }));
+      },
+    });
+    await open(1);
+    await cnReady();
+    const title = within(tid('issued-payments')).getByRole('heading', { level: 4, name: CREDIT_TEXT.listTitle });
+    expect(title).toBe(tid('issued-payments-credit-title'));
+    expect(document.getElementById('issued-payments-title').tagName).toBe('H3');
+    const list = within(tid('issued-payments')).getByRole('list', { name: CREDIT_TEXT.listTitle });
+    expect(list.tagName).toBe('UL');
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+    expect(numbers()).toEqual(['CN-2', 'CN-3', 'CN-4', 'CN-5', 'CN-1']);
+    expect(items()[0].textContent).toBe('CN-2 · Withdrawn · $10.00 · Pricing errorIssued 2026-11-01 00:00:00 UTCWithdrawn 2026-11-01 00:10:00 UTC · Entered by mistakeIssued by Ada OwnerWithdrawn by Ada Owner');
+    expect(items()[3].textContent).toBe('CN-5 · Active · $10.03 · Billing errorIssued 2026-11-01 00:00:03 UTCIssued by Ada Owner');
+    expect(screen.getAllByTestId('issued-payments-credit-reason').map((x) => x.textContent)).toEqual(['Pricing error', 'Service issue', 'Goodwill', 'Billing error', 'Goodwill']);
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawal-reason').map((x) => x.textContent)).toEqual(['Entered by mistake', 'Wrong amount', 'Wrong invoice']);
+    expect(screen.getAllByTestId('issued-payments-credit-status').map((x) => x.textContent)).toEqual(['Withdrawn', 'Withdrawn', 'Withdrawn', 'Active', 'Active']);
+    const times = screen.getAllByTestId('issued-payments-credit-issued-at');
+    expect(times[0].tagName).toBe('TIME');
+    expect(times[0]).toHaveAttribute('datetime', cnTime(0));
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawn-at')[2]).toHaveAttribute('datetime', cnTime(602));
+    for (const amount of screen.getAllByTestId('issued-payments-credit-amount')) expect(amount).toHaveClass('whitespace-nowrap');
+    expect(list.textContent).not.toMatch(/\$0\.89|\$9\.1[1-4]|\$2\.03|\$22\.97|tax|net/i); // no tax or net (D-P2-7)
+    expect(made).toHaveLength(2);
+  });
+
+  it('P2-56. names: the owner\'s page carries them — "Issued by {name}", "Withdrawn by {name}", null as "Name not set" (wrapping anywhere) — and a manager\'s page carries none, so nothing is shown', async () => {
+    const seed = (s: Server, m: Issued[]) => {
+      s.addCreditNotes(m[0].id, 1, () => ({ issuedByName: 'Ada Owner', withdrawal: { withdrawnAt: cnTime(700), reason: 'wrong_invoice', withdrawnByName: null } }));
+      s.addCreditNotes(m[0].id, 1, () => ({ issuedByName: null }), 1);
+    };
+    await setup({ prepare: seed });
+    await open(1);
+    await cnReady();
+    expect(names()).toEqual(['Issued by Ada Owner', 'Issued by Name not set']);
+    expect(screen.getAllByTestId('issued-payments-credit-withdrawn-by').map((x) => x.textContent)).toEqual(['Withdrawn by Name not set']);
+    for (const el of [...screen.getAllByTestId('issued-payments-credit-issued-by'), ...screen.getAllByTestId('issued-payments-credit-withdrawn-by')]) expect(el).toHaveClass('[overflow-wrap:anywhere]');
+    cleanup();
+    await setup({ uid: 'uid-m', prepare: seed });
+    await open(1);
+    await cnReady();
+    expect(items()).toHaveLength(2);
+    expect(names()).toEqual([]);
+    expect(screen.queryAllByTestId('issued-payments-credit-withdrawn-by')).toEqual([]);
+    expect(tid('issued-payments-credit-list').textContent).not.toMatch(/Issued by|Withdrawn by|Name not set/);
+  });
+
+  it('P2-55. Show more keeps focus and says "{n} more loaded."; when it goes, focus moves to the first new item (tabindex -1 until it blurs) — or to the list\'s heading when nothing new loaded', async () => {
+    const { server, made } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 101); s.addCreditNotes(m[1].id, 51); } });
+    await open(1);
+    await cnReady();
+    expect(items()).toHaveLength(50);
+    const more = tid('issued-payments-credit-more');
+    await user().click(more);
+    await waitFor(() => expect(items()).toHaveLength(100));
+    expect(tid('issued-payments-credit-more')).toBe(more);
+    expect(document.activeElement).toBe(more);
+    expect(tid('issued-payments-credit-state')).toHaveTextContent(/^50 more loaded\.$/);
+    await user().click(more);
+    await waitFor(() => expect(items()).toHaveLength(101));
+    expect(screen.queryByTestId('issued-payments-credit-more')).toBeNull();
+    const first = items()[100];
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    expect(first).toHaveAttribute('tabindex', '-1');
+    expect(tid('issued-payments-credit-state')).toHaveTextContent(/^1 more loaded\.$/);
+    act(() => { first.blur(); });
+    await waitFor(() => expect(first).not.toHaveAttribute('tabindex'));
+    expect(gets(server, 'list')).toEqual([cnUrl(made[0].id), cnUrl(made[0].id, served(server, made[0].id)[49].id), cnUrl(made[0].id, served(server, made[0].id)[99].id)]);
+    await close();
+    // Nothing new: the 51st note is gone by the time Show more reads (an empty last page): focus to the list's heading.
+    await open(2);
+    await cnReady();
+    server.creditNotes.set(made[1].id, served(server, made[1].id).slice(0, 50));
+    await user().click(tid('issued-payments-credit-more'));
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-more')).toBeNull());
+    expect(items()).toHaveLength(50);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-title')));
+  });
+
+  it('P2-57. the list\'s states: loading; empty — "No credit notes on this invoice." with "None have been issued yet." for the owner only, and only after a read to the end; an error ("Credit notes couldn\'t be loaded.") with Try again for a 503 (the name residual too), a 404 or a malformed page — no rows shown as complete', async () => {
+    const { server, made } = await setup();
+    server.hold.cnList = 1;
+    await open(1);
+    await waitFor(() => expect(cnPhase()).toBe('loading'));
+    expect(tid('issued-payments-credit-state')).toHaveTextContent(CREDIT_TEXT.listLoading);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(tid('issued-payments-credit-state').textContent).not.toMatch(/No credit notes/); // never before the read ends
+    await releaseNext(server);
+    await cnReady();
+    expect(tid('issued-payments-credit-state').textContent).toBe(`${CREDIT_TEXT.listEmpty} ${CREDIT_TEXT.listEmptyOwner}`);
+    expect(screen.queryByTestId('issued-payments-credit-list')).toBeNull();
+    expect(cnButtons()).toEqual([]);
+    await close();
+    for (const failure of [503, 404, ok200({ invoice: { id: made[1].id }, creditNotes: [{ id: 'x' }], nextCursor: null })]) {
+      server.cnScripts.list.push(failure);
+      await open(2);
+      await waitFor(() => expect(cnPhase()).toBe('failed'));
+      expect(tid('issued-payments-credit-state').textContent, String(failure)).toBe(CREDIT_TEXT.listFailed);
+      expect(items()).toEqual([]);
+      expect(cnButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+      await click('issued-payments-credit-retry');
+      await cnReady();
+      await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+      expect(tid('issued-payments-credit-state').textContent).toBe(`${CREDIT_TEXT.listEmpty} ${CREDIT_TEXT.listEmptyOwner}`);
+      await close();
+    }
+    cleanup();
+    await setup({ uid: 'uid-m' });
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('denied'));
+    await cnReady();
+    expect(tid('issued-payments-credit-state').textContent).toBe(CREDIT_TEXT.listEmpty);
+  });
+
+  it('P2-58. the refresh the issue side calls after an issue (followed to its creditNote.id), a confirm, a release or a recovery settlement re-reads from page one — ONE page-one GET each, nothing else; the number shows only from the row whose id matches', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await open(1);
+    await cnReady();
+    const from = gets(server, 'list').length;
+    const [issued] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    expect(api().numberOf(STORE_1, made[0].id, issued.id)).toBeNull();
+    act(() => { api().refresh(STORE_1, made[0].id, issued.id); }); // after the issue's 201
+    await waitFor(() => expect(items()).toHaveLength(3));
+    await cnReady();
+    expect(api().numberOf(STORE_1, made[0].id, issued.id)).toBe(issued.number);
+    expect(numbers()[2]).toBe(`CN-${issued.number}`);
+    for (const [i, after] of ['confirm', 'release', 'recovery settlement'].entries()) {
+      act(() => { api().refresh(STORE_1, made[0].id, null); });
+      await waitFor(() => expect(gets(server, 'list', from)).toHaveLength(i + 2));
+      await cnReady();
+      expect(items(), after).toHaveLength(3);
+    }
+    expect(gets(server, 'list', from)).toEqual(Array(4).fill(cnUrl(made[0].id)));
+    expect(server.cnRequests().filter((x) => x.method !== 'GET')).toEqual([]);
+    // A late refresh or lookup for another invoice while this dialog is open sends nothing and keeps this dialog's list.
+    const sent = server.cnRequests().length;
+    act(() => { api().refresh(STORE_1, made[1].id, null); api().lookup(STORE_1, made[1].id); });
+    await settle();
+    expect(server.cnRequests()).toHaveLength(sent);
+    expect(items()).toHaveLength(3);
+    expect(api().numberOf(STORE_1, made[0].id, issued.id)).toBe(issued.number);
+  });
+
+  it('P2-74. the new note on page two: the refresh follows nextCursor to the row whose id is creditNote.id (CN-<n> from that row only); page two failing leaves the number pending, and Try again resumes from page two', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    await open(1);
+    await cnReady();
+    const from = gets(server, 'list').length;
+    const [first] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    act(() => { api().refresh(STORE_1, made[0].id, first.id); });
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, first.id)).toBe(first.number));
+    const page1Last = served(server, made[0].id)[49].id;
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id), cnUrl(made[0].id, page1Last)]);
+    expect(numbers()).toContain(`CN-${first.number}`);
+    // Page two fails: the number stays pending (null), the rows of page one stay, Try again resumes from page two.
+    const [second] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    server.hold.cnList = 2;
+    const mark = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, second.id); });
+    await releaseNext(server);
+    await releaseNext(server, chain(503, 'service_unavailable'));
+    await waitFor(() => expect(cnPhase()).toBe('failed'));
+    expect(api().numberOf(STORE_1, made[0].id, second.id)).toBeNull();
+    expect(items()).toHaveLength(50);
+    await click('issued-payments-credit-retry');
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, second.id)).toBe(second.number));
+    expect(gets(server, 'list', mark)).toEqual([cnUrl(made[0].id), cnUrl(made[0].id, page1Last), cnUrl(made[0].id, page1Last)]);
+  });
+
+  it('P2-75. three pages, one view: the refresh follows pages two and three on its own (three page GETs); a view change between pages drops every row and reloads from page one once (a second → the error state); a 403 on a page → the one check → the error state; a cursor 400 restarts once', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 101); } });
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    const [target] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    const all = served(server, made[0].id);
+    const p2 = cnUrl(made[0].id, all[49].id);
+    const p3 = cnUrl(made[0].id, all[99].id);
+    let from = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, target.id)).toBe(target.number));
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id), p2, p3]);
+    expect(names()).toHaveLength(102);
+    // The owner's names vanish between pages one and two (a view change): every row goes, page one again ONCE, now
+    // without names — and, the names being gone after a named view, the lookup's rows go too (rule 4).
+    server.hold.cnList = 2;
+    from = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await releaseNext(server); // page one, named
+    server.cnNamesHidden.add('uid-a');
+    await releaseNext(server); // page two, without names
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, target.id)).toBe(target.number));
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id), p2, cnUrl(made[0].id), p2, p3]);
+    expect(names()).toEqual([]);
+    expect(lookupPhase()).toBe('denied');
+    // A second change within one chain: the error state, no rows.
+    server.cnNamesHidden.delete('uid-a');
+    server.hold.cnList = 4;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await releaseNext(server); // page one, named
+    server.cnNamesHidden.add('uid-a');
+    await releaseNext(server); // page two, without names: page one again
+    server.cnNamesHidden.delete('uid-a');
+    await releaseNext(server); // page one again, named
+    server.cnNamesHidden.add('uid-a');
+    await releaseNext(server); // page two, without names again
+    await waitFor(() => expect(cnPhase()).toBe('failed'));
+    expect(items()).toEqual([]);
+    server.cnNamesHidden.delete('uid-a');
+    // A 403 on page two: the one fresh check confirms the same token → the error (denied) state, no rows.
+    server.hold.cnList = 2;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await releaseNext(server);
+    await releaseNext(server, chain(403, 'forbidden'));
+    await waitFor(() => expect(cnPhase()).toBe('denied'));
+    expect(tid('issued-payments-credit-state').textContent).toBe(CREDIT_TEXT.listFailed);
+    expect(items()).toEqual([]);
+    expect(cnButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+    // A cursor 400 on page two: page one again once, then on to the target.
+    server.hold.cnList = 2;
+    from = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await releaseNext(server);
+    await releaseNext(server, chain(400, 'invalid_request'));
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, target.id)).toBe(target.number));
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id), p2, cnUrl(made[0].id), p2, p3]);
+  });
+
+  it('P2-80. a target beyond 1,000 notes: the refresh stops after 20 pages with the number still pending; Show more continues the same target search from its cursor until that row loads', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 1000); } });
+    await open(1);
+    await cnReady();
+    const [target] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    const from = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, target.id); });
+    await waitFor(() => expect(gets(server, 'list', from)).toHaveLength(20), { timeout: 10_000 });
+    await cnReady();
+    expect(api().numberOf(STORE_1, made[0].id, target.id)).toBeNull();
+    expect(items()).toHaveLength(1000);
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(api().numberOf(STORE_1, made[0].id, target.id)).toBe(target.number), { timeout: 10_000 });
+    expect(gets(server, 'list', from)).toHaveLength(21);
+    expect(gets(server, 'list', from)[20]).toBe(cnUrl(made[0].id, served(server, made[0].id)[999].id));
+  });
+
+  it('P2-81. owner → owner: another owner signs in in this browser between list pages one and two — this page\'s Show more re-reads the session, signs its own user in again (a new token), and the new generation drops every row and name with the dialog; the page-two GET never leaves; the next open reads from page one. A renewal that keeps the dialog (the void\'s sign-in) drops them too and reads page one and the lookup again', async () => {
+    const { server, made } = await setup({ prepare: (s, m) => { s.staleLogins = true; s.addCreditNotes(m[0].id, 51); s.addCreditNotes(m[1].id, 51); } });
+    await open(1);
+    await cnReady();
+    expect(names()).toHaveLength(50);
+    server.otherTab('uid-b');
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(screen.queryAllByTestId('issued-payments-credit-item')).toEqual([]);
+    expect(gets(server, 'list').filter((x) => x.includes('?after='))).toEqual([]);
+    await showAndChoose(STORE_1);
+    await listReady();
+    const from = gets(server, 'list').length;
+    await open(1);
+    await cnReady();
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id)]);
+    await close();
+    // The void's own sign-in renews the session and keeps the dialog: the credit notes read under the old token go and
+    // page one and the lookup are read again under the new one (doc 17 §3.6 rule 3).
+    await open(2); // this page's own plain sign-in is stale: the void answers step_up_required
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    await waitFor(() => expect(tid('issued-view-void')).toBeInTheDocument());
+    await click('issued-view-void');
+    await waitFor(() => expect(tid('issued-void-confirm')).toBeInTheDocument());
+    await user().click(tid('issued-void-reason-wrong_customer'));
+    await click('issued-void-send');
+    await waitFor(() => expect(tid('issued-void-reauth-group')).toBeInTheDocument());
+    const list = gets(server, 'list').length;
+    const lookup = gets(server, 'lookup').length;
+    type('issued-void-reauth-password', 'correct horse');
+    await click('issued-void-reauth-confirm');
+    await waitFor(() => expect(tid('issued-void-confirm-status')).toHaveTextContent(VOID_TEXT.renewed));
+    await waitFor(() => expect(gets(server, 'list', list)).toEqual([cnUrl(made[1].id)]));
+    await waitFor(() => expect(gets(server, 'lookup', lookup)).toEqual([lookupUrl()]));
+    expect(server.cnRequests().filter((x) => x.method !== 'GET')).toEqual([]);
+  });
+
+  it('P2-81 (81.2). lookup page two across another page\'s sign-in joins nothing; read again from page one under the new token', async () => {
+    const { server } = await setup({
+      prepare: (s, m) => {
+        s.addCreditReg({ invoiceId: m[0].id, registeredAt: cnTime(0), state: 'open' });
+        bulk(s, 55);
+      },
+    });
+    server.hold.cnLookup = 1;
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(server.held).toHaveLength(1)); // the lookup's page one, out under this page's token
+    const old = server.cnRequests('lookup')[0].headers.get('x-tmpos-session-csrf');
+    server.otherTab('uid-b'); // another owner signs in in this browser between the lookup's pages one and two
+    const logins = server.logins().length;
+    await releaseNext(server); // page one answers for the old session
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(screen.queryByTestId('issued-payments-credit-lookup')).toBeNull();
+    // Before page two the pager's session read finds uid-b's session: this page signs its own user in again (a new token)
+    // and the dialog closes, so page two never leaves.
+    expect(server.logins()).toHaveLength(logins + 1);
+    expect(gets(server, 'lookup').filter((x) => x.includes('?after='))).toEqual([]);
+    const before = gets(server, 'lookup').length;
+    await showAndChoose(STORE_1);
+    await listReady();
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(gets(server, 'lookup', before)).toEqual([lookupUrl(), lookupUrl(`${OTHER}.${server.cnRegs[49].attemptId}`)]);
+    expect(server.cnRequests('lookup').slice(before).map((x) => x.headers.get('x-tmpos-session-csrf'))).not.toContain(old);
+    expect(lookupRows()).toBe(1); // this invoice's one row, once
+    expect(server.cnRequests().filter((x) => x.method !== 'GET')).toEqual([]);
+  });
+
+  it('P2-82. owner → non-owner: another user\'s section shows nothing of the owner\'s (their lookup 403 confirmed, their list without names); the same owner demoted with the same token keeps the names read so far until an answer shows the change — a list page without names after a named view, the lookup\'s 403 the one check confirms, or the list\'s own 403 — which drops every name and lookup row (the list reloads once in the new view, or shows its error state)', async () => {
+    const { server, made, page, r, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(names()).toHaveLength(50);
+    // The same owner demoted (same token): nothing has shown it yet, so the names read so far stay.
+    server.cnOwners.delete('uid-a');
+    server.cnNamesHidden.add('uid-a');
+    await settle();
+    expect(names()).toHaveLength(50);
+    // Show more's page carries no names after a named view: every name goes, page one again once, and the lookup's rows go.
+    let from = gets(server, 'list').length;
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id, served(server, made[0].id)[49].id), cnUrl(made[0].id)]));
+    await cnReady();
+    expect(items()).toHaveLength(50);
+    expect(names()).toEqual([]);
+    expect(lookupPhase()).toBe('denied');
+    // The lookup's 403, confirmed with the same token, drops names read before it: the list reloads once in the new view.
+    server.cnNamesHidden.delete('uid-a');
+    act(() => { api().refresh(STORE_1, made[0].id, null); });
+    await waitFor(() => expect(names()).toHaveLength(50));
+    server.cnNamesHidden.add('uid-a');
+    act(() => { api().lookup(STORE_1, made[0].id); }); // the view change hid the action but confirmed no 403: asked once more
+    await waitFor(() => expect(gets(server, 'lookup')).toHaveLength(2));
+    await waitFor(() => expect(names()).toEqual([])); // its 403 confirmed with the same token: the names go (one reload)
+    act(() => { api().lookup(STORE_1, made[0].id); }); // confirmed now: never asked again under this generation and token
+    await settle();
+    expect(gets(server, 'lookup')).toHaveLength(2);
+    await close();
+    server.otherTab('uid-a'); // a new token: the lookup is asked again there
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    await focusEvents();
+    server.cnNamesHidden.delete('uid-a');
+    await showAndChoose(STORE_1);
+    await listReady();
+    server.cnOwners.add('uid-a');
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    await cnReady();
+    expect(names()).toHaveLength(50);
+    server.cnOwners.delete('uid-a');
+    server.cnNamesHidden.add('uid-a');
+    from = gets(server, 'list').length;
+    act(() => { api().lookup(STORE_1, made[0].id); });
+    await waitFor(() => expect(lookupPhase()).toBe('denied'));
+    await waitFor(() => expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id)]));
+    await cnReady();
+    expect(names()).toEqual([]);
+    // The list's own 403, confirmed with the same token: its error state, no rows, no names.
+    server.issuedDenied.add('uid-a');
+    act(() => { api().refresh(STORE_1, made[0].id, null); });
+    await waitFor(() => expect(cnPhase()).toBe('denied'));
+    expect(items()).toEqual([]);
+    server.issuedDenied.delete('uid-a');
+    await close();
+    // Another user (a manager) in this page: a new section, nothing of the owner's; their lookup 403 confirmed, no names.
+    page.rerender(<ServerIssuedInvoices {...r.props({ uid: 'uid-m' })} />);
+    expect(screen.queryAllByTestId('issued-payments-credit-item')).toEqual([]);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await open(1);
+    await waitFor(() => expect(lookupPhase()).toBe('denied'));
+    await cnReady();
+    expect(items()).toHaveLength(50);
+    expect(names()).toEqual([]);
+  });
+
+  it('P2-83. a session change while page two is out: the old session\'s 200 is taken (this tab had adopted nothing), then the next read drops everything; adopted first → the late page is stale; sent with the new cookie → 403 → the one check finds the new token → dropped, never an error; a 401 → the section signs out and Reconnect starts again from page one', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, made } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    const page2 = () => cnUrl(made[0].id, served(server, made[0].id)[49].id);
+    const reopen = async () => { await showAndChoose(STORE_1); await listReady(); await open(1); await cnReady(); };
+    // 1. The old session answers page two (no token adopted here meanwhile): it is taken; the next read drops it all.
+    await open(1);
+    await cnReady();
+    server.hold.cnList = 1;
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('uid-a');
+    await releaseNext(server);
+    await waitFor(() => expect(items()).toHaveLength(51));
+    await focusEvents(); // the next read: the session check finds the new token
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(screen.queryAllByTestId('issued-payments-credit-item')).toEqual([]);
+    // 2. This tab adopts the new token first: the late page two is stale (its dialog is gone; the next open reads page one).
+    await reopen();
+    server.hold.cnList = 1;
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('uid-a');
+    await focusEvents();
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    await releaseNext(server);
+    await settle();
+    let from = gets(server, 'list').length;
+    await reopen();
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id)]);
+    expect(items()).toHaveLength(50);
+    // 3. Page two leaves with the new cookie and the old token: 403 → the one fresh check → the new token → dropped.
+    server.hold.current = 1;
+    await click('issued-payments-credit-more'); // its session check is held: the old session answers it
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    server.otherTab('uid-a');
+    await releaseNext(server);
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    expect(gets(server, 'list').at(-1)).toBe(page2());
+    expect(screen.queryByTestId('issued-payments-credit-state')).toBeNull();
+    // 4. A 401 on page two: the section signs out (holds detach); Reconnect, and the next open starts from page one.
+    await reopen();
+    server.cnScripts.list.push(401);
+    await click('issued-payments-credit-more');
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(screen.queryByTestId('issued-view')).toBeNull();
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    from = gets(server, 'list').length;
+    const looked = gets(server, 'lookup').length;
+    fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+    await listReady();
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id)]);
+    expect(gets(server, 'lookup', looked)).toEqual([lookupUrl()]);
+  });
+
+  it('Fix list 1, F11 (SEC-2). named → unnamed across a refresh from page one is rule 4\'s access loss: the lookup\'s rows go, and the page already in the new view is not read again', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 3); } });
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    expect(names()).toHaveLength(3);
+    server.cnNamesHidden.add('uid-a');
+    const from = gets(server, 'list').length;
+    act(() => { api().refresh(STORE_1, made[0].id, null); });
+    await waitFor(() => expect(names()).toEqual([]));
+    await cnReady();
+    expect(lookupPhase()).toBe('denied');
+    expect(items()).toHaveLength(3);
+    expect(gets(server, 'list', from)).toEqual([cnUrl(made[0].id)]);
+  });
+
+  it('Fix list 2, H6 (I1). the slice\'s view outlives a refresh that fails: named → a failed refresh → a page without names is still rule 4\'s access loss', async () => {
+    const { server, made, api } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 3); } });
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('exhausted'));
+    server.cnScripts.list.push(503);
+    act(() => { api().refresh(STORE_1, made[0].id, null); });
+    await waitFor(() => expect(cnPhase()).toBe('failed'));
+    server.cnNamesHidden.add('uid-a');
+    act(() => { api().refresh(STORE_1, made[0].id, null); });
+    await cnReady();
+    expect(names()).toEqual([]);
+    expect(lookupPhase()).toBe('denied');
+  });
+
+  it('Fix list 1, F22 (SCN-02). the lookup\'s 403 confirmed while the first list read is still out: that read is not sent again — an unnamed page is kept (ONE list read); a named page is dropped and read once more in the new view (ONE reload)', async () => {
+    for (const named of [false, true]) {
+      // Unnamed: SCN-02's view without names; named: the owner's names on the read sent before the confirmed denial.
+      const { server, made } = await setup({ owner: named, prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); if (named) s.cnScripts.lookup.push(403); else s.cnNamesHidden.add('uid-a'); } });
+      server.hold.cnList = 2;
+      await open(1);
+      await waitFor(() => expect(lookupPhase(), String(named)).toBe('denied'));
+      expect(gets(server, 'list'), String(named)).toEqual([cnUrl(made[0].id)]);
+      await releaseNext(server); // the read sent before the denial: named or not
+      if (named) {
+        server.cnNamesHidden.add('uid-a'); // the reload answers in the view the server gives now
+        await releaseNext(server);
+      }
+      await waitFor(() => expect(cnPhase(), String(named)).toBe('ready'));
+      expect(gets(server, 'list'), String(named)).toEqual(named ? [cnUrl(made[0].id), cnUrl(made[0].id)] : [cnUrl(made[0].id)]);
+      expect(items(), String(named)).toHaveLength(2);
+      expect(names(), String(named)).toEqual([]);
+      cleanup();
+    }
+  });
+
+  it('P2-53, P2-51. the list\'s status region (role status) and the lookup\'s alert region (role alert) are in place, empty, before their first text, each one region; the heading is level 4 and the list a named list; Show more and Try again are buttons, aria-disabled (never disabled) with their reason while a read is out', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    server.cnScripts.lookup.push(ok200({ attempts: [], nextCursor: 'x' }));
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((list) => { records.push(...list); });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    server.hold.cnList = 1;
+    await user().click(openButton(1));
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    const state = tid('issued-payments-credit-state');
+    expect(state).toHaveAttribute('role', 'status');
+    expect(state).toHaveTextContent(CREDIT_TEXT.listLoading);
+    const alert = tid('issued-payments-credit-lookup-alert');
+    expect(alert).toHaveAttribute('role', 'alert');
+    await waitFor(() => expect(alert).toHaveTextContent(CREDIT_TEXT.lookupFailed));
+    await flush();
+    observer.disconnect();
+    // A record whose target is the region (or its text) means the text came after the region: it was not inserted with it.
+    for (const region of [state, alert]) expect(records.some((x) => x.target === region || x.target.parentNode === region)).toBe(true);
+    expect(within(tid('issued-payments')).getAllByRole('status').filter((x) => x === state)).toHaveLength(1);
+    await releaseNext(server);
+    await cnReady();
+    expect(tid('issued-payments-credit-state')).toBe(state);
+    server.hold.cnList = 1;
+    const more = tid('issued-payments-credit-more');
+    await user().click(more);
+    await waitFor(() => expect(server.held).toHaveLength(1));
+    expect(more).toHaveAttribute('aria-disabled', 'true');
+    expect(more).not.toBeDisabled();
+    expect(describedBy('issued-payments-credit-more')).toBe(CREDIT_TEXT.listLoading);
+    await releaseNext(server);
+    await waitFor(() => expect(items()).toHaveLength(51));
+    const retry = tid('issued-payments-credit-lookup-retry');
+    expect(retry.tagName).toBe('BUTTON');
+    expect(retry).toHaveAttribute('aria-disabled', 'false');
+    expect(within(tid('issued-payments')).getByRole('heading', { level: 4 })).toHaveTextContent(CREDIT_TEXT.listTitle);
+    expect(within(tid('issued-payments')).getByRole('list', { name: CREDIT_TEXT.listTitle })).toBe(tid('issued-payments-credit-list'));
+  });
+
+  it('P2-60. the list and lookup strings are exactly the wording table\'s (doc 17 §2.7); none says paid, unpaid, refunded or refund; "withdraw" only for a credit note; no credit-note list or lookup control is named credit or withdraw', async () => {
+    // The issue side's strings join this block; its own P2-60 pins the whole block exactly.
+    expect({ ...CREDIT_TEXT, moreLoaded: CREDIT_TEXT.moreLoaded(3), number: CREDIT_TEXT.number(12) }).toMatchObject({
+      listTitle: 'Credit notes', listEmpty: 'No credit notes on this invoice.', listEmptyOwner: 'None have been issued yet.', listLoading: 'Loading credit notes…',
+      listFailed: "Credit notes couldn't be loaded.", tryAgain: 'Try again', showMore: 'Show more', moreLoaded: '3 more loaded.', number: 'CN-12',
+      active: 'Active', withdrawn: 'Withdrawn', issuedAt: 'Issued', withdrawnAt: 'Withdrawn', issuedBy: 'Issued by', withdrawnBy: 'Withdrawn by', nameNotSet: 'Name not set',
+      numberPending: 'The credit note number will show here when its row in the list loads.',
+      lookupFailed: "We couldn't check for unfinished credit notes on this invoice, so issuing is off for now.",
+      lookupIncomplete: "We haven't checked all your unfinished credit notes yet, so issuing is off for now.",
+      continueChecking: 'Continue checking',
+    });
+    expect(INVOICE_CREDIT_NOTE_REASONS).toEqual({ pricing_error: 'Pricing error', service_issue: 'Service issue', goodwill: 'Goodwill', billing_error: 'Billing error' });
+    expect(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS).toEqual({ entered_in_error: 'Entered by mistake', wrong_amount: 'Wrong amount', wrong_invoice: 'Wrong invoice' });
+    const strings = [...Object.values(CREDIT_TEXT).map((x) => (typeof x === 'function' ? (x as (...xs: unknown[]) => string)(2) : x)), ...Object.values(INVOICE_CREDIT_NOTE_REASONS), ...Object.values(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS)];
+    for (const said of strings) {
+      expect(said).not.toMatch(/\b(un)?paid\b|refund/i);
+      if (/withdraw/i.test(said)) expect(['Withdrawn', 'Withdrawn by']).toContain(said);
+    }
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51, (i) => (i === 0 ? { withdrawal: { withdrawnAt: cnTime(800), reason: 'wrong_amount', withdrawnByName: 'Ada Owner' } } : {})); } });
+    server.cnScripts.lookup.push(503);
+    await open(1);
+    await cnReady();
+    await waitFor(() => expect(lookupPhase()).toBe('incomplete'));
+    const section = tid('issued-payments');
+    expect(cnButtons()).toEqual([CREDIT_TEXT.continueChecking, CREDIT_TEXT.showMore]);
+    expect(within(section).queryAllByRole('button', { name: /credit|withdraw/i })).toEqual([]);
+    expect(section.textContent).not.toMatch(/amount due|\b(un)?paid\b|refund/i);
+  });
+});
+
+describe('Issued invoices — credit notes: issuing one (M7B-CREDITNOTES-CN-P2, the issue side)', { timeout: 30_000 }, () => {
+  beforeEach(() => { madeServers.length = 0; });
+  afterAll(() => { console.info(`P2-89 request-log checker: ${p289.tests} tests, ${p289.sends} first settlement sends`); });
+  afterEach(afterEachP289); // fix list 5, C: the P2-89 request-log invariant over every settlement this describe sends
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const sealedAnswer = (error: string) => json(409, { error });
+  const AT = (r: Rig) => utcText(new Date(r.clock.wall).toISOString());
+  const action = () => screen.queryByTestId('issued-payments-credit-issue');
+  const inlineSay = () => tid('issued-payments-credit-say').textContent;
+  const inlineAlert = () => tid('issued-payments-credit-alert').textContent;
+  const cardText = (prefix = 'issued-payments-credit-card') => screen.queryByTestId(`${prefix}-text`)?.textContent ?? null;
+  const cardButtons = (prefix = 'issued-payments-credit-card') => (screen.queryByTestId(prefix) === null ? [] : within(tid(prefix)).queryAllByRole('button').map((b) => b.textContent));
+  const rowStates = () => screen.queryAllByTestId('issued-payments-credit-row-state').map((x) => x.textContent);
+  const posts = (server: Server, route: 'register' | 'issue' | 'settle') => server.cnRequests(route).map((x) => x.body);
+  const held = (r: Rig) => r.cnHolds.get('uid-a');
+  const releaseNext = async (server: Server, late?: Response) => {
+    await until(() => expect(server.held.length).toBeGreaterThan(0));
+    server.held.shift()!.release(late);
+    await settle();
+  };
+  /** An owner at STORE_1 with the credit-note keys; `fetch` wraps the fake (the reversal eligibility, for P2-06). */
+  async function setup(o: { count?: number; prepare?: (server: Server, made: Issued[]) => void; identity?: (r: Rig) => ShopIdentity; fetch?: (server: Server) => typeof globalThis.fetch } = {}) {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, o.count ?? 2);
+    server.cnOwners.add('uid-a');
+    o.prepare?.(server, made);
+    const r = rig(server);
+    const over: Partial<ServerIssuedInvoicesProps> = {
+      ...(o.identity === undefined ? {} : { identity: o.identity(r) }),
+      ...(o.fetch === undefined ? {} : { issuing: createInvoiceIssuingClient({ fetch: o.fetch(server) }) }),
+    };
+    const page = render(<ServerIssuedInvoices {...r.props(over)} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    return { server, made, r, page };
+  }
+  async function open(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+  }
+  async function startForm(amount: string, reason: string | null) {
+    await waitFor(() => expect(action()).not.toBeNull());
+    await user().click(action()!);
+    type('issued-payments-credit-form-amount', amount);
+    if (reason !== null) fireEvent.click(tid(`issued-payments-credit-form-reason-${reason}`));
+  }
+  async function toConfirm(amount = '5.00', reason = 'goodwill') {
+    await startForm(amount, reason);
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).not.toBeNull());
+  }
+  /** "Issue credit note" without a shop sign-in → the sign-in group → the rig's password → signedIn. */
+  async function signIn() {
+    await click('issued-credit-send');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-password')).not.toBeNull());
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    await waitFor(() => expect(tid('issued-credit-confirm-status').textContent).toMatch(/^Signed in again at /));
+  }
+  /** Set up, open invoice 1, fill the form, review, sign in: the confirmation is open with a fresh shop sign-in. */
+  async function ready(o: Parameters<typeof setup>[0] & { amount?: string; reason?: string } = {}) {
+    const x = await setup(o);
+    await open(1);
+    await toConfirm(o.amount, o.reason);
+    await signIn();
+    return x;
+  }
+  const issuedText = CREDIT_TEXT.issued('$5.00', 'Goodwill');
+
+  it('P2-01. the store-scope owner, an issued invoice, the lookup read to the end, no blocker: "Issue credit note" is shown and enabled, with no reason; a manager sees no action', async () => {
+    const { page } = await setup();
+    await open(1);
+    await waitFor(() => expect(action()).not.toBeNull());
+    expect(action()).toHaveTextContent(CREDIT_TEXT.action);
+    expect(action()).toHaveAttribute('aria-disabled', 'false');
+    expect(action()!.getAttribute('aria-describedby')).toBeNull();
+    page.unmount();
+    cleanup();
+    const m = seeded();
+    issueAt(m, STORE_1, 1);
+    m.cnOwners.add('uid-m');
+    render(<ServerIssuedInvoices {...rig(m).props({ uid: 'uid-m' })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    await open(1);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'denied'));
+    expect(action()).toBeNull();
+  });
+
+  it('P2-05, P2-51. disabled with a reason (aria-disabled, the reason its aria-describedby): Remaining 0 → blockedRemaining; this owner\'s open row → blockedOwn; an attached payment attempt anywhere → blockedSibling; pressing does nothing', async () => {
+    const { server, made, r } = await setup({ count: 3, prepare: (s, m) => { s.credits.set(m[0].id, 2176); s.addCreditReg({ invoiceId: m[1].id, number: 2 }); } });
+    await open(1);
+    await waitFor(() => expect(action()).not.toBeNull());
+    expect(action()).toHaveAttribute('aria-disabled', 'true');
+    expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedRemaining);
+    await user().click(action()!);
+    expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull();
+    await click('issued-view-close');
+    await open(2);
+    await waitFor(() => expect(action()).not.toBeNull());
+    expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+    expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(r))]);
+    await click('issued-view-close');
+    await open(3);
+    await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+    act(() => {
+      r.payHolds.put('uid-a', {
+        key: uuid(0x9001), storeId: STORE_1, tenantId: TENANT_A, invoiceId: made[0].id, number: 1, csrf: 'c', stage: 'register', stageKey: uuid(0x9002), body: '{}',
+        sentAt: r.clock.mono, sentWall: r.clock.wall, lastSentAt: r.clock.mono, registrationId: null, proof: null, amountCents: 100, method: 'cash', payment: null,
+        settleVersion: null, state: 'unresolved', say: '', retryAfter: 0, rereads: 0,
+      } as HeldPayment);
+    });
+    expect(action()).toHaveAttribute('aria-disabled', 'true');
+    expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedSibling);
+    expect(server.cnRequests('register')).toEqual([]);
+  });
+
+  it('P2-06. coordination (D-P2-10 A): an open row or attempt here hides Record payment, Reverse and Void on this invoice; an attempt that can still be checked hides Void and Reverse on every invoice (Record stays there); the predicate is the exported one', async () => {
+    const reversible = (server: Server) => (async (input: RequestInfo | URL, init: RequestInit = {}) => (
+      String(input).endsWith('/payment-reversal-eligibility') ? json(200, { eligibility: 'allowed' }) : server.fetch(input, init)
+    )) as typeof globalThis.fetch;
+    const paid = (n: number) => ({ id: uuid(0x9100 + n), attemptId: uuid(0x9200 + n), amountCents: 100, method: 'cash', recordedAt: '2026-10-17T08:00:00.000001Z', reversal: null });
+    const { server, made, r } = await setup({
+      count: 3, fetch: reversible,
+      prepare: (s, m) => { s.recorders.add('uid-a'); for (const i of [0, 1, 2]) s.payments.set(m[i].id, [paid(i)]); s.addCreditReg({ invoiceId: m[1].id, number: 2 }); },
+    });
+    const shown = () => ({ record: screen.queryByTestId('issued-payments-record') !== null, reverse: screen.queryAllByTestId('issued-payments-reverse').length > 0, void: screen.queryByTestId('issued-view-void') !== null });
+    await open(3);
+    await waitFor(() => expect(shown()).toEqual({ record: true, reverse: true, void: true }));
+    await click('issued-view-close');
+    await open(2);
+    await waitFor(() => expect(rowStates()).toHaveLength(1));
+    await settle();
+    expect(shown()).toEqual({ record: false, reverse: false, void: false });
+    await click('issued-view-close');
+    // A register still out on invoice 1: Check-again-able (its window open) — Void and Reverse go everywhere.
+    server.cnRegs.splice(0);
+    server.hold.cnRegister = 1;
+    await open(1);
+    await toConfirm();
+    await signIn();
+    await click('issued-credit-send');
+    await until(() => expect(server.held.length).toBe(1));
+    expect(creditNoteHoldsSignIns(held(r), r.clock.mono, r.clock.wall)).toBe(true);
+    expect(shown()).toEqual({ record: false, reverse: false, void: false });
+    fireEvent.keyDown(tid('issued-credit-keep'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+    await click('issued-view-close');
+    await click('issued-list-retry'); // the sign-in cleared the list read before it (LIST_TEXT.renewed)
+    await listReady();
+    await open(3);
+    await waitFor(() => expect(shown().record).toBe(true));
+    await settle();
+    expect(shown()).toEqual({ record: true, reverse: false, void: false });
+    void made;
+  });
+
+  it('P2-08, P2-51. form validation on Continue: each error text tied to its field (aria-invalid, aria-describedby = hint + error), ONE alert summary, the reasons a fieldset with its legend, focus on the first invalid control, nothing sent', async () => {
+    const { server } = await setup();
+    await open(1);
+    await startForm('', null);
+    expect(within(tid('issued-payments-credit-form')).getByRole('group', { name: CREDIT_TEXT.legend })).toBeInTheDocument();
+    expect(within(tid('issued-payments-credit-form-reasons')).getByText(CREDIT_TEXT.reasonLegend).tagName).toBe('LEGEND');
+    expect(within(tid('issued-payments-credit-form-reasons')).getAllByRole('radio').map((x) => x.parentElement?.textContent)).toEqual(Object.values(INVOICE_CREDIT_NOTE_REASONS));
+    expect(tid('issued-payments-credit-form-amount-hint')).toHaveTextContent(CREDIT_TEXT.amountHint('$21.76'));
+    expect(tid('issued-payments-credit-form-errors').textContent).toBe('');
+    const cases: Array<[string, string]> = [['', CREDIT_TEXT.errFormat], ['$5', CREDIT_TEXT.errFormat], ['1,000', CREDIT_TEXT.errFormat], ['12.345', CREDIT_TEXT.errDecimals], ['0', CREDIT_TEXT.errZero], ['99.00', CREDIT_TEXT.errOver('$21.76')]];
+    for (const [typed, said] of cases) {
+      type('issued-payments-credit-form-amount', typed);
+      await click('issued-payments-credit-continue');
+      expect(tid('issued-payments-credit-form-amount-error').textContent, typed).toBe(said);
+      expect(tid('issued-payments-credit-form-amount')).toHaveAttribute('aria-invalid', 'true');
+      expect(describedBy('issued-payments-credit-form-amount')).toBe(`${CREDIT_TEXT.amountHint('$21.76')} ${said}`);
+      expect(tid('issued-payments-credit-form-errors')).toHaveTextContent(CREDIT_TEXT.errSummary);
+      expect(screen.getAllByRole('alert').filter((x) => x.textContent === CREDIT_TEXT.errSummary)).toHaveLength(1);
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-form-amount')));
+    }
+    expect(tid('issued-payments-credit-form-reason-error').textContent).toBe(CREDIT_TEXT.errReason);
+    expect(tid('issued-payments-credit-form-reasons')).toHaveAttribute('aria-invalid', 'true');
+    type('issued-payments-credit-form-amount', '5.00');
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-form-reason-pricing_error')));
+    expect(screen.queryByTestId('issued-payments-credit-form-amount-error')).toBeNull();
+    expect(screen.queryByTestId('issued-credit-confirm')).toBeNull();
+    expect(server.writes()).toEqual([]);
+  });
+
+  it('P2-09. the review before the confirmation re-reads the invoice, the payments and the lookup: Remaining fell → errOver on the amount (focus there); voided → reviewVoided; the lookup failing or stopping → its own text; an own open row → unfinished — never a confirmation', async () => {
+    const { server, made, r } = await setup();
+    await open(1);
+    await startForm('5.00', 'goodwill');
+    server.credits.set(made[0].id, 2000);
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(tid('issued-payments-credit-form-amount-error').textContent).toBe(CREDIT_TEXT.errOver('$1.76')));
+    expect(document.activeElement).toBe(tid('issued-payments-credit-form-amount'));
+    server.credits.delete(made[0].id);
+    server.cnScripts.lookup.push(503);
+    type('issued-payments-credit-form-amount', '1.00'); // within the remaining this page read last ($1.76); the review reads $21.76
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'incomplete'));
+    expect(tid('issued-payments-credit-lookup-alert')).toHaveTextContent(CREDIT_TEXT.lookupIncomplete);
+    expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull();
+    await click('issued-payments-credit-lookup-continue');
+    await waitFor(() => expect(action()).not.toBeNull());
+    server.addCreditReg({ invoiceId: made[0].id });
+    await startForm('5.00', 'goodwill');
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(inlineAlert()).toBe(CREDIT_TEXT.unfinished));
+    expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(r))]);
+    server.cnRegs.splice(0);
+    await click('issued-view-close');
+    await open(1);
+    await startForm('5.00', 'goodwill');
+    made[0].void = { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' };
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(inlineAlert()).toBe(CREDIT_TEXT.reviewVoided));
+    expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull();
+    expect(screen.queryByTestId('issued-credit-confirm')).toBeNull();
+    expect(server.writes()).toEqual([]);
+  });
+
+  it('P2-10, P2-51. the confirmation: an alertdialog named by its title and described by the exact consequence, the facts the review read, "Don\'t issue" focused', async () => {
+    await setup();
+    await open(1);
+    await toConfirm('5.00', 'service_issue');
+    const dialog = screen.getByRole('alertdialog', { name: CREDIT_TEXT.title });
+    expect(dialog).toHaveAccessibleDescription(CREDIT_TEXT.consequence('$5.00'));
+    expect(tid('issued-credit-description').textContent).toBe('This creates a separate credit note and lowers what the customer owes on this invoice by $5.00. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer. You can\'t undo it here.');
+    expect([tid('issued-credit-number').textContent, tid('issued-credit-amount').textContent, tid('issued-credit-reason').textContent, tid('issued-credit-remaining').textContent]).toEqual(['1', '$5.00', 'Service issue', '$21.76']);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-keep')));
+    expect(tid('issued-credit-keep')).toHaveTextContent(CREDIT_TEXT.keep);
+    expect(tid('issued-credit-send')).toHaveTextContent(CREDIT_TEXT.action);
+    expect([tid('issued-credit-confirm-status').textContent, tid('issued-credit-confirm-alert').textContent]).toEqual(['', '']);
+  });
+
+  it('P2-11, P2-12. no shop sign-in ≤ 8 minutes → the sign-in group (signInNeeded; password autocomplete current-password, focused), nothing sent; after it the review re-runs, the values stay, signedIn gives the clock times, and only a NEW press sends', async () => {
+    const { server, r } = await setup();
+    await open(1);
+    await toConfirm('5.00', 'goodwill');
+    await click('issued-credit-send');
+    await waitFor(() => expect(tid('issued-credit-confirm-alert').textContent).toBe(CREDIT_TEXT.signInNeeded));
+    expect(tid('issued-credit-reauth-password')).toHaveAttribute('autocomplete', 'current-password');
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-reauth-password')));
+    expect(server.cnRequests('register')).toEqual([]);
+    const from = server.sent.length;
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    const at = AT(r);
+    await waitFor(() => expect(tid('issued-credit-confirm-status').textContent).toBe(CREDIT_TEXT.signedIn(at, utcText(new Date(r.clock.wall + 8 * 60_000).toISOString()))));
+    expect(CREDIT_TEXT.signedIn(at, '2026-10-16 12:08:00 UTC')).toBe('Signed in again at 2026-10-16 12:00:00 UTC. Check the details, then press Issue credit note below before 2026-10-16 12:08:00 UTC.');
+    const reread = sentFrom(server, from).filter((x) => x.startsWith('GET /api/v1/stores/'));
+    expect(reread.some((x) => /\/invoices\/[^/]+$/.test(x))).toBe(true);
+    expect(reread.some((x) => x.endsWith('/payments'))).toBe(true);
+    expect(reread.some((x) => x.endsWith('/credit-note-attempts'))).toBe(true);
+    expect(reread.some((x) => x.endsWith('/credit-notes'))).toBe(true);
+    expect([tid('issued-credit-amount').textContent, tid('issued-credit-reason').textContent]).toEqual(['$5.00', 'Goodwill']);
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-keep')));
+    expect(server.cnRequests('register')).toEqual([]);
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(issuedText));
+    expect(server.cnRequests('register')).toHaveLength(1);
+  });
+
+  it('P2-13. the sign-in wait: bounded at 30 s (signInTimeout, nothing sent); Stop waiting and Escape end the wait at once', async () => {
+    const pending: Array<() => void> = [];
+    const { server } = await setup({ identity: (r) => ({ idToken: async () => 'tok-a', reauthMethod: () => 'password', reauthenticate: (uid, pw) => new Promise((done) => { r.reauth.push(pw); pending.push(() => done('tok-a')); }) }) });
+    await open(1);
+    await toConfirm();
+    await click('issued-credit-send');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-password')).not.toBeNull());
+    type('issued-credit-reauth-password', 'correct horse');
+    fakeClock();
+    fireEvent.click(tid('issued-credit-reauth-confirm'));
+    await flush();
+    expect(tid('issued-credit-reauth-stop')).toHaveTextContent(VOID_TEXT.stopWaiting);
+    await advance(30_000);
+    await until(() => expect(tid('issued-credit-confirm-alert').textContent).toBe(CREDIT_TEXT.signInTimeout));
+    vi.useRealTimers();
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    await click('issued-credit-reauth-stop');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-stop')).toBeNull());
+    expect(tid('issued-credit-confirm-alert').textContent).toBe('');
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    fireEvent.keyDown(tid('issued-credit-reauth-password'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+    for (const late of pending) late();
+    await settle();
+    expect(screen.queryByTestId('issued-credit-confirm')).toBeNull();
+    expect(server.cnRequests('register')).toEqual([]);
+  });
+
+  it('P2-14. a slow reader: the 8 minutes pass before the press → signInExpired with the old time, the values still shown; one more sign-in continues', async () => {
+    const { server, r } = await ready();
+    const first = AT(r);
+    r.clock.mono += 8 * 60_000 + 1_000;
+    r.clock.wall += 8 * 60_000 + 1_000;
+    await click('issued-credit-send');
+    await waitFor(() => expect(tid('issued-credit-confirm-alert').textContent).toBe(CREDIT_TEXT.signInExpired(first)));
+    expect([tid('issued-credit-amount').textContent, tid('issued-credit-reason').textContent]).toEqual(['$5.00', 'Goodwill']);
+    expect(server.cnRequests('register')).toEqual([]);
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    await waitFor(() => expect(tid('issued-credit-confirm-status').textContent).toMatch(/^Signed in again at /));
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(issuedText));
+    expect(server.cnRequests('register')).toHaveLength(1);
+  });
+
+  it('P2-15, P2-53. one press: ONE register, ONE proof, ONE issue, each held (stage, key, exact bytes, the registration id once known) before it leaves; one "sending" for the whole chain; the dialog\'s own pair while it is open, the section pair quiet while the dialog says it inline', async () => {
+    const { server, made, r } = await ready();
+    expect([tid('issued-credit-status').textContent, tid('issued-credit-alert').textContent, inlineSay(), inlineAlert()]).toEqual(['', '', '', '']);
+    server.hold.cnRegister = 1;
+    server.hold.cnProof = 1;
+    server.hold.cnIssue = 1;
+    await click('issued-credit-send');
+    await until(() => expect(server.held.length).toBe(1));
+    const [attemptId, regKey] = r.keys;
+    const reg = server.cnRequests('register');
+    expect(reg).toHaveLength(1);
+    expect(reg[0].headers.get('idempotency-key')).toBe(regKey);
+    expect(reg[0].body).toBe(creditNoteRegisterBodyOf(TENANT_A, attemptId, 500, 'goodwill'));
+    expect(held(r)).toMatchObject({ attemptId, stage: 'register', state: 'registering', register: { key: regKey, body: reg[0].body }, registrationId: null });
+    expect(tid('issued-credit-confirm-status').textContent).toBe(CREDIT_TEXT.sending);
+    expect(tid('issued-credit-keep')).toHaveTextContent(CREDIT_TEXT.close);
+    expect(describedBy('issued-credit-keep')).toBe(CREDIT_TEXT.closeWarning);
+    // Fix list 1 (F17): the page behind is inert while the confirmation is open — only its own pair says sending.
+    expect([inlineSay(), tid('issued-credit-status').textContent]).toEqual(['', '']);
+    await releaseNext(server);
+    await until(() => expect(server.held.length).toBe(1));
+    const g = server.cnRegs.find((x) => x.attemptId === attemptId)!;
+    expect(held(r)).toMatchObject({ stage: 'proof', state: 'registered', registrationId: g.id });
+    expect(server.cnRequests('proof').map((x) => x.url)).toEqual([`${STORES_PATH}/${STORE_1}/invoices/${made[0].id}/credit-note-registration-proof?registration=${g.id}`]);
+    expect([inlineSay(), tid('issued-credit-confirm-status').textContent]).toEqual(['', CREDIT_TEXT.sending]);
+    await releaseNext(server);
+    await until(() => expect(server.held.length).toBe(1));
+    const iss = server.cnRequests('issue');
+    expect(iss).toHaveLength(1);
+    expect(iss[0].headers.get('idempotency-key')).toBe(r.keys[2]);
+    // T-14: the bytes carry a proof — compared, never printed on a failure.
+    expect(iss[0].body === creditNoteIssueBodyOf({ expectedTenant: TENANT_A, registrationId: g.id, attemptId, grossCents: 500, reason: 'goodwill', registrationProof: g.proof }), 'the issue\'s exact bytes').toBe(true);
+    expect(held(r)).toMatchObject({ stage: 'issue', state: 'issuing', issue: { key: r.keys[2] } });
+    expect(held(r)?.issue?.body === iss[0].body, 'the held issue bytes are the sent ones').toBe(true);
+    await releaseNext(server);
+    await waitFor(() => expect(inlineSay()).toBe(issuedText));
+    expect([server.cnRequests('register'), server.cnRequests('proof'), server.cnRequests('issue')].map((x) => x.length)).toEqual([1, 1, 1]);
+    expect(server.cnBodyViolations).toEqual([]);
+    expect(tid('issued-credit-status').textContent).toBe('');
+    expect(screen.queryByTestId('issued-credit-confirm')).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-card-heading')));
+  });
+
+  it('P2-16, P2-89. issued: the card says issued, issuedHint and confirmHint with "Confirm credit note"; the payments and the list are read again and CN-<n> comes from the matching row; Confirm (version 2, a new key, no lookup needed) → confirmed, read again; the action comes back', async () => {
+    const { server, made, r } = await ready({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 1, () => ({ issuedAt: cnTime(1) })); } });
+    const payReads = server.paymentReads().length;
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(issuedText));
+    expect(tid('issued-payments-credit-card-hint').textContent).toBe(CREDIT_TEXT.issuedHint);
+    expect(describedBy('issued-payments-credit-card-confirm')).toBe(CREDIT_TEXT.confirmHint);
+    await waitFor(() => expect(tid('issued-payments-credit-card-number').textContent).toBe('CN-2'));
+    await waitFor(() => expect(tid('issued-payments-credited')).toHaveTextContent('$5.00'));
+    expect(server.paymentReads().length).toBeGreaterThan(payReads);
+    expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
+    expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+    const lookups = server.cnRequests('lookup').length;
+    const lists = server.cnRequests('list').length;
+    await click('issued-payments-credit-card-confirm');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+    const settle1 = server.cnRequests('settle');
+    expect(settle1).toHaveLength(1);
+    expect(settle1[0].body).toBe(settleBodyOf(TENANT_A, r.keys[0], 2));
+    expect(settle1[0].headers.get('idempotency-key')).toBe(r.keys[3]);
+    // E: the lookup is sent after its own session read — awaited as the state it is, not assumed sent with the card's line.
+    await waitFor(() => expect(server.cnRequests('lookup').length).toBeGreaterThan(lookups)); // read after the 200 (not before: the post-201 Confirm needs none)
+    expect(server.sent.findIndex((x) => x === settle1[0])).toBeLessThan(server.sent.findIndex((x, i) => i > server.sent.indexOf(settle1[0]) && x.url.endsWith('/credit-note-attempts')));
+    await waitFor(() => expect(server.cnRequests('list').length).toBeGreaterThan(lists));
+    expect(cardButtons()).toEqual([]);
+    await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+    expect(creditNamedOutside(tid('issued-payments'))).toEqual([]);
+    void made;
+  });
+
+  it('P2-17, P2-89. sealed amount_exceeds_remaining → overRemaining, the amounts read again, "Look up attempt" (no Release on the card) → the open row → "Release attempt" (releaseHint) → released; the action comes back; the release followed a lookup read of this generation and token', async () => {
+    const { server, made } = await ready();
+    server.credits.set(made[0].id, 2000);
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.overRemaining));
+    expect(inlineAlert()).toBe(CREDIT_TEXT.overRemaining);
+    await waitFor(() => expect(tid('issued-payments-remaining')).toHaveTextContent('$1.76'));
+    expect(cardButtons()).toEqual([CREDIT_TEXT.find]);
+    expect(screen.queryByTestId('issued-payments-credit-row-release')).toBeNull();
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+    expect(describedBy('issued-payments-credit-row-release')).toBe(CREDIT_TEXT.releaseHint);
+    const lookupAt = server.sent.length;
+    await click('issued-payments-credit-row-release');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.released));
+    const settles = server.cnRequests('settle');
+    expect(settles).toHaveLength(1);
+    expect(JSON.parse(settles[0].body!)).toMatchObject({ expectedVersion: 1 });
+    const settleAt = server.sent.indexOf(settles[0]);
+    const lastLookup = server.sent.map((x, i) => (x.url.endsWith('/credit-note-attempts') && i < settleAt ? i : -1)).reduce((a, b) => Math.max(a, b), -1);
+    expect(lastLookup).toBeGreaterThan(-1);
+    expect(lastLookup).toBeLessThan(lookupAt);
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowReleased]));
+    server.credits.delete(made[0].id);
+    await waitFor(() => expect(action()).not.toBeNull());
+  });
+
+  it('P2-18. a sealed issue invalid_state: the invoice re-read says voided → voided + Look up attempt (→ the open row → Release); not voided → attemptReleased, the attempt ends; the re-read failing → invalidStateUnknown', async () => {
+    for (const cause of ['voided', 'released', 'unread'] as const) {
+      const { server, made, r } = await ready();
+      server.hold.cnIssue = 1;
+      await click('issued-credit-send');
+      await until(() => expect(server.held.length).toBe(1));
+      if (cause === 'voided') made[0].void = { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' };
+      if (cause === 'released') server.cnRegs.find((x) => x.attemptId === r.keys[0])!.state = 'released';
+      if (cause === 'unread') { server.cnRegs.find((x) => x.attemptId === r.keys[0])!.state = 'released'; server.detailStatus.push(503); }
+      await releaseNext(server);
+      const said = cause === 'voided' ? CREDIT_TEXT.voided : cause === 'released' ? CREDIT_TEXT.attemptReleased : CREDIT_TEXT.invalidStateUnknown;
+      await waitFor(() => expect(cardText(), cause).toBe(said));
+      expect(cardButtons(), cause).toEqual(cause === 'released' ? [] : [CREDIT_TEXT.find]);
+      if (cause === 'released') expect(held(r)?.state).toBe('released');
+      if (cause === 'voided') {
+        await click('issued-payments-credit-card-find');
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+        await click('issued-payments-credit-row-release');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.released));
+      }
+      cleanup();
+    }
+  });
+
+  it('P2-19. a register\'s sealed write_conflict (an unfinished attempt of this owner here): unfinished, the attempt ends, and the lookup runs — its open row offers Release', async () => {
+    const { server, made, r } = await ready();
+    server.addCreditReg({ invoiceId: made[0].id });
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unfinished));
+    expect(held(r)?.state).toBe('ended');
+    expect(cardButtons()).toEqual([]);
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(r))]));
+    expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull();
+    expect(server.cnRequests('proof')).toEqual([]);
+  });
+
+  it('P2-20. a sealed already_issued: alreadyIssued and Look up attempt; the lookup offers "Confirm credit note" only for an issued row (never Release)', async () => {
+    const { server, made, r } = await ready();
+    server.cnScripts.issue.push(sealedAnswer('already_issued'));
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.alreadyIssued));
+    const g = server.cnRegs.find((x) => x.attemptId === r.keys[0])!;
+    const [note] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    g.state = 'issued';
+    g.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+    expect(screen.queryByTestId('issued-payments-credit-row-release')).toBeNull();
+    expect(describedBy('issued-payments-credit-row-confirm')).toBe(CREDIT_TEXT.confirmHint);
+    await click('issued-payments-credit-row-confirm');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+    expect(JSON.parse(server.cnRequests('settle')[0].body!)).toMatchObject({ expectedVersion: 2 });
+  });
+
+  it('P2-21. a register\'s first-send answers with no Check again sent: 401 (ended), 403 (one fresh check: notAllowed), 400, 404, an unsealed 409 (notAccepted) and a 429 (rateLimited) end the attempt; 409 request_in_progress keeps it (inProgress); a 422 fails closed (internalError) — nothing under a new key', async () => {
+    const cases: Array<[string, Response | number, string, 'ended' | 'registering']> = [
+      ['401', 401, CREDIT_TEXT.ended, 'ended'], ['403', 403, CREDIT_TEXT.notAllowed, 'ended'], ['400', 400, CREDIT_TEXT.notAccepted, 'ended'], ['404', 404, CREDIT_TEXT.notAccepted, 'ended'],
+      ['409 unsealed', chain(409, 'write_conflict'), CREDIT_TEXT.notAccepted, 'ended'], ['429', 429, CREDIT_TEXT.rateLimited(7), 'ended'],
+      ['409 in progress', chain(409, 'request_in_progress'), CREDIT_TEXT.inProgress, 'registering'], ['422', chain(422, 'idempotency_key_reused'), CREDIT_TEXT.internalError, 'registering'],
+    ];
+    for (const [name, answer, said, state] of cases) {
+      const { server, r } = await ready();
+      server.retryAfter = '7';
+      server.cnScripts.register.push(answer as PayScript);
+      await click('issued-credit-send');
+      const where = name === '401' ? () => tid('issued-credit-alert').textContent : name === '409 in progress' ? inlineSay : inlineAlert;
+      await waitFor(() => expect(where(), name).toBe(said));
+      if (name !== '401') expect(held(r)?.state, name).toBe(state);
+      expect(server.cnRequests('register'), name).toHaveLength(1);
+      expect(server.cnRequests('proof'), name).toEqual([]);
+      if (name === '403') expect(sentFrom(server, server.sent.indexOf(server.cnRequests('register')[0]) + 1)).toContain(`GET ${TENANT_SESSION_PATHS.current}`);
+      if (name === '422') expect(cardButtons(), name).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]); // an unresolved card: Hide this attempt (D-P2-6)
+      cleanup();
+    }
+  });
+
+  it('P2-27, P2-28 (12). no answer within 30 s: the stage shows unresolved (register: regUnknown; issue: unresolved; settlement: settleUnknown) with Look up attempt; the request is never aborted and its late answer still counts — a late register 201 records registeredOnly and starts no proof', async () => {
+    const { server, r } = await ready();
+    server.hold.cnRegister = 1;
+    fakeClock();
+    fireEvent.click(tid('issued-credit-send'));
+    await until(() => expect(server.held.length).toBe(1));
+    await advance(30_000);
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.regUnknown));
+    expect(screen.queryByTestId('issued-credit-confirm')).toBeNull();
+    expect(cardButtons()).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]); // in flight under 30 s on the rig clock: no Check again yet
+    expect(server.cnRequests('register')[0].signal?.aborted).toBe(false); // T-09: its signal exists and was never aborted (no `?? false` stand-in)
+    expect(held(r)?.unresolved).toBe(true);
+    server.held.shift()!.release();
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true))); // the card waits for Continue issuing (§2.6 item 3)
+    expect(held(r)?.state).toBe('registered');
+    await advance(60_000);
+    expect(server.cnRequests('proof')).toEqual([]);
+    expect(server.cnRequests('issue')).toEqual([]);
+    vi.useRealTimers();
+    cleanup();
+    const second = await ready();
+    second.server.hold.cnIssue = 1;
+    fakeClock();
+    fireEvent.click(tid('issued-credit-send'));
+    await until(() => expect(second.server.held.length).toBe(1));
+    expect(second.server.held[0].kind).toBe('cnIssue');
+    await advance(30_000);
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(false)));
+    expect(CREDIT_TEXT.unresolved(false)).toBe("We can't tell whether this credit note was issued. Don't assume it wasn't. Look up this attempt.");
+    second.server.held.shift()!.release();
+    await until(() => expect(cardText()).toBe(issuedText));
+    expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
+    // A Confirm with no answer: settleUnknown at 30 s, and Look up attempt is usable at once (the request runs on); no second Confirm.
+    second.server.hold.cnSettle = 1;
+    fireEvent.click(tid('issued-payments-credit-card-confirm'));
+    await until(() => expect(second.server.held.length).toBe(1));
+    await advance(30_000);
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(false)));
+    expect(cardButtons()).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+    expect(tid('issued-payments-credit-card-find')).toHaveAttribute('aria-disabled', 'false');
+    expect(second.server.cnRequests('settle')).toHaveLength(1);
+  });
+
+  it('P2-77. the 8-minute window passes inside the chain (register and proof succeed): registeredOnly + continueLapsed + Look up attempt; no issue is sent', async () => {
+    const { server, r } = await ready();
+    // The press at 7 min 50 s (a first send may leave); the register answers 20 s later (inside its 30 s), so the proof's
+    // 200 lands with the sign-in 8 min 10 s old: the window passed inside the chain, before the issue's first send.
+    r.clock.mono += 8 * 60_000 - 10_000;
+    r.clock.wall += 8 * 60_000 - 10_000;
+    server.hold.cnRegister = 1;
+    await click('issued-credit-send');
+    await until(() => expect(server.held.length).toBe(1));
+    r.clock.mono += 20_000;
+    r.clock.wall += 20_000;
+    await releaseNext(server);
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.continueLapsed));
+    expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.registeredOnly(false));
+    expect(cardButtons()).toEqual([CREDIT_TEXT.find]);
+    expect(server.cnRequests('issue')).toEqual([]);
+    expect(held(r)?.issue).toBeNull();
+  });
+
+  it('P2-32, P2-33. the lookup row of an attempt this page does not hold: issued (version 2) → Confirm (confirmHint) → confirmed; open (version 1) → Release → released; the list read again', async () => {
+    const { server, made, r } = await setup({
+      prepare: (s, m) => {
+        const g = s.addCreditReg({ invoiceId: m[0].id, state: 'issued' });
+        const [note] = s.addCreditNotes(m[0].id, 1, () => ({ issuedAt: s.cnTick() }));
+        g.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+        s.addCreditReg({ invoiceId: m[1].id, number: 2 });
+      },
+    });
+    await open(1);
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+    expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+    const lists = server.cnRequests('list').length;
+    await click('issued-payments-credit-row-confirm');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+    expect(JSON.parse(server.cnRequests('settle')[0].body!)).toEqual({ expectedTenant: TENANT_A, attemptId: server.cnRegs[0].attemptId, expectedVersion: 2 });
+    await waitFor(() => expect(server.cnRequests('list').length).toBeGreaterThan(lists));
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowConfirmed]));
+    await click('issued-view-close');
+    await open(2);
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(r))]));
+    await click('issued-payments-credit-row-release');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.released));
+    expect(server.cnRegs[1].state).toBe('released');
+    void made;
+  });
+
+  it('P2-39. duplicate presses: a double click on "Issue credit note" (and on Confirm) sends ONE request per stage', async () => {
+    const { server } = await ready();
+    server.hold.cnRegister = 1;
+    await user().dblClick(tid('issued-credit-send'));
+    fireEvent.click(tid('issued-credit-send'));
+    await releaseNext(server);
+    await waitFor(() => expect(cardText()).toBe(issuedText));
+    expect([server.cnRequests('register'), server.cnRequests('proof'), server.cnRequests('issue')].map((x) => x.length)).toEqual([1, 1, 1]);
+    await user().dblClick(tid('issued-payments-credit-card-confirm'));
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+    expect(server.cnRequests('settle')).toHaveLength(1);
+  });
+
+  it('P2-43. nothing is sent on its own: timers, a focus, a tab return, a remount and a late answer send no register, proof, issue or settlement', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r, page } = await ready();
+    server.hold.cnRegister = 1;
+    fakeClock();
+    fireEvent.click(tid('issued-credit-send'));
+    await until(() => expect(server.held.length).toBe(1));
+    await advance(10 * 60_000);
+    vi.useRealTimers();
+    await focusEvents();
+    const writes = () => [server.cnRequests('register'), server.cnRequests('proof'), server.cnRequests('issue'), server.cnRequests('settle')].map((x) => x.length);
+    expect(writes()).toEqual([1, 0, 0, 0]);
+    mountEpoch += 1; // a key remount is a new mount (fix list 7 › N3: the P2-89 generation)
+    page.rerender(<ServerIssuedInvoices {...r.props({ uid: 'uid-a' })} key="again" />);
+    await settle();
+    server.held.shift()!.release();
+    await settle();
+    await focusEvents();
+    expect(writes()).toEqual([1, 0, 0, 0]);
+  });
+
+  it('P2-54. Escape in flight closes the confirmation and aborts nothing (closedInFlight said); the late outcome is said in the section\'s regions once the dialog is closed too', async () => {
+    const { server } = await ready();
+    server.hold.cnIssue = 1;
+    await click('issued-credit-send');
+    await until(() => expect(server.held.length).toBe(1));
+    fireEvent.keyDown(tid('issued-credit-keep'), { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+    expect(inlineSay()).toBe(CREDIT_TEXT.closedInFlight);
+    await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+    await releaseNext(server);
+    await waitFor(() => expect(tid('issued-credit-status').textContent).toBe(issuedText));
+    expect(cardText('issued-credit-card')).toBe(issuedText);
+    expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.confirm]);
+    expect(server.cnRequests('issue')).toHaveLength(1);
+  });
+
+  it('P2-64. card texts with a lookup that does not decide: an issue sent and no row → notListed (never "not issued"); no issue sent and no row → regUnknown; open rows read "Registered, not issued when checked at {time}"', async () => {
+    const { server, r } = await ready();
+    server.cnScripts.issue.push('lose');
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true))); // answered (lost): Check again is offered (§3.1)
+    server.cnRegs.splice(0);
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.notListed));
+    expect(cardText()).not.toMatch(/no credit note was issued/i);
+    cleanup();
+    const two = await ready();
+    two.server.cnScripts.proof.push(503);
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true))); // proof 503: Continue issuing is offered (§3.1)
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(two.r))]));
+    expect(CREDIT_TEXT.rowOpen('2026-10-16 12:00:00 UTC')).toBe('Registered, not issued when checked at 2026-10-16 12:00:00 UTC');
+    two.server.cnRegs.splice(0);
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.regUnknown));
+    void r;
+  });
+
+  it('P2-28 (5, 11, 12). first sends judged per attempt, forward only, never starting a later stage: an issue left unresolved that the lookup shows issued → Confirm on its row; the stalled original then refused before the key (a step-up) changes nothing — no "No credit note" text, no Release; a late proof 200 after released restores nothing', async () => {
+    const { server, made, r } = await ready();
+    server.hold.cnIssue = 1;
+    fakeClock();
+    fireEvent.click(tid('issued-credit-send'));
+    await until(() => expect(server.held.length).toBe(1));
+    await advance(30_000);
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(false)));
+    vi.useRealTimers();
+    // The same key committed meanwhile (the server's side of case 5's replay): the lookup shows the attempt issued.
+    const g = server.cnRegs.find((x) => x.attemptId === r.keys[0])!;
+    const [note] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick() }));
+    g.state = 'issued';
+    g.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+    expect(held(r)?.state).toBe('issued');
+    expect(screen.queryByTestId('issued-payments-credit-row-confirm')).not.toBeNull();
+    server.held.shift()!.release(chain(403, 'step_up_required'));
+    await settle();
+    expect(held(r)?.state).toBe('issued');
+    expect(tid('issued-payments').textContent).not.toMatch(/No credit note was issued|sign-in was too old/);
+    expect(screen.queryByTestId('issued-payments-credit-row-release')).toBeNull();
+    cleanup();
+    const two = await ready();
+    two.server.hold.cnProof = 1;
+    fakeClock();
+    fireEvent.click(tid('issued-credit-send'));
+    await until(() => expect(two.server.held.length).toBe(1));
+    await advance(30_000);
+    await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(false)));
+    vi.useRealTimers();
+    await click('issued-payments-credit-card-find');
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+    await click('issued-payments-credit-row-release');
+    await waitFor(() => expect(held(two.r)?.state).toBe('released'));
+    const g2 = two.server.cnRegs.find((x) => x.attemptId === two.r.keys[0])!;
+    two.server.held.shift()!.release(json(200, { registration: { id: g2.id, invoiceId: two.made[0].id, attemptId: g2.attemptId }, proof: g2.proof }));
+    await settle();
+    expect(held(two.r)?.state).toBe('released');
+    expect(cardText()).toBe(CREDIT_TEXT.released);
+    expect(cardButtons()).toEqual([]);
+    expect(two.server.cnRequests('issue')).toEqual([]);
+  });
+
+  it('P2-60, CN-27b, DIS-16. every credit-note string is exactly the wording table\'s (doc 17 §2.7); none says paid, unpaid, refunded or refund; "withdraw" only for a credit note; inside Payments only the three approved names say "credit" and none says "withdraw"', async () => {
+    const at = '2026-10-16 12:00:00 UTC';
+    const evaluated = Object.fromEntries(Object.entries(CREDIT_TEXT).map(([k, v]) => [k, typeof v === 'function' ? (v as (...xs: unknown[]) => string)(...({
+      moreLoaded: [3], number: [12], amountHint: ['$21.76'], errOver: ['$21.76'], consequence: ['$5.00'], signedIn: [at, '2026-10-16 12:08:00 UTC'], signInExpired: [at],
+      registeredOnly: [true], issued: ['$5.00', 'Goodwill'], unresolved: [true], rateLimited: [1], rateLimitedWait: [2], settleUnknown: [true], checkUntil: [at], rowOpen: [at],
+    } as Record<string, unknown[]>)[k]) : v]));
+    expect(evaluated).toEqual({
+      listTitle: 'Credit notes', listEmpty: 'No credit notes on this invoice.', listEmptyOwner: 'None have been issued yet.', listLoading: 'Loading credit notes…',
+      listFailed: "Credit notes couldn't be loaded.", tryAgain: 'Try again', showMore: 'Show more', moreLoaded: '3 more loaded.', number: 'CN-12',
+      active: 'Active', withdrawn: 'Withdrawn', issuedAt: 'Issued', withdrawnAt: 'Withdrawn', issuedBy: 'Issued by', withdrawnBy: 'Withdrawn by', nameNotSet: 'Name not set',
+      numberPending: 'The credit note number will show here when its row in the list loads.',
+      lookupFailed: "We couldn't check for unfinished credit notes on this invoice, so issuing is off for now.",
+      lookupIncomplete: "We haven't checked all your unfinished credit notes yet, so issuing is off for now.", continueChecking: 'Continue checking',
+      action: 'Issue credit note', legend: 'Issue a credit note', amountLabel: 'Amount (USD)', amountHint: 'Up to $21.76 remaining.', reasonLegend: 'Reason', continue: 'Continue', cancel: 'Cancel',
+      errFormat: 'Enter an amount in dollars and cents, such as 12.50, without $ or commas.', errDecimals: 'Enter an amount with no more than two decimal places.',
+      errZero: 'Enter an amount of at least $0.01.', errOver: "The amount can't be more than the $21.76 remaining.", errReason: 'Choose a reason.', errSummary: 'Fix the marked fields to continue.',
+      reviewVoided: "This invoice was voided, so a credit note can't be issued.", title: 'Issue a credit note?',
+      consequence: "This creates a separate credit note and lowers what the customer owes on this invoice by $5.00. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer. You can't undo it here.",
+      keep: "Don't issue", close: 'Close', closeWarning: "Closing this window doesn't cancel the credit note. It may still be issued.", closedInFlight: 'Closed. The credit note is still being sent.',
+      signInNeeded: 'Issuing a credit note needs a recent sign-in. Sign in again to continue. No credit note has been issued yet.',
+      signInTimeout: "Sign-in didn't finish within 30 seconds. No credit note has been issued yet. Try again.",
+      signedIn: `Signed in again at ${at}. Check the details, then press Issue credit note below before 2026-10-16 12:08:00 UTC.`,
+      signInExpired: `Your sign-in from ${at} is too old to issue now. Sign in again to continue. No credit note has been issued yet.`,
+      sending: 'Issuing the credit note…',
+      registeredOnly: 'Registered. No credit note has been issued from this attempt yet. Check the amounts, then press Continue issuing, or look up this attempt to release it.',
+      continueIssuing: 'Continue issuing', continueHint: 'This uses the attempt you already registered. No new attempt is made.',
+      continueLapsed: "Your sign-in is too old to continue this attempt, and a new sign-in can't use it. Look up this attempt to release it, then start again.",
+      continueAfterSignIn: "This attempt can't continue after a new sign-in. Look up this attempt to release it, then start again.",
+      anotherNoteFound: 'Credit notes were issued on this invoice since you started this attempt. Check them before you continue.',
+      anotherNoteUnknown: "We couldn't compare every credit note on this invoice with the list from when you started, so one may have been issued since. Check the list before you continue.",
+      issueAnother: 'Issue another credit note',
+      anotherHint: "This issues one more credit note on this invoice. If one of this invoice's credit notes already covers it, look up this attempt to release it instead.",
+      regUnknown: 'No credit note was issued from this attempt. If the lookup finds it open, you can release it here.', issued: 'Credit note issued: $5.00, Goodwill.',
+      issuedHint: "Confirm it to finish. Until you confirm, you can't issue another credit note on this invoice.",
+      confirmHint: 'The credit note is already issued. Confirming only closes this attempt. It moves no money.', confirm: 'Confirm credit note', confirmed: 'Credit note confirmed.',
+      release: 'Release attempt', released: 'Attempt released. No credit note was issued from it.',
+      releaseHint: 'Release this attempt to free the invoice. Then you can issue a new credit note, for a smaller amount if needed.',
+      overRemaining: 'No credit note was issued: the amount is more than what remains on this invoice now.', voided: 'No credit note was issued: this invoice was voided.',
+      attemptReleased: 'No credit note was issued: this attempt was released.',
+      invalidStateUnknown: 'No credit note was issued from this attempt. The invoice may have been voided, or the attempt released. Look up this attempt.',
+      issueStale: 'Your sign-in was too old, so no credit note was issued. Look up this attempt to release it, then start again.',
+      alreadyIssued: 'A credit note already exists for this attempt. Look up this attempt to confirm it.',
+      cantContinue: "This attempt can't continue from here. Look up attempt to see what happened.",
+      unfinished: 'You have an unfinished credit note on this invoice. Confirm or release it before you issue another.',
+      notAccepted: 'No credit note was issued: the server did not accept this request.', notAllowed: "You can't issue credit notes at this store now. No credit note was issued.",
+      unresolved: "We can't tell whether this credit note was issued. Don't assume it wasn't. Check again, or look up this attempt.",
+      replayGone: "We can't check this attempt from this sign-in, so we don't know whether the credit note was issued. Look up this attempt to see.",
+      notListed: "We can't tell whether this credit note was issued. The lookup didn't find this attempt. Check this invoice's credit notes later.",
+      inProgress: "This request is still being processed. We don't know the result yet. Check again in a few seconds.",
+      rateLimited: 'Too many tries at once. Wait 1 second, then try again.', rateLimitedWait: 'Too many tries at once. Wait 2 seconds, then check again.',
+      noAccess: "Your access to credit notes at this store changed, so you can't finish this attempt. It may already have been issued. Ask an owner to check this invoice's credit notes.",
+      noAccessShort: "Your access to credit notes at this store changed, so you can't finish this attempt.",
+      endedUnknown: "You were signed out, so we can't tell whether this credit note was issued. Sign in again, then look up this attempt.",
+      ended: 'Your server session ended. Reconnect to see issued invoices.',
+      internalError: 'Something went wrong with this request, so nothing more was sent. Look up this attempt.',
+      settleNotDone: "We couldn't confirm that this attempt was finished for this account. Look up this attempt.",
+      settleUnknown: "We can't tell whether this attempt was finished. Check again, or look up this attempt to see.",
+      find: 'Look up attempt', checkAgain: 'Check again', checkUntil: `You can check again until ${at}.`,
+      checkReplayHint: "Sends the same request again. If it wasn't recorded yet, this can finish it. It never starts a new attempt.",
+      checkReadHint: 'Only checks this attempt. It changes nothing.', hide: 'Hide this attempt',
+      hideWarning: "This only hides it here. It releases nothing, issues nothing and moves no money, and it doesn't tell us whether the credit note was issued. If the attempt is still open, it still blocks your next credit note on this invoice. Check this invoice's credit notes later.",
+      rowOpen: `Registered, not issued when checked at ${at}`, rowIssued: 'Issued, not confirmed', rowReleased: 'Released', rowConfirmed: 'Confirmed',
+      blockedOwn: 'Confirm or release the unfinished credit note below first.', blockedSibling: 'Finish your unfinished payment, reversal or void attempt first.',
+      blockedRemaining: 'Nothing remains to credit on this invoice.',
+    });
+    // The variants without the words a button would back (§2.7 notes): no dangling lower case.
+    expect([CREDIT_TEXT.registeredOnly(false), CREDIT_TEXT.settleUnknown(false), CREDIT_TEXT.rateLimited(2)]).toEqual([
+      'Registered. No credit note has been issued from this attempt yet. Check the amounts, then look up this attempt to release it.',
+      "We can't tell whether this attempt was finished. Look up this attempt to see.", 'Too many tries at once. Wait 2 seconds, then try again.']);
+    expect(CREDIT_BUTTON_NAMES).toEqual([CREDIT_TEXT.action, CREDIT_TEXT.issueAnother, CREDIT_TEXT.confirm]);
+    for (const said of Object.values(evaluated)) {
+      expect(said).not.toMatch(/\b(un)?paid\b|refund/i); // CN-27b, and no "refund" anywhere
+      if (/withdraw/i.test(said)) expect(['Withdrawn', 'Withdrawn by']).toContain(said);
+    }
+    // Rendered: the issued card, the rows and the action inside Payments; outside it the section's words stay clear.
+    const { server } = await ready({ prepare: (s, m) => { s.addCreditReg({ invoiceId: m[1].id, number: 2 }); } });
+    await click('issued-credit-send');
+    await waitFor(() => expect(cardText()).toBe(issuedText), { timeout: 10_000 });
+    await waitFor(() => expect(action()).not.toBeNull()); // the form resets once the press returns (after the card speaks)
+    const section = tid('issued-payments');
+    expect(creditNamedOutside(section)).toEqual([]);
+    expect(within(section).getAllByRole('button', { name: /credit/i }).map((b) => b.textContent).sort()).toEqual([CREDIT_TEXT.confirm, CREDIT_TEXT.action]);
+    expect(section.textContent).not.toMatch(/amount due|\b(un)?paid\b|refund/i);
+    await click('issued-view-close');
+    await waitFor(() => expect(cardText('issued-credit-card')).toBe(issuedText), { timeout: 10_000 });
+    expect(unvoided(outsidePayments(tid('issued-section')))).not.toMatch(FORBIDDEN);
+    void server;
+  });
+
+  // ---- the recovery side (doc 17 §3): Check again, Continue issuing (E1-E7, D-P2-15), Hide, detach, reload ----
+  // Most rows here walk several scenarios (each its own page and fake): a longer budget than the 5 s default.
+  describe('recovering one (M7B-CREDITNOTES-CN-P2, the recovery side)', { timeout: 30_000 }, () => {
+    const control = (name: string, prefix = 'issued-payments-credit-card') => screen.queryByTestId(`${prefix}-${name}`);
+    /** One press on a card control (works with fake timers on: no userEvent). */
+    const press = async (name: string, prefix?: string) => { fireEvent.click(control(name, prefix)!); await settle(); };
+    /** Both rig clocks and the faked timers move together. */
+    const pass = async (r: Rig, ms: number) => { r.clock.mono += ms; r.clock.wall += ms; await advance(ms); };
+    const keyOf = (x: Sent) => x.headers.get('idempotency-key');
+    const at = (wallMs: number) => utcText(new Date(wallMs).toISOString());
+    /** Every successive text `el` shows from now on (one entry per change). */
+    const watch = (el: HTMLElement) => {
+      const seen: string[] = [];
+      const o = new MutationObserver(() => { const t = el.textContent ?? ''; if (seen[seen.length - 1] !== t) seen.push(t); });
+      o.observe(el, { childList: true, characterData: true, subtree: true });
+      return () => { o.disconnect(); return seen; };
+    };
+    const writes = (server: Server) => [server.cnRequests('register'), server.cnRequests('issue'), server.cnRequests('settle')].map((x) => x.length);
+    /** `stage`'s first send held at the fake past its 30 s (fake timers from here on): the card offers Check again. */
+    async function stalled(x: { server: Server; r: Rig }, kind: 'cnRegister' | 'cnIssue') {
+      x.server.hold[kind] = 1;
+      fakeClock();
+      fireEvent.click(tid('issued-credit-send'));
+      await until(() => expect(x.server.held.length).toBe(1));
+      await pass(x.r, 30_000);
+      await until(() => expect(control('check')).not.toBeNull());
+    }
+    /** An issued attempt whose Confirm is held at the fake past its 30 s (fake timers from here on): settleUnknown with Check again. */
+    async function stalledSettle(x: { server: Server; r: Rig }) {
+      fireEvent.click(tid('issued-credit-send'));
+      await until(() => expect(cardText()).toBe(issuedText));
+      x.server.hold.cnSettle = 1;
+      fakeClock();
+      fireEvent.click(control('confirm')!);
+      await until(() => expect(x.server.held.length).toBe(1));
+      await pass(x.r, 30_000);
+      await until(() => expect(control('check')).not.toBeNull());
+      expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(true));
+    }
+    /** ready(), then the proof's first send 503: registeredOnly with Check again and Continue issuing. */
+    async function registeredOnly(o: Parameters<typeof ready>[0] = {}) {
+      const x = await ready(o);
+      x.server.cnScripts.proof.push(503);
+      fireEvent.click(tid('issued-credit-send'));
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true)));
+      return x;
+    }
+    /** A reload: the same session and keys, a NEW hold store (memory only) and a remount. */
+    async function reload(r: Rig) {
+      cleanup();
+      render(<ServerIssuedInvoices {...r.props({ creditNoteHolds: createCreditNoteHoldStore({ now: () => r.clock.mono, wallNow: () => r.clock.wall }) })} />);
+      await showAndChoose(STORE_1);
+      await listReady();
+    }
+
+    it('CN-07b, P2-22. a lost register reply: regUnknown with Check again (checkReplayHint; checkUntil a clock time) replaying the register only — the same key and exact bytes; a replay 400, 404 or unsealed 409 → regUnknown, the attempt kept; a 201 → registeredOnly, never the proof; nothing is sent on its own', async () => {
+      for (const how of ['lose-before', 'lose'] as const) {
+        const { server, r } = await ready();
+        const signedAt = r.clock.wall;
+        server.cnScripts.register.push(how);
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText(), how).toBe(CREDIT_TEXT.regUnknown));
+        expect(cardButtons(), how).toEqual([CREDIT_TEXT.checkAgain, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+        expect(describedBy('issued-payments-credit-card-check')).toBe(CREDIT_TEXT.checkReplayHint);
+        expect(tid('issued-payments-credit-card-until').textContent).toBe(CREDIT_TEXT.checkUntil(at(signedAt + 9 * 60_000)));
+        await settle();
+        expect(server.cnRequests('register'), how).toHaveLength(1); // nothing on its own (§3.4)
+        if (how === 'lose-before') {
+          for (const refusal of [400, 404, chain(409, 'write_conflict')]) {
+            const before = server.cnRequests('register').length;
+            server.cnScripts.register.push(refusal);
+            await press('check');
+            await waitFor(() => expect(server.cnRequests('register')).toHaveLength(before + 1));
+            await settle();
+            expect(cardText()).toBe(CREDIT_TEXT.regUnknown);
+            expect(held(r)?.state).toBe('registering');
+            expect(cardButtons()).toEqual([CREDIT_TEXT.checkAgain, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+          }
+        }
+        await press('check');
+        await waitFor(() => expect(cardText(), how).toBe(CREDIT_TEXT.registeredOnly(true)));
+        const regs = server.cnRequests('register');
+        expect(new Set(regs.map(keyOf))).toEqual(new Set([r.keys[1]]));
+        expect(new Set(regs.map((x) => x.body)).size).toBe(1);
+        expect(held(r)).toMatchObject({ state: 'registered', registrationId: server.cnRegs[0].id });
+        await settle();
+        expect([server.cnRequests('proof'), server.cnRequests('issue')]).toEqual([[], []]); // a Check again never runs on
+        expect(cardButtons()).toEqual([CREDIT_TEXT.continueIssuing, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+        cleanup();
+      }
+    });
+
+    it('P2-23, P2-86, P2-79. the two-device sequence: the register\'s first send 503 (rolled back); another session issues (one note since withdrawn); Check again registers → registeredOnly, the review re-reads the lookup and the list, no proof or issue; Continue issuing → anotherNoteFound listing those notes (status, withdrawal time and reason), focus on Look up attempt, no issue; only "Issue another credit note" sends — exactly one issue', async () => {
+      const { server, made, r } = await ready();
+      server.hold.cnRegister = 1;
+      await click('issued-credit-send');
+      await releaseNext(server, json(503, { error: 'service_unavailable', requestId: 'req-synthetic' }));
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.regUnknown));
+      const [b, w] = server.addCreditNotes(made[0].id, 2, (i) => ({
+        issuedAt: server.cnTick(), ...(i === 1 ? { withdrawal: { withdrawnAt: server.cnTick(), reason: 'wrong_amount', withdrawnByName: 'Ada Owner' } } : {}),
+      }));
+      server.credits.set(made[0].id, 100);
+      const from = server.sent.length;
+      await press('check');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true)));
+      await waitFor(() => expect(sentFrom(server, from).filter((x) => x.endsWith('/credit-notes'))).not.toEqual([]));
+      expect(sentFrom(server, from).some((x) => x.endsWith('/credit-note-attempts'))).toBe(true);
+      expect([server.cnRequests('proof'), server.cnRequests('issue')]).toEqual([[], []]);
+      await settle();
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteFound));
+      expect(inlineAlert()).toBe(CREDIT_TEXT.anotherNoteFound);
+      expect(screen.getAllByTestId('issued-payments-credit-card-note').map((x) => x.getAttribute('data-id'))).toEqual([b.id, w.id]);
+      expect(screen.getAllByTestId('issued-payments-credit-card-note-status').map((x) => x.textContent)).toEqual([CREDIT_TEXT.active, CREDIT_TEXT.withdrawn]);
+      expect(tid('issued-payments-credit-card-note-withdrawn-at')).toHaveAttribute('datetime', w.withdrawal!.withdrawnAt);
+      expect(tid('issued-payments-credit-card-note-withdrawal-reason').textContent).toBe('Wrong amount');
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-card-find')));
+      expect(cardButtons()).toEqual([CREDIT_TEXT.issueAnother, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+      expect(describedBy('issued-payments-credit-card-another')).toBe(CREDIT_TEXT.anotherHint);
+      expect([server.cnRequests('proof'), server.cnRequests('issue')]).toEqual([[], []]);
+      expect(held(r)?.shown).toEqual({ ids: [b.id, w.id], complete: true });
+      await press('another');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect([server.cnRequests('register'), server.cnRequests('proof'), server.cnRequests('issue')].map((x) => x.length)).toEqual([2, 1, 1]);
+      expect(keyOf(server.cnRequests('issue')[0])).toBe(held(r)?.issue?.key);
+    });
+
+    it('P2-86 (variant). the other note comes from another store owner → anotherNoteFound lists it', async () => {
+      const { server, made, r } = await ready();
+      server.hold.cnRegister = 1;
+      await click('issued-credit-send');
+      await releaseNext(server, json(503, { error: 'service_unavailable', requestId: 'req-synthetic' }));
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.regUnknown));
+      // Another owner of this store registers, issues and confirms. Their registration is theirs (D16:339): never in this
+      // owner's lookup and never this owner's slot; only their note, with their name, reaches this invoice's list.
+      const theirs = server.addCreditReg({ uid: 'uid-o2', invoiceId: made[0].id });
+      const [note] = server.addCreditNotes(made[0].id, 1, () => ({ issuedAt: server.cnTick(), issuedByName: 'Bo Owner' }));
+      theirs.state = 'confirmed';
+      theirs.settledAt = server.cnTick();
+      theirs.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+      server.credits.set(made[0].id, note.grossCents);
+      const from = server.sent.length;
+      await press('check');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true)));
+      await waitFor(() => expect(sentFrom(server, from).filter((x) => x.endsWith('/credit-notes'))).not.toEqual([]));
+      expect([server.cnRequests('proof'), server.cnRequests('issue')]).toEqual([[], []]);
+      await settle();
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteFound));
+      expect(screen.getAllByTestId('issued-payments-credit-card-note').map((x) => x.getAttribute('data-id'))).toEqual([note.id]);
+      expect(tid('issued-payments-credit-card-note-issued-by').textContent).toBe('Issued by Bo Owner');
+      expect(held(r)?.shown).toEqual({ ids: [note.id], complete: true });
+      expect(cardButtons()).toEqual([CREDIT_TEXT.issueAnother, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+      expect([server.cnRequests('proof'), server.cnRequests('issue')]).toEqual([[], []]);
+      await press('another');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect([server.cnRequests('register'), server.cnRequests('proof'), server.cnRequests('issue')].map((x) => x.length)).toEqual([2, 1, 1]);
+    });
+
+    it('P2-24, P2-65. a lost proof reply: registeredOnly with Check again (checkReadHint, no checkUntil: the proof has no window) and Continue issuing (continueHint); Check again only reads the proof; Continue issuing re-reads the review and the list, sends its own proof, claims ONE issue key and holds it before the send — never a register; the main action stays blockedOwn', async () => {
+      const { server, r } = await registeredOnly();
+      expect(cardButtons()).toEqual([CREDIT_TEXT.checkAgain, CREDIT_TEXT.continueIssuing, CREDIT_TEXT.find]); // known registered: no Hide
+      expect(describedBy('issued-payments-credit-card-check')).toBe(CREDIT_TEXT.checkReadHint);
+      expect(describedBy('issued-payments-credit-card-continue')).toBe(CREDIT_TEXT.continueHint);
+      expect(control('until')).toBeNull();
+      await waitFor(() => expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn));
+      await press('check');
+      await waitFor(() => expect(server.cnRequests('proof')).toHaveLength(2));
+      await settle();
+      expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true));
+      expect(server.cnRequests('issue')).toEqual([]);
+      server.hold.cnIssue = 1;
+      const from = server.sent.length;
+      await press('continue');
+      await until(() => expect(server.held.length).toBe(1));
+      const reads = sentFrom(server, from).filter((x) => x.startsWith('GET '));
+      for (const read of [/\/invoices\/[^/]+$/, /\/payments$/, /\/credit-note-attempts$/, /\/credit-notes$/, /\/credit-note-registration-proof\?/]) expect(reads.some((x) => read.test(x)), String(read)).toBe(true);
+      const iss = server.cnRequests('issue');
+      expect(iss).toHaveLength(1);
+      expect(held(r)).toMatchObject({ state: 'issuing', issue: { key: keyOf(iss[0]) } });
+      expect(held(r)?.issue?.body === iss[0].body, 'the held issue bytes are the sent ones').toBe(true);
+      await releaseNext(server);
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect(server.cnRequests('register')).toHaveLength(1);
+      expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+    });
+
+    it('P2-25, P2-68, P2-28 (5). a lost issue reply: unresolved with Check again (checkReplayHint, checkUntil) and never Continue issuing once the issue key is claimed; Check again replays the issue — the same key, exact bytes — and its 201 issues ONE credit note; an original 503 then the Check again\'s 201 → issued', async () => {
+      for (const first of ['lose', 503] as const) {
+        const { server, made, r } = await ready();
+        server.cnScripts.issue.push(first);
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText(), String(first)).toBe(CREDIT_TEXT.unresolved(true)));
+        expect(cardButtons()).toEqual([CREDIT_TEXT.checkAgain, CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+        expect(describedBy('issued-payments-credit-card-check')).toBe(CREDIT_TEXT.checkReplayHint);
+        expect(control('until')).not.toBeNull();
+        const said = watch(tid('issued-payments-credit-say'));
+        await press('check');
+        await waitFor(() => expect(cardText(), String(first)).toBe(issuedText));
+        await settle();
+        expect(said().filter((t) => t === issuedText), `${first}: one announcement (T-05)`).toHaveLength(1);
+        const iss = server.cnRequests('issue');
+        expect(iss).toHaveLength(2);
+        expect(new Set(iss.map(keyOf))).toEqual(new Set([held(r)?.issue?.key]));
+        expect(iss[1].body === iss[0].body, 'the replay\'s bytes are the original\'s').toBe(true);
+        expect(server.creditNotes.get(made[0].id), String(first)).toHaveLength(1);
+        expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
+        cleanup();
+      }
+    });
+
+    it('P2-28 (6). the original\'s 201, then the Check again\'s stored 201: the same completion → one transition, one announcement; a different stored body → internalError with Look up attempt, no Confirm', async () => {
+      for (const variant of ['same', 'different'] as const) {
+        const x = await ready();
+        await stalled(x, 'cnIssue');
+        x.server.hold.cnIssue = 1;
+        fireEvent.click(control('check')!);
+        await until(() => expect(x.server.held.length).toBe(2));
+        const said = watch(tid('issued-payments-credit-say'));
+        x.server.held.shift()!.release();
+        await until(() => expect(cardText()).toBe(issuedText));
+        const other = new Response(JSON.stringify({ creditNote: { id: uuid(0xdead1), invoiceId: x.made[0].id, attemptId: x.r.keys[0], grossCents: 500, reason: 'goodwill' } }), {
+          status: 201, headers: { 'content-type': 'application/json', 'idempotent-replayed': 'true' },
+        });
+        x.server.held.shift()!.release(variant === 'same' ? undefined : other);
+        await settle();
+        if (variant === 'same') {
+          expect(cardText()).toBe(issuedText);
+          expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
+          expect(said()).toEqual([issuedText]);
+        } else {
+          expect(cardText()).toBe(CREDIT_TEXT.internalError);
+          expect(cardButtons()).toEqual([CREDIT_TEXT.find]);
+        }
+        expect(x.server.cnRequests('settle')).toEqual([]);
+        vi.useRealTimers();
+        cleanup();
+      }
+    });
+
+    it('P2-28 (1)-(4), P2-27 (Check again). the issue: a Check again answered 409 in progress (a concurrent same-key request) or 429 before the original\'s 201 → issued, one transition; the original\'s 201 first, then the Check again\'s 409 or 429 → issued stays, stale: no inProgress, cool-down or rateLimitedWait', async () => {
+      for (const [answer, order] of [[409, 'replay first'], [429, 'replay first'], [409, 'original first'], [429, 'original first']] as const) {
+        const x = await ready();
+        const name = `${answer} ${order}`;
+        await stalled(x, 'cnIssue');
+        const said = watch(tid('issued-payments-credit-say'));
+        const late = answer === 409 ? chain(409, 'request_in_progress') : chain(429, 'rate_limited', { 'retry-after': '7' });
+        if (order === 'replay first') {
+          x.server.cnScripts.issue.push(late);
+          fireEvent.click(control('check')!);
+          await until(() => expect(cardText(), name).toBe(answer === 409 ? CREDIT_TEXT.inProgress : CREDIT_TEXT.unresolved(false)));
+          if (answer === 429) expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.rateLimitedWait(7));
+          expect(control('check'), name).toBeNull(); // cooling
+          expect(x.server.cnRequests('issue')[1].signal?.aborted, name).toBe(false); // T-09: a real signal, never aborted
+          x.server.held.shift()!.release();
+          await until(() => expect(cardText(), name).toBe(issuedText));
+        } else {
+          x.server.hold.cnIssue = 1;
+          fireEvent.click(control('check')!);
+          await until(() => expect(x.server.held.length).toBe(2));
+          x.server.held.shift()!.release();
+          await until(() => expect(cardText(), name).toBe(issuedText));
+          x.server.held.shift()!.release(late);
+          await settle();
+          expect(cardText(), name).toBe(issuedText);
+          expect(held(x.r)?.notBefore.issue, name).toBeUndefined();
+          expect(inlineAlert(), name).not.toMatch(/Too many tries|still being processed/);
+        }
+        expect(cardButtons(), name).toEqual([CREDIT_TEXT.confirm]);
+        expect(x.server.cnRequests('issue'), name).toHaveLength(2);
+        expect(x.server.cnRequests('settle'), name).toEqual([]);
+        expect(said().filter((t) => t === issuedText), `${name}: one announcement (T-05)`).toHaveLength(1);
+        vi.useRealTimers();
+        cleanup();
+      }
+    });
+
+    it('P2-28 (7)-(10). the register: a Check again answered 409 or 429 before the original\'s 201 → registeredOnly, no proof or issue sent; the reverse order → registeredOnly stays. The settlement: the same both ways → confirmed, one transition', async () => {
+      // T-01: all eight stage × answer × order combinations, one announcement of the end state, the request counts per route.
+      const combos = (['register', 'settle'] as const).flatMap((stage) => ([409, 429] as const).flatMap((answer) => (['replay first', 'original first'] as const).map((order) => [stage, answer, order] as const)));
+      for (const [stage, answer, order] of combos) {
+        const x = await ready();
+        const name = `${stage} ${answer} ${order}`;
+        if (stage === 'register') await stalled(x, 'cnRegister');
+        else await stalledSettle(x);
+        const said = watch(tid('issued-payments-credit-say'));
+        const late = answer === 409 ? chain(409, 'request_in_progress') : chain(429, 'rate_limited', { 'retry-after': '7' });
+        if (order === 'replay first') {
+          x.server.cnScripts[stage].push(late);
+          fireEvent.click(control('check')!);
+          await until(() => expect(control('check'), name).toBeNull());
+          await settle();
+          x.server.held.shift()!.release();
+        } else {
+          x.server.hold[stage === 'register' ? 'cnRegister' : 'cnSettle'] = 1;
+          fireEvent.click(control('check')!);
+          await until(() => expect(x.server.held.length).toBe(2));
+          x.server.held.shift()!.release();
+          await until(() => expect(cardText(), name).toBe(stage === 'register' ? CREDIT_TEXT.registeredOnly(true) : CREDIT_TEXT.confirmed));
+          x.server.held.shift()!.release(late);
+        }
+        await settle();
+        const end = stage === 'register' ? CREDIT_TEXT.registeredOnly(true) : CREDIT_TEXT.confirmed;
+        await until(() => expect(cardText(), name).toBe(end));
+        await settle();
+        expect(inlineAlert(), name).not.toMatch(/Too many tries|still being processed/);
+        expect(said().filter((t) => t === end), `${name}: one announcement`).toHaveLength(1);
+        expect(writes(x.server), name).toEqual(stage === 'register' ? [2, 0, 0] : [1, 1, 2]);
+        if (stage === 'register') {
+          expect([x.server.cnRequests('proof'), x.server.cnRequests('issue')], name).toEqual([[], []]);
+          expect(held(x.r)?.state, name).toBe('registered');
+        } else {
+          expect(held(x.r)?.state, name).toBe('confirmed');
+          expect(cardButtons(), name).toEqual([]);
+        }
+        vi.useRealTimers();
+        cleanup();
+      }
+    });
+
+    it('P2-28 (11). the issue\'s first send stalls, Check again commits 201, then the original is refused before the key: a step-up → no change; 403 forbidden → the one session check: the same token → noAccess with no buttons, a new token → detached; 401 → the section signs out and the card is detached with issued as its last state — never a "No credit note" text or a Release', async () => {
+      for (const refusal of ['step-up', 'same token', 'new token', '401'] as const) {
+        const x = await ready();
+        await stalled(x, 'cnIssue');
+        fireEvent.click(control('check')!);
+        await until(() => expect(cardText(), refusal).toBe(issuedText));
+        if (refusal === 'new token') x.server.otherTab('uid-a');
+        const mark = x.server.sent.length;
+        x.server.held.shift()!.release(refusal === 'step-up' ? chain(403, 'step_up_required') : refusal === '401' ? chain(401, 'unauthenticated') : chain(403, 'forbidden'));
+        await settle();
+        await settle();
+        expect(x.server.cnRequests('settle'), refusal).toEqual([]); // T-02: never a confirm sent
+        // T-02: a 403 forbidden runs the ONE fresh session check before anything else is sent.
+        const after = sentFrom(x.server, mark);
+        const current = `GET ${TENANT_SESSION_PATHS.current}`;
+        if (refusal === 'same token' || refusal === 'new token') expect(after[0], refusal).toBe(current);
+        if (refusal === 'step-up') expect(after, refusal).not.toContain(current);
+        expect(held(x.r)?.state, refusal).toBe('issued');
+        expect(tid('issued-section').textContent, refusal).not.toMatch(/No credit note was issued|sign-in was too old/);
+        expect(screen.queryByTestId('issued-payments-credit-row-release'), refusal).toBeNull();
+        if (refusal === 'step-up') expect([cardText(), cardButtons()]).toEqual([issuedText, [CREDIT_TEXT.confirm]]);
+        if (refusal === 'same token') expect([cardText(), cardButtons()]).toEqual([CREDIT_TEXT.noAccess, []]);
+        if (refusal === 'new token' || refusal === '401') {
+          expect(held(x.r)?.csrf, refusal).toBeNull();
+          expect([cardText('issued-credit-card'), cardButtons('issued-credit-card')], refusal).toEqual([issuedText, [CREDIT_TEXT.hide]]);
+        }
+        vi.useRealTimers();
+        cleanup();
+      }
+    });
+
+    it('P2-28 (12), Check again. a late register 201 after the attempt was issued (through Check again and Continue issuing) changes nothing and restores no action', async () => {
+      const x = await ready();
+      await stalled(x, 'cnRegister');
+      fireEvent.click(control('check')!);
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true)));
+      await settle();
+      fireEvent.click(control('continue')!);
+      await until(() => expect(cardText()).toBe(issuedText));
+      x.server.held.shift()!.release(); // the original register, processed now: the same stored 201
+      await settle();
+      expect(held(x.r)?.state).toBe('issued');
+      expect(cardText()).toBe(issuedText);
+      expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
+      expect(x.server.cnRequests('issue')).toHaveLength(1);
+      expect(x.server.cnRequests('settle')).toEqual([]); // T-02: never a confirm sent
+    });
+
+    it('P2-29. the Check-again window of the issue and the register (the proof has none): offered under 9 minutes with checkUntil; when it passes the bytes are scrubbed and the button is replaced by replayGone (regUnknown at the register) through the alert region, focus to the card heading when the button had it', async () => {
+      for (const stage of ['issue', 'register'] as const) {
+        const x = await ready();
+        const signedAt = x.r.clock.wall;
+        fakeClock();
+        x.server.cnScripts[stage].push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(control('check'), stage).not.toBeNull());
+        expect(tid('issued-payments-credit-card-until').textContent).toBe(CREDIT_TEXT.checkUntil(at(signedAt + 9 * 60_000)));
+        act(() => control('check')!.focus());
+        await pass(x.r, 9 * 60_000 - 1_000);
+        expect(control('check'), stage).not.toBeNull();
+        await pass(x.r, 1_000);
+        await until(() => expect(control('check'), stage).toBeNull());
+        expect(inlineAlert(), stage).toBe(stage === 'issue' ? CREDIT_TEXT.replayGone : CREDIT_TEXT.regUnknown);
+        expect(cardText(), stage).toBe(stage === 'issue' ? CREDIT_TEXT.replayGone : CREDIT_TEXT.regUnknown);
+        expect(held(x.r)?.[stage]?.body, stage).toBe('');
+        expect(document.activeElement, stage).toBe(tid('issued-payments-credit-card-heading'));
+        expect(cardButtons(), stage).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+        vi.useRealTimers();
+        cleanup();
+      }
+      // The proof: a read with no window — its Check again stays; Continue issuing goes with the 8-minute sign-in.
+      const x = await ready();
+      fakeClock();
+      x.server.cnScripts.proof.push(503);
+      fireEvent.click(tid('issued-credit-send'));
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true)));
+      await pass(x.r, 10 * 60_000);
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(false)));
+      expect(cardButtons()).toEqual([CREDIT_TEXT.checkAgain, CREDIT_TEXT.find]); // a registration known open: not unresolved, no Hide
+    });
+
+    it('P2-31, P2-63, P2-27 (Check again). the Check-again gate answers: at the issue 401 → endedUnknown, detached; 403 step_up_required → replayGone; 403 forbidden → one fresh check: the same token → noAccess, no buttons, a new token → detached; 422 → replayGone; 429 → unresolved + rateLimitedWait, Check again after Retry-After; 409 in progress → inProgress, 5 s (static text). At the register: regUnknown on evidence (b) each time. None says nothing was issued', async () => {
+      type Case = [stage: 'issue' | 'register', answer: string, text: string, buttons: string[]];
+      const cases: Case[] = [
+        ['issue', '401', CREDIT_TEXT.endedUnknown, [CREDIT_TEXT.hide]], ['issue', 'step-up', CREDIT_TEXT.replayGone, [CREDIT_TEXT.find, CREDIT_TEXT.hide]],
+        ['issue', 'forbidden', CREDIT_TEXT.noAccess, []], ['issue', 'forbidden, new token', CREDIT_TEXT.unresolved(false), [CREDIT_TEXT.hide]],
+        ['issue', '422', CREDIT_TEXT.replayGone, [CREDIT_TEXT.find, CREDIT_TEXT.hide]], ['issue', '429', CREDIT_TEXT.unresolved(false), [CREDIT_TEXT.find, CREDIT_TEXT.hide]],
+        ['issue', 'in progress', CREDIT_TEXT.inProgress, [CREDIT_TEXT.find, CREDIT_TEXT.hide]],
+        ['register', 'step-up', CREDIT_TEXT.regUnknown, [CREDIT_TEXT.find, CREDIT_TEXT.hide]], ['register', '422', CREDIT_TEXT.regUnknown, [CREDIT_TEXT.find, CREDIT_TEXT.hide]],
+        ['register', 'forbidden', CREDIT_TEXT.regUnknown, []], ['register', '429', CREDIT_TEXT.regUnknown, [CREDIT_TEXT.find, CREDIT_TEXT.hide]],
+        ['register', '401', CREDIT_TEXT.regUnknown, [CREDIT_TEXT.hide]],
+      ];
+      for (const [stage, answer, text, buttons] of cases) {
+        const name = `${stage} ${answer}`;
+        const x = await ready();
+        fakeClock();
+        x.server.cnScripts[stage].push(503);
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(control('check'), name).not.toBeNull());
+        const replay = answer === '401' ? chain(401, 'unauthenticated') : answer === 'step-up' ? chain(403, 'step_up_required') : answer.startsWith('forbidden') ? chain(403, 'forbidden')
+          : answer === '422' ? chain(422, 'idempotency_key_reused') : answer === '429' ? chain(429, 'rate_limited', { 'retry-after': '7' }) : chain(409, 'request_in_progress');
+        if (answer === 'forbidden, new token') {
+          x.server.hold[stage === 'issue' ? 'cnIssue' : 'cnRegister'] = 1;
+          fireEvent.click(control('check')!);
+          await until(() => expect(x.server.held.length).toBe(1));
+          x.server.otherTab('uid-a');
+          x.server.held.shift()!.release(replay);
+        } else {
+          x.server.cnScripts[stage].push(replay);
+          fireEvent.click(control('check')!);
+        }
+        const prefix = answer === '401' || answer === 'forbidden, new token' ? 'issued-credit-card' : 'issued-payments-credit-card';
+        await until(() => expect(cardText(prefix), name).toBe(text));
+        await settle();
+        expect(cardButtons(prefix), name).toEqual(buttons);
+        expect(tid('issued-section').textContent, name).not.toMatch(/No credit note was issued:|sign-in was too old/);
+        if (answer === '429') expect(tid(`${prefix}-also`).textContent, name).toBe(CREDIT_TEXT.rateLimitedWait(7));
+        if (answer === 'forbidden' && stage === 'register') expect(tid(`${prefix}-also`).textContent, name).toBe(CREDIT_TEXT.noAccessShort);
+        if (answer === '429' || answer === 'in progress') {
+          await pass(x.r, answer === '429' ? 7_000 : 5_000);
+          await until(() => expect(control('check'), name).not.toBeNull()); // after the wait, Check again again; the text stays static
+        }
+        if (answer === '401' || answer === 'forbidden, new token') expect(held(x.r)?.csrf, name).toBeNull();
+        expect(x.server.cnRequests(stage).length, name).toBe(2);
+        vi.useRealTimers();
+        cleanup();
+      }
+    });
+
+    it('P2-31, rule 4 sticks. a Check again refused 403 with the same token leaves the card with no buttons; the stalled original\'s late 503 never gives them back', async () => {
+      const x = await ready();
+      await stalled(x, 'cnRegister');
+      x.server.cnScripts.register.push(chain(403, 'forbidden'));
+      fireEvent.click(control('check')!);
+      await until(() => expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.noAccessShort));
+      expect(cardButtons()).toEqual([]);
+      x.server.held.shift()!.release(json(503, { error: 'service_unavailable', requestId: 'req-synthetic' }));
+      await settle();
+      expect([cardText(), tid('issued-payments-credit-card-also').textContent, cardButtons()]).toEqual([CREDIT_TEXT.regUnknown, CREDIT_TEXT.noAccessShort, []]);
+      expect(creditNoteHoldsSignIns(held(x.r), x.r.clock.mono, x.r.clock.wall, [], true)).toBe(false); // a bare card has nothing for D-P2-10 to protect
+    });
+
+    it('P2-26 (C), P2-85 (C). a lost settlement reply: Check again in the same session with the held bytes, under 23 hours after the key\'s first send (checkUntil) → confirmed; at 23 hours (the larger of monotonic and wall-clock time) the bytes go → settleUnknown and Look up attempt; a press just after the deadline with the timer suppressed sends nothing', async () => {
+      const x = await ready();
+      await stalledSettle(x);
+      const first = held(x.r)!.settle!;
+      expect(tid('issued-payments-credit-card-until').textContent).toBe(CREDIT_TEXT.checkUntil(at(first.firstWall! + 23 * 60 * 60_000)));
+      vi.useRealTimers();
+      x.server.cnScripts.settle.push('lose'); // the Check again commits, its answer lost too
+      await press('check');
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(true)));
+      await press('check'); // and once more: the stored 200
+      await until(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+      const keys = new Set(x.server.cnRequests('settle').map(keyOf));
+      expect(keys.size).toBe(1);
+      x.server.held.shift()!.release(json(503, { error: 'service_unavailable', requestId: 'req-synthetic' })); // the original's late answer: stale
+      await settle();
+      expect(cardText()).toBe(CREDIT_TEXT.confirmed);
+      cleanup();
+      // The limit: wall-clock time alone past 23 h (monotonic short of it), the UI timer never run — the press refuses, nothing leaves.
+      const y = await ready();
+      y.server.cnScripts.settle.push(503);
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      await press('confirm');
+      await waitFor(() => expect(control('check')).not.toBeNull());
+      const sent = y.server.cnRequests('settle').length;
+      y.r.clock.mono += 60_000;
+      y.r.clock.wall += 23 * 60 * 60_000;
+      await press('check');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(false)));
+      expect(y.server.cnRequests('settle')).toHaveLength(sent);
+      expect(held(y.r)?.settle?.body).toBe('');
+      expect(inlineAlert()).toBe(CREDIT_TEXT.settleUnknown(false));
+      expect(cardButtons()).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+      // Look up attempt (lookup-first): the row's own Confirm under a new key settles it.
+      await press('find');
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-confirm')).not.toBeNull());
+      await press('confirm', 'issued-payments-credit-row');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+      expect(new Set(y.server.cnRequests('settle').map(keyOf)).size).toBe(2);
+    });
+
+    it('P2-85 (C), display. at 23 hours after the settlement key\'s first send the Check again goes by itself (timers on the injected clocks): settleUnknown without Check again, through the alert region', async () => {
+      const x = await ready();
+      await stalledSettle(x);
+      await pass(x.r, 23 * 60 * 60_000 - 30_000 - 1_000); // 30 s already passed in stalledSettle
+      expect(control('check')).not.toBeNull();
+      await pass(x.r, 1_000);
+      await until(() => expect(control('check')).toBeNull());
+      expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(false));
+      expect(inlineAlert()).toBe(CREDIT_TEXT.settleUnknown(false));
+      expect(held(x.r)?.settle?.body).toBe('');
+      x.server.held.shift()!.release();
+      await settle();
+      expect(cardText()).toBe(CREDIT_TEXT.confirmed); // a stored answer still counts
+    });
+
+    it('P2-26 (C), P2-30, P2-67. after a sign-in of the same owner the attempt is detached: only Look up attempt and Hide this attempt (continueAfterSignIn for a registration), in its own store; the lookup row then offers Release (a new key, this session); a store switch and a sign-out detach too; another user sees no card, row or action', async () => {
+      const { server, r, page } = await registeredOnly();
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      server.otherTab('uid-a'); // a sign-in elsewhere in this browser: a new token
+      await focusEvents();
+      await waitFor(() => expect(cardText('issued-credit-card')).toBe(CREDIT_TEXT.continueAfterSignIn));
+      expect(tid('issued-credit-card-also').textContent).toBe(CREDIT_TEXT.registeredOnly(false));
+      expect(held(r)?.csrf).toBeNull();
+      expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.hide]); // no store chosen under the new session yet
+      await showAndChoose(STORE_1);
+      await waitFor(() => expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+      await press('find', 'issued-credit-card');
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+      const sessionNow = server.cnRequests('lookup').at(-1)!.headers.get('x-tmpos-session-csrf');
+      await press('release', 'issued-payments-credit-row');
+      await waitFor(() => expect(cardText('issued-credit-card')).toBe(CREDIT_TEXT.released));
+      const [rel] = server.cnRequests('settle');
+      expect(rel.headers.get('x-tmpos-session-csrf')).toBe(sessionNow);
+      expect(keyOf(rel)).not.toBe(r.keys[1]);
+      expect(server.cnRegs[0].state).toBe('released');
+      // A store switch, and a sign-out: detached at once; Look up only back in its own store, signed in.
+      page.unmount();
+      cleanup();
+      const two = await registeredOnly();
+      await click('issued-view-close');
+      fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } });
+      await waitFor(() => expect(held(two.r)?.csrf).toBeNull());
+      expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.hide]);
+      fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+      await waitFor(() => expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+      two.server.expire();
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      await focusEvents();
+      await waitFor(() => expect(screen.queryByTestId('issued-retry')).not.toBeNull());
+      expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.hide]);
+      // Another user in this page: no card, no row, no action of the former owner.
+      cleanup();
+      two.server.cnOwners.add('uid-m');
+      render(<ServerIssuedInvoices {...two.r.props({ uid: 'uid-m' })} />);
+      await showAndChoose(STORE_1);
+      await listReady();
+      await open(1);
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'denied'));
+      expect(screen.queryByTestId('issued-credit-card')).toBeNull();
+      expect(screen.queryByTestId('issued-payments-credit-card')).toBeNull();
+      expect(rowStates()).toEqual([]);
+    });
+
+    it('P2-81, P2-82, P2-83 (card parts). a Check again whose send leaves after another page\'s sign-in → 403 → the fresh check finds the new token → detached, never noAccess; a same-token denial (the owner demoted) → noAccess, no buttons, the listed notes and names gone; a 401 → Reconnect (same generation number, new token) → detached, no row action until a fresh lookup', async () => {
+      const x = await registeredOnly();
+      x.server.hold.current = 1; // the press's session read answers for the old session
+      fireEvent.click(control('check')!);
+      await until(() => expect(x.server.held.length).toBe(1));
+      x.server.otherTab('uid-a');
+      x.server.held.shift()!.release();
+      await waitFor(() => expect(held(x.r)?.csrf).toBeNull());
+      await waitFor(() => expect(cardText('issued-credit-card')).toBe(CREDIT_TEXT.continueAfterSignIn));
+      expect(tid('issued-section').textContent).not.toContain(CREDIT_TEXT.noAccessShort);
+      cleanup();
+      // The same token, demoted (P2-82): anotherNoteFound listing a named note, then a confirmed lookup 403 (rule 4).
+      const y = await registeredOnly();
+      y.server.addCreditNotes(y.made[0].id, 1, () => ({ issuedAt: y.server.cnTick(), issuedByName: 'Bo Owner' }));
+      y.server.credits.set(y.made[0].id, 100);
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteFound));
+      expect(tid('issued-payments-credit-card-note-issued-by').textContent).toBe('Issued by Bo Owner');
+      y.server.cnOwners.delete('uid-a');
+      y.server.cnNamesHidden.add('uid-a');
+      await press('find');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.noAccessShort));
+      expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.anotherNoteFound);
+      expect(cardButtons()).toEqual([]);
+      expect(screen.queryByTestId('issued-payments-credit-card-notes')).toBeNull();
+      expect(held(y.r)?.shown).toBeNull();
+      await waitFor(() => expect(tid('issued-section').textContent).not.toContain('Bo Owner'));
+      expect(screen.queryByTestId('issued-payments-credit-issue')).toBeNull();
+      cleanup();
+      // A 401: the section signs out, the attempt detaches; Reconnect's token is a first token (same number): no row action until a fresh lookup.
+      const z = await registeredOnly();
+      z.server.expire();
+      await press('check');
+      await waitFor(() => expect(screen.queryByTestId('issued-retry')).not.toBeNull());
+      expect(held(z.r)?.csrf).toBeNull();
+      expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.hide]);
+      await click('issued-retry');
+      await showAndChoose(STORE_1);
+      await waitFor(() => expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+      expect(screen.queryByTestId('issued-payments-credit-row-release')).toBeNull();
+      expect(cardText('issued-credit-card')).toBe(CREDIT_TEXT.continueAfterSignIn);
+    });
+
+    it('P2-81 (81.6). a Continue issuing whose send leaves after another page\'s sign-in → 403 → the one check finds the new token → detached, never noAccess', async () => {
+      const x = await registeredOnly();
+      x.server.hold.cnProof = 1; // Continue issuing's own proof
+      await press('continue');
+      await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnProof']));
+      x.server.hold.current = 1; // the session read just before the issue (§3.6 rule 1) answers for the old session
+      x.server.held.shift()!.release();
+      await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['current']));
+      x.server.otherTab('uid-a'); // another page's sign-in in this browser: a new cookie and token
+      x.server.held.shift()!.release(); // the same token still: the issue leaves with it, under the other page's cookie
+      await waitFor(() => expect(held(x.r)?.csrf).toBeNull());
+      const issues = x.server.cnRequests('issue');
+      expect(issues).toHaveLength(1);
+      expect(x.server.cnAnswers.get(issues[0])?.status).toBe(403);
+      expect(sentFrom(x.server, x.server.sent.indexOf(issues[0]) + 1)).toContain(`GET ${TENANT_SESSION_PATHS.current}`); // the one fresh check
+      await settle();
+      await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull()); // the new token's generation closes the dialog
+      // A first-send 403 the one check finds gone: the detached texts "as after a 401" (§3.1), never replayGone (O6).
+      await waitFor(() => expect(cardText('issued-credit-card')).toBe(CREDIT_TEXT.ended));
+      const page = document.body.textContent; // the view and confirmation are DialogFrame portals: the whole body
+      for (const denial of [CREDIT_TEXT.noAccess, CREDIT_TEXT.noAccessShort, CREDIT_TEXT.notAllowed]) expect(page).not.toContain(denial);
+      // Detached, not rule 4: the card keeps Hide this attempt (a confirmed denial leaves no buttons at all).
+      await waitFor(() => expect(cardButtons('issued-credit-card')).toContain(CREDIT_TEXT.hide));
+      expect(x.server.cnRequests('issue')).toHaveLength(1);
+    });
+
+    it('P2-81 (81.7). `renew` (the settings sign-in) drops the credit-note list, lookup rows, cursors and baseline', async () => {
+      let release!: () => void;
+      let gate: Promise<void> | null = null;
+      const x = await registeredOnly({
+        prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); },
+        identity: (r) => {
+          const base = r.props().identity!;
+          return { ...base, reauthenticate: async (uid, password) => { if (gate !== null) await gate; return base.reauthenticate(uid, password); } };
+        },
+      });
+      expect(held(x.r)?.baseline).not.toBeNull(); // frozen at the register's first send
+      await click('issued-view-close');
+      await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+      // The settings' own sign-in (SII-11): a Save refused step_up_required, then the explicit sign-in, held out while the
+      // invoice is open again (SII-68's order).
+      await click('issued-settings-open');
+      await waitFor(() => expect(panelPhase()).not.toBe('loading'));
+      fill();
+      x.server.puts.push(chain(403, 'step_up_required'));
+      await click('issued-settings-save');
+      await waitFor(() => expect(tid('issued-settings-reauth-group')).toBeInTheDocument());
+      gate = new Promise<void>((done) => { release = done; });
+      type('issued-settings-reauth-password', 'correct horse');
+      await click('issued-settings-reauth-confirm'); // the sign-in is out
+      await open(1);
+      await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-item')).toHaveLength(50));
+      expect(screen.queryByTestId('issued-payments-credit-more')).not.toBeNull(); // page one, its cursor kept
+      await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'exhausted'));
+      const old = x.server.cnRequests('lookup').at(-1)!.headers.get('x-tmpos-session-csrf');
+      await act(async () => { release(); });
+      await waitFor(() => expect(status()).toHaveTextContent(SETTINGS_TEXT.renewed));
+      await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+      expect(screen.queryAllByTestId('issued-payments-credit-item')).toEqual([]);
+      expect(screen.queryByTestId('issued-payments-credit-lookup')).toBeNull();
+      expect(held(x.r)).toMatchObject({ csrf: null, baseline: null, shown: null });
+      // An earlier note lands meanwhile: the new page one ends a row sooner than the old one, so the cursors differ.
+      const notes = [...x.server.creditNotes.get(x.made[0].id)!]; // the 51, oldest first (as the list serves them)
+      x.server.addCreditNotes(x.made[0].id, 1, () => ({}), -10);
+      // The next open reads the list and the lookup from page one under the renewed token: no old cursor is sent.
+      const lists = x.server.cnRequests('list').length;
+      const lookups = x.server.cnRequests('lookup').length;
+      await click('issued-list-retry');
+      await listReady();
+      await open(1);
+      await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'exhausted'));
+      await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-item')).toHaveLength(50));
+      const again = [...x.server.cnRequests('list').slice(lists), ...x.server.cnRequests('lookup').slice(lookups)];
+      expect(again).not.toEqual([]);
+      expect(again.map((s) => s.url).filter((u) => u.includes('?after='))).toEqual([]);
+      expect(again.map((s) => s.headers.get('x-tmpos-session-csrf'))).not.toContain(old);
+      // Show more after the reopen: page two's cursor is the NEW page one's last row (not the old 50th), under the new token.
+      const pageOne = x.server.cnRequests('list').at(-1)!;
+      expect(pageOne.url).toBe(`${STORES_PATH}/${STORE_1}/invoices/${x.made[0].id}/credit-notes`);
+      const more = x.server.cnRequests('list').length;
+      await click('issued-payments-credit-more');
+      await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-item')).toHaveLength(52));
+      const pageTwo = x.server.cnRequests('list').slice(more);
+      expect(pageTwo.map((s) => s.url)).toEqual([`${STORES_PATH}/${STORE_1}/invoices/${x.made[0].id}/credit-notes?after=${notes[48].id}`]);
+      expect(pageTwo[0].headers.get('x-tmpos-session-csrf')).toBe(pageOne.headers.get('x-tmpos-session-csrf'));
+      expect(pageTwo[0].headers.get('x-tmpos-session-csrf')).not.toBe(old);
+    });
+
+    it('P2-34, P2-35. the lookup decides only what it shows: a released or confirmed row ends the attempt; a row the lookup no longer lists is never settled from memory — notListed once an issue was sent (regUnknown before), lasting until Hide or a reload; after a reload an exhausted lookup with no row restores the action, claiming nothing', async () => {
+      const x = await ready();
+      x.server.cnScripts.issue.push('lose');
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+      x.server.cnRegs.splice(0); // aged out of the lookup (settled over 24 h ago): nothing listed
+      await press('find');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.notListed));
+      expect(cardText()).not.toMatch(/no credit note was issued/i);
+      expect(x.server.cnRequests('settle')).toEqual([]);
+      expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+      await press('hide');
+      expect(control('heading')).toBeNull();
+      expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn); // the blockers stay (D-P2-6)
+      await reload(x.r);
+      await open(1);
+      await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false')); // an operational choice, not evidence (D-P2-5)
+      expect(x.server.cnRequests('settle')).toEqual([]);
+      cleanup();
+      // A released row ends the attempt (forward only), and a confirmed one too.
+      for (const settled of ['released', 'confirmed'] as const) {
+        const y = await ready();
+        y.server.cnScripts.issue.push(settled === 'released' ? 503 : 'lose');
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        y.server.cnRegs[0].state = settled;
+        y.server.cnRegs[0].settledAt = y.server.cnTick();
+        await press('find');
+        await waitFor(() => expect(cardText(), settled).toBe(settled === 'released' ? CREDIT_TEXT.released : CREDIT_TEXT.confirmed));
+        expect(held(y.r)?.state).toBe(settled);
+        expect(cardButtons()).toEqual([]);
+        cleanup();
+      }
+    });
+
+    it('P2-36, P2-62. a renewed session: a proof 404 (first send, Check again or Continue issuing) → cantContinue; an issue 404 → cantContinue; a replay 422 → replayGone — each with Look up attempt, never a "no credit note" text; the row then gives Release (version 1) or Confirm (version 2)', async () => {
+      for (const where of ['proof first', 'proof check', 'proof continue', 'issue 404', 'replay 422'] as const) {
+        const x = await (where === 'proof first' || where === 'issue 404' || where === 'replay 422' ? ready() : registeredOnly());
+        if (where === 'proof first') x.server.cnScripts.proof.push(404);
+        if (where === 'issue 404') x.server.cnScripts.issue.push(404);
+        if (where === 'replay 422') x.server.cnScripts.issue.push('lose', chain(422, 'idempotency_key_reused'));
+        if (where === 'proof check' || where === 'proof continue') {
+          x.server.cnScripts.proof.push(404);
+          await press(where === 'proof check' ? 'check' : 'continue');
+        } else {
+          await click('issued-credit-send');
+          if (where === 'replay 422') { await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true))); await press('check'); }
+        }
+        const said = where === 'replay 422' ? CREDIT_TEXT.replayGone : CREDIT_TEXT.cantContinue;
+        await waitFor(() => expect(cardText(), where).toBe(said));
+        expect(cardButtons(), where).toEqual(where === 'replay 422' ? [CREDIT_TEXT.find, CREDIT_TEXT.hide] : [CREDIT_TEXT.find]);
+        expect(tid('issued-payments').textContent, where).not.toMatch(/No credit note was issued/);
+        expect(x.server.cnRequests('issue').length, where).toBe(where === 'issue 404' ? 1 : where === 'replay 422' ? 2 : 0);
+        await press('find');
+        const version = where === 'replay 422' ? 'confirm' : 'release';
+        await waitFor(() => expect(screen.queryByTestId(`issued-payments-credit-row-${version}`), where).not.toBeNull());
+        await press(version, 'issued-payments-credit-row');
+        await waitFor(() => expect(cardText(), where).toBe(version === 'confirm' ? CREDIT_TEXT.confirmed : CREDIT_TEXT.released));
+        cleanup();
+      }
+    });
+
+    it('P2-37. a demoted owner: a settlement 403 → ONE fresh session check, the same token → the card keeps its last known state with no buttons (noAccess); a lookup 403 the same', async () => {
+      const x = await ready();
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      x.server.cnOwners.delete('uid-a');
+      const from = x.server.sent.length;
+      await press('confirm');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.noAccess));
+      expect(cardButtons()).toEqual([]);
+      expect(tid('issued-payments-credit-card')).toHaveAttribute('data-state', 'issued');
+      expect(sentFrom(x.server, from).filter((s) => s === `GET ${TENANT_SESSION_PATHS.current}`).length).toBeGreaterThanOrEqual(1);
+      cleanup();
+      const y = await ready();
+      y.server.cnScripts.issue.push('lose');
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+      y.server.cnOwners.delete('uid-a');
+      await press('find');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.noAccess));
+      expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.unresolved(false)); // its words without the buttons
+      expect(cardButtons()).toEqual([]);
+      expect(tid('issued-payments-credit-card')).toHaveAttribute('data-state', 'issuing');
+    });
+
+    it('P2-37 (503 clause, scripted). 503 at register, proof, issue and settlement → regUnknown / registeredOnly / unresolved / settleUnknown', async () => {
+      // The 503 is scripted with the owner kept (a real demotion here would get the fake chain's 403): it stands in for the
+      // routine's own role check answering 503 (M38:1202) after the chain passed. The shop sees a 503 only: each stage's
+      // unknown outcome with Check again and Look up attempt (§3.7), never noAccess; nothing runs on, and no text says no
+      // credit note was issued.
+      const cases = [
+        ['register', CREDIT_TEXT.regUnknown, [1, 0, 0], 0],
+        ['proof', CREDIT_TEXT.registeredOnly(true), [1, 0, 0], 1],
+        ['issue', CREDIT_TEXT.unresolved(true), [1, 1, 0], 1],
+        ['settle', CREDIT_TEXT.settleUnknown(true), [1, 1, 1], 1],
+      ] as const;
+      for (const [stage, said, sent, proofs] of cases) {
+        const x = await ready();
+        if (stage === 'settle') {
+          await click('issued-credit-send');
+          await waitFor(() => expect(cardText(), stage).toBe(issuedText));
+        }
+        x.server.cnScripts[stage].push(503);
+        if (stage === 'settle') await press('confirm');
+        else await click('issued-credit-send');
+        await waitFor(() => expect(cardText(), stage).toBe(said));
+        expect(control('check'), `${stage}: Check again`).not.toBeNull();
+        expect(control('find'), `${stage}: Look up attempt`).not.toBeNull();
+        await settle();
+        expect(writes(x.server), stage).toEqual(sent); // nothing on its own after the 503 (§3.4)
+        expect(x.server.cnRequests('proof'), stage).toHaveLength(proofs);
+        if (stage === 'issue' || stage === 'settle') expect(tid('issued-payments').textContent, stage).not.toMatch(/No credit note was issued/);
+        cleanup();
+      }
+    });
+
+    it('P2-37 (503 clause, CA-35). an issue the server completed while this older tab still holds it unresolved: Check again resends the same key and bytes and gets 503; Look up attempt then shows that attempt issued, sending no write', async () => {
+      // The fake commits the issue and loses its answer ('lose'); the retry's 503 is scripted after the chain, standing in for
+      // the write setting `off`, whose gate answers before the key is looked up (doc 18 §6.6), so no replay reaches the tab.
+      const x = await ready();
+      x.server.cnScripts.issue.push('lose');
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+      expect(x.server.cnRegs.map((g) => g.state)).toEqual(['issued']); // completed on the server
+      const [reg] = x.server.cnRegs;
+      const notes = x.server.creditNotes.get(reg.invoiceId)?.length ?? 0;
+      // The documented retry (doc 17 §3.7, "Lost reply at issue"): Check again, the same key and the same bytes, answered 503.
+      x.server.cnScripts.issue.push(503);
+      await press('check');
+      await until(() => expect(x.server.cnRequests('issue')).toHaveLength(2));
+      await settle();
+      const [first, retry] = x.server.cnRequests('issue');
+      expect(keyOf(retry)).not.toBeNull();
+      expect(keyOf(retry)).toBe(keyOf(first));
+      expect(retry.body).toBe(first.body);
+      expect(JSON.parse(retry.body!).attemptId).toBe(reg.attemptId);
+      expect(x.server.cnScripts.issue).toEqual([]); // the retry took the scripted 503
+      expect(x.server.creditNotes.get(reg.invoiceId)?.length).toBe(notes); // no second note
+      expect(cardText()).toBe(CREDIT_TEXT.unresolved(true));
+      expect(control('find'), 'Look up attempt').not.toBeNull();
+      expect(tid('issued-payments').textContent).not.toMatch(/No credit note was issued/);
+      // Look up attempt: one read, no write, and the row it shows is this attempt, issued.
+      const before = writes(x.server);
+      const lookups = x.server.cnRequests('lookup').length;
+      await press('find');
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-confirm')).not.toBeNull());
+      const rows = screen.queryAllByTestId('issued-payments-credit-row');
+      expect(rows.map((row) => row.getAttribute('data-state'))).toEqual(['issued']);
+      expect(screen.getByTestId('issued-payments-credit-row-state').textContent).toBe(CREDIT_TEXT.rowIssued);
+      expect(x.server.cnRegs.map((g) => [g.attemptId, g.state])).toEqual([[reg.attemptId, 'issued']]); // the only row the lookup lists
+      expect(x.server.cnRequests('lookup')).toHaveLength(lookups + 1);
+      expect(writes(x.server)).toEqual(before);
+    });
+
+    it('P2-38. Hide this attempt (hideWarning its description, apart from Check again) hides the card only: the action stays blockedOwn, Record payment and Void stay hidden here; a stored answer for the hidden attempt lifts them without showing a card or saying anything', async () => {
+      const x = await ready({ prepare: (s) => { s.recorders.add('uid-a'); } });
+      await stalled(x, 'cnRegister');
+      expect(describedBy('issued-payments-credit-card-hide')).toBe(CREDIT_TEXT.hideWarning);
+      expect(control('hide')!.parentElement).not.toBe(control('check')!.parentElement);
+      await press('hide');
+      expect(screen.queryByTestId('issued-payments-credit-card')).toBeNull();
+      expect(held(x.r)?.hidden).toBe(true);
+      expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+      expect([screen.queryByTestId('issued-payments-record'), screen.queryByTestId('issued-view-void')]).toEqual([null, null]);
+      const said = [inlineSay(), inlineAlert()];
+      x.server.held.shift()!.release(sealedAnswer('invalid_state'));
+      await until(() => expect(held(x.r)?.state).toBe('ended'));
+      await settle();
+      expect(screen.queryByTestId('issued-payments-credit-card')).toBeNull();
+      expect([inlineSay(), inlineAlert()]).toEqual(said);
+      await until(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+      expect(screen.queryByTestId('issued-view-void')).not.toBeNull();
+      expect(action()).toHaveAttribute('aria-disabled', 'false');
+    });
+
+    it('P2-40, P2-28 (13). stale answers change nothing: a Check again keeps the hold generation; an answer for an attempt detached by another token (its stored 201 included) or by a sign-out and Reconnect (the same generation number, another token) changes no text, focus or action — the lookup shows what the server did', async () => {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      const x = await ready();
+      await stalled(x, 'cnIssue');
+      const g = held(x.r)!.generation;
+      x.server.cnScripts.issue.push(503);
+      fireEvent.click(control('check')!);
+      await until(() => expect(x.server.cnRequests('issue')).toHaveLength(2));
+      await settle();
+      expect(held(x.r)!.generation).toBe(g);
+      x.server.otherTab('uid-a');
+      await focusEvents();
+      await until(() => expect(held(x.r)?.csrf).toBeNull());
+      await settle();
+      const before = () => [cardText('issued-credit-card'), cardButtons('issued-credit-card'), document.activeElement, tid('issued-credit-alert').textContent];
+      const was = before();
+      x.server.held.shift()!.release(); // the original commits now: its stored 201 belongs to no live attempt
+      await settle();
+      expect(before()).toEqual(was);
+      expect(held(x.r)?.state).toBe('issuing');
+      vi.useRealTimers();
+      await showAndChoose(STORE_1);
+      await press('find', 'issued-credit-card');
+      await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+      cleanup();
+      const y = await ready();
+      y.server.hold.cnIssue = 1;
+      await click('issued-credit-send');
+      await until(() => expect(y.server.held.length).toBe(1));
+      y.server.expire();
+      await focusEvents();
+      await waitFor(() => expect(screen.queryByTestId('issued-retry')).not.toBeNull());
+      await click('issued-retry');
+      await storesReady();
+      expect(held(y.r)?.csrf).toBeNull();
+      const then = () => [cardText('issued-credit-card'), cardButtons('issued-credit-card'), tid('issued-credit-alert').textContent];
+      const had = then();
+      y.server.held.shift()!.release();
+      await settle();
+      expect(then()).toEqual(had);
+      expect(held(y.r)?.state).toBe('issuing');
+      expect(y.server.cnRequests('settle')).toEqual([]); // T-02: never a confirm sent
+    });
+
+    it('P2-41. a reload forgets the attempt (memory only): on open the lookup finds this owner\'s unsettled rows for the invoice and shows each with its own action — Confirm for an issued row, Release for an open one — and no Check again; nothing is sent on mount', async () => {
+      const x = await ready();
+      x.server.cnScripts.issue.push('lose');
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+      x.server.addCreditReg({ invoiceId: x.made[1].id, number: 2 });
+      const writesBefore = x.server.writes();
+      await reload(x.r);
+      await open(1);
+      await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+      expect(screen.queryByTestId('issued-payments-credit-card')).toBeNull();
+      expect(screen.queryAllByRole('button', { name: CREDIT_TEXT.checkAgain })).toEqual([]);
+      expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+      expect(x.server.writes()).toEqual(writesBefore);
+      await press('confirm', 'issued-payments-credit-row');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+      await click('issued-view-close');
+      await open(2);
+      await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(x.r))]));
+      expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull();
+    });
+
+    it('P2-66. Continue issuing blocked by the window: the shop-observed sign-in over 8 minutes → continueLapsed with Look up attempt; no sign-in is offered and no issue is sent (the press\'s reads may go out)', async () => {
+      const x = await registeredOnly();
+      x.r.clock.mono += 8 * 60_000 + 1_000;
+      x.r.clock.wall += 8 * 60_000 + 1_000;
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.continueLapsed));
+      expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.registeredOnly(false));
+      expect(cardButtons()).toEqual([CREDIT_TEXT.find]);
+      expect(screen.queryByTestId('issued-credit-reauth-password')).toBeNull();
+      expect(x.server.cnRequests('issue')).toEqual([]);
+      expect(held(x.r)?.issue).toBeNull();
+    });
+
+    it('P2-69, P2-42. a Continue issuing review that fails says why and sends no register, issue or settlement: Remaining fell (another session\'s payment or credit) → overRemaining, the amounts read again; voided → voided; a proof 404 → cantContinue; a proof 503 → registeredOnly stays; a proof 403 → one fresh check, the same token → noAccessShort with no buttons', async () => {
+      for (const kind of ['remaining', 'voided', 'proof 404', 'proof 503', 'proof 403'] as const) {
+        const x = await registeredOnly();
+        const w = writes(x.server);
+        if (kind === 'remaining') x.server.credits.set(x.made[0].id, 2000);
+        if (kind === 'voided') x.made[0].void = { voidedAt: '2026-10-18T11:00:00.000001Z', reasonCode: 'other' };
+        if (kind.startsWith('proof')) x.server.cnScripts.proof.push(kind === 'proof 404' ? 404 : kind === 'proof 503' ? 503 : 403);
+        await press('continue');
+        const said = { remaining: CREDIT_TEXT.overRemaining, voided: CREDIT_TEXT.voided, 'proof 404': CREDIT_TEXT.cantContinue, 'proof 503': CREDIT_TEXT.registeredOnly(true), 'proof 403': CREDIT_TEXT.registeredOnly(false) }[kind];
+        await waitFor(() => expect(cardText(), kind).toBe(said));
+        if (kind === 'proof 403') {
+          expect(tid('issued-payments-credit-card-also').textContent).toBe(CREDIT_TEXT.noAccessShort);
+          expect(cardButtons()).toEqual([]);
+        } else expect(cardButtons(), kind).toContain(CREDIT_TEXT.find);
+        if (kind === 'remaining') await waitFor(() => expect(tid('issued-payments-remaining')).toHaveTextContent('$1.76'));
+        expect(writes(x.server), kind).toEqual(w);
+        cleanup();
+      }
+    });
+
+    it('P2-84 (C). continuation eligibility, each of E1-E7 failing alone, says its text and sends no register, issue or settlement (reads may go out): E1 its own row issued → that state; E2 another token → continueAfterSignIn; E3 the lookup stopped → lookupIncomplete, another unfinished row here → unfinished; E4 another note → anotherNoteFound; E5 a proof 503 → registeredOnly; E6 lapsed → continueLapsed; E7 the key already taken → nothing sent. Its own row not listed passes E1 (its proof goes out)', async () => {
+      const cases = ['E1', 'E1 unlisted', 'E2', 'E3 incomplete', 'E3 unfinished', 'E4', 'E5', 'E6', 'E7'] as const;
+      for (const e of cases) {
+        const x = await registeredOnly();
+        const w = writes(x.server);
+        const proofs = x.server.cnRequests('proof').length;
+        const g = x.server.cnRegs[0];
+        if (e === 'E1') {
+          const [note] = x.server.addCreditNotes(x.made[0].id, 1, () => ({ issuedAt: x.server.cnTick() }));
+          g.state = 'issued';
+          g.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+        }
+        if (e === 'E1 unlisted') x.server.cnRegs.splice(0);
+        if (e === 'E2') x.server.otherTab('uid-a');
+        if (e === 'E3 incomplete') x.server.cnScripts.lookup.push(503);
+        if (e === 'E3 unfinished') x.server.addCreditReg({ invoiceId: x.made[0].id });
+        if (e === 'E4') x.server.addCreditNotes(x.made[0].id, 1, () => ({ issuedAt: x.server.cnTick() }));
+        if (e === 'E5') x.server.cnScripts.proof.push(503);
+        if (e === 'E6') { x.r.clock.mono += 8 * 60_000 + 1_000; x.r.clock.wall += 8 * 60_000 + 1_000; }
+        if (e === 'E7') x.server.hold.cnProof = 1;
+        fireEvent.click(control('continue')!);
+        if (e === 'E7') {
+          // Another contender claims the one key while this press's proof is out (§2.6 item 2).
+          await until(() => expect(x.server.held.length).toBe(1));
+          const h = held(x.r)!;
+          const body = creditNoteIssueBodyOf({ expectedTenant: TENANT_A, registrationId: g.id, attemptId: h.attemptId, grossCents: 500, reason: 'goodwill', registrationProof: g.proof })!;
+          expect(x.r.cnHolds.claimIssueKey('uid-a', h.attemptId, h.generation, uuid(0xe7e7), body)).toBe('claimed');
+          x.server.held.shift()!.release();
+        }
+        const said: Record<typeof e, [string, string]> = {
+          E1: ['issued-payments-credit-card', CREDIT_TEXT.alreadyIssued], 'E1 unlisted': ['issued-payments-credit-card', CREDIT_TEXT.cantContinue],
+          E2: ['issued-credit-card', CREDIT_TEXT.continueAfterSignIn], 'E3 incomplete': ['issued-payments-credit-card', CREDIT_TEXT.lookupIncomplete],
+          'E3 unfinished': ['issued-payments-credit-card', CREDIT_TEXT.unfinished], E4: ['issued-payments-credit-card', CREDIT_TEXT.anotherNoteFound],
+          E5: ['issued-payments-credit-card', CREDIT_TEXT.registeredOnly(true)], E6: ['issued-payments-credit-card', CREDIT_TEXT.continueLapsed],
+          E7: ['issued-payments-credit-card', CREDIT_TEXT.registeredOnly(false)],
+        };
+        await until(() => expect(cardText(said[e][0]), e).toBe(said[e][1]));
+        await settle();
+        expect(writes(x.server), e).toEqual(w);
+        if (e === 'E1 unlisted' || e === 'E5' || e === 'E6') expect(x.server.cnRequests('proof').length, e).toBe(proofs + 1);
+        if (e === 'E1' || e === 'E3 unfinished') expect(screen.queryAllByTestId('issued-payments-credit-row').length, e).toBeGreaterThan(0);
+        if (e === 'E7') expect(held(x.r)?.issue?.key).toBe(uuid(0xe7e7));
+        cleanup();
+      }
+    });
+
+    it('P2-78. a late proof against Continue issuing: the proof times out, Continue issuing is pressed, then the first proof\'s 200 arrives — stale (not the attempt\'s latest proof); only the press\'s own proof 200 claims the key: one issue key, one issue', async () => {
+      const x = await ready();
+      x.server.hold.cnProof = 1;
+      fakeClock();
+      fireEvent.click(tid('issued-credit-send'));
+      await until(() => expect(x.server.held.length).toBe(1));
+      await pass(x.r, 30_000);
+      await until(() => expect(control('continue')).not.toBeNull());
+      fireEvent.click(control('continue')!);
+      await until(() => expect(cardText()).toBe(issuedText));
+      x.server.held.shift()!.release();
+      await settle();
+      expect(cardText()).toBe(issuedText);
+      expect(x.server.cnRequests('proof')).toHaveLength(2);
+      expect(x.server.cnRequests('issue')).toHaveLength(1);
+      expect(held(x.r)?.issue?.key).toBe(keyOf(x.server.cnRequests('issue')[0]));
+    });
+
+    it('P2-87 (C). D-P2-15 beyond page one: a baseline read to nextCursor null over 51 notes, one withdrawn since (still listed: not new), and another session\'s note landing past page one → anotherNoteFound with that note only; a baseline of page one only → anotherNoteUnknown; a baseline id missing from a complete current read → anotherNoteUnknown', async () => {
+      const x = await registeredOnly({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+      expect(held(x.r)?.baseline?.complete).toBe(true);
+      expect(held(x.r)?.baseline?.ids).toHaveLength(51);
+      const notes = x.server.creditNotes.get(x.made[0].id)!;
+      notes[3].withdrawal = { withdrawnAt: x.server.cnTick(), reason: 'entered_in_error', withdrawnByName: null };
+      const [late] = x.server.addCreditNotes(x.made[0].id, 1, () => ({ issuedAt: x.server.cnTick() }));
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteFound));
+      expect(screen.getAllByTestId('issued-payments-credit-card-note').map((n) => n.getAttribute('data-id'))).toEqual([late.id]);
+      expect(held(x.r)?.shown).toEqual({ ids: [late.id], complete: true });
+      expect(x.server.cnRequests('issue')).toEqual([]);
+      cleanup();
+      // Page one only: the baseline's page two failed (a 503) — the comparison cannot be complete.
+      let failPageTwo = true;
+      const y = await registeredOnly({
+        prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); },
+        fetch: (server) => (async (input: RequestInfo | URL, init: RequestInit = {}) => (
+          failPageTwo && /\/credit-notes\?after=/.test(String(input)) ? json(503, { error: 'service_unavailable', requestId: 'req-synthetic' }) : server.fetch(input, init)
+        )) as typeof globalThis.fetch,
+      });
+      expect(held(y.r)?.baseline).toMatchObject({ complete: false });
+      expect(held(y.r)?.baseline?.ids).toHaveLength(50);
+      failPageTwo = false;
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteUnknown));
+      expect(held(y.r)?.shown?.complete).toBe(false);
+      expect(held(y.r)?.shown?.ids).toHaveLength(51);
+      cleanup();
+      // A baseline id missing from a complete read now (notes are never deleted: the shop cannot compare, so it says so).
+      const z = await registeredOnly({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+      z.server.creditNotes.set(z.made[0].id, z.server.creditNotes.get(z.made[0].id)!.slice(1));
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteUnknown));
+      expect(z.server.cnRequests('issue')).toEqual([]);
+    });
+
+    it('P2-88. an incomplete comparison: a failed baseline does not block the fresh issue; Continue issuing → anotherNoteUnknown, focus on Look up attempt; "Issue another credit note" with the stated uncertainty persisting and no unshown id sends exactly one issue; a newly seen unshown id updates the card and sends nothing; an anotherNoteFound card with a complete comparison whose re-read fails states the uncertainty and sends nothing until another press', async () => {
+      let failList = true;
+      const failing = (server: Server) => (async (input: RequestInfo | URL, init: RequestInit = {}) => (
+        failList && /\/credit-notes(\?|$)/.test(String(input)) && (init.method ?? 'GET') === 'GET' ? json(503, { error: 'service_unavailable', requestId: 'req-synthetic' }) : server.fetch(input, init)
+      )) as typeof globalThis.fetch;
+      const x = await registeredOnly({ fetch: failing });
+      expect(held(x.r)?.baseline).toEqual({ ids: [], complete: false });
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteUnknown));
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-payments-credit-card-find')));
+      expect(x.server.cnRequests('issue')).toEqual([]);
+      await press('another'); // the list still fails: the uncertainty it stated persists, no unshown id
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect(x.server.cnRequests('issue')).toHaveLength(1);
+      cleanup();
+      // A newly seen, unshown id: the card says so and nothing is sent until another press.
+      failList = true;
+      const y = await registeredOnly({ fetch: failing });
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteUnknown));
+      failList = false;
+      const [seen] = y.server.addCreditNotes(y.made[0].id, 1, () => ({ issuedAt: y.server.cnTick() }));
+      await press('another');
+      await waitFor(() => expect(held(y.r)?.shown?.ids).toEqual([seen.id]));
+      expect(cardText()).toBe(CREDIT_TEXT.anotherNoteUnknown);
+      expect(screen.getAllByTestId('issued-payments-credit-card-note').map((n) => n.getAttribute('data-id'))).toEqual([seen.id]);
+      expect(y.server.cnRequests('issue')).toEqual([]);
+      await press('another');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect(y.server.cnRequests('issue')).toHaveLength(1);
+      cleanup();
+      // anotherNoteFound with a complete comparison; its re-read fails: the uncertainty is stated, nothing sent; the next press sends.
+      failList = false;
+      const z = await registeredOnly({ fetch: failing });
+      const [found] = z.server.addCreditNotes(z.made[0].id, 1, () => ({ issuedAt: z.server.cnTick() }));
+      await press('continue');
+      await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.anotherNoteFound));
+      expect(held(z.r)?.shown).toEqual({ ids: [found.id], complete: true });
+      failList = true;
+      await press('another');
+      await waitFor(() => expect(held(z.r)?.shown).toEqual({ ids: [found.id], complete: false }));
+      expect([cardText(), tid('issued-payments-credit-card-also').textContent]).toEqual([CREDIT_TEXT.anotherNoteFound, CREDIT_TEXT.anotherNoteUnknown]);
+      expect(z.server.cnRequests('issue')).toEqual([]);
+      await press('another');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      expect(z.server.cnRequests('issue')).toHaveLength(1);
+    });
+
+    it('P2-70 (C). a reload with a register in flight: the lookup shows no row and a new attempt registers — the old one committing first makes the new one a sealed write_conflict → unfinished → the lookup re-read shows the old row open → Release → released → the action is back, nothing started on its own; the new one first leaves the old one a sealed write_conflict', async () => {
+      for (const first of ['old', 'new'] as const) {
+        const x = await ready();
+        x.server.hold.cnRegister = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.length).toBe(1));
+        const old = x.server.held.shift()!;
+        const oldKey = x.r.keys[1];
+        await reload(x.r);
+        await open(1);
+        await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+        expect(rowStates()).toEqual([]);
+        await toConfirm();
+        await signIn();
+        if (first === 'old') { old.release(); await settle(); }
+        await click('issued-credit-send');
+        if (first === 'old') {
+          await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.unfinished));
+          await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(x.r))]));
+          await press('release', 'issued-payments-credit-row');
+          await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.released));
+          await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+          await settle();
+          expect(x.server.cnRequests('register')).toHaveLength(2);
+          expect(x.server.cnRequests('issue')).toEqual([]);
+        } else {
+          await waitFor(() => expect(cardText()).toBe(issuedText));
+          old.release();
+          await settle();
+          expect(x.server.keys.get(oldKey)?.body).toEqual({ error: 'write_conflict' });
+          expect(x.server.cnRegs.map((g) => g.attemptId)).not.toContain(x.r.keys[0]);
+        }
+        cleanup();
+      }
+    });
+
+    it('P2-71, P2-72 (C). a reload with the issue in flight: the fresh lookup shows the row open. Release first → 200 released, then the late issue is a sealed invalid_state: no credit note from this attempt, Remaining unchanged; the issue first → Release is a sealed write_conflict → the lookup shows it issued → Confirm → confirmed', async () => {
+      for (const first of ['release', 'issue'] as const) {
+        const x = await ready();
+        x.server.hold.cnIssue = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.length).toBe(1));
+        const late = x.server.held.shift()!;
+        const issueKey = x.r.keys[2];
+        await reload(x.r);
+        await open(1);
+        await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowOpen(AT(x.r))]));
+        if (first === 'issue') { late.release(); await settle(); }
+        await press('release', 'issued-payments-credit-row');
+        if (first === 'release') {
+          await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.released));
+          late.release();
+          await settle();
+          expect(x.server.keys.get(issueKey)?.body).toEqual({ error: 'invalid_state' });
+          expect(x.server.creditNotes.get(x.made[0].id) ?? []).toEqual([]);
+          await waitFor(() => expect(tid('issued-payments-remaining')).toHaveTextContent('$21.76'));
+        } else {
+          await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+          await press('confirm', 'issued-payments-credit-row');
+          await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+          expect(x.server.creditNotes.get(x.made[0].id)).toHaveLength(1);
+        }
+        cleanup();
+      }
+    });
+
+    it('P2-73 (C). a reload with the settlement in flight: the fresh lookup shows the old state (issued); two keys asking for the same target, in both orders — exactly one transition (settled once), the other answering 200 unchanged', async () => {
+      for (const first of ['fresh', 'old'] as const) {
+        const x = await ready();
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        x.server.hold.cnSettle = 1;
+        await press('confirm');
+        await until(() => expect(x.server.held.length).toBe(1));
+        const old = x.server.held.shift()!;
+        const oldKey = x.r.keys[3];
+        await reload(x.r);
+        await open(1);
+        await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+        const g = x.server.cnRegs[0];
+        if (first === 'old') { old.release(); await settle(); }
+        const settledAt = g.settledAt;
+        await press('confirm', 'issued-payments-credit-row');
+        await waitFor(() => expect(cardText(), first).toBe(CREDIT_TEXT.confirmed));
+        if (first === 'fresh') {
+          const once = g.settledAt;
+          old.release();
+          await settle();
+          expect(g.settledAt).toBe(once);
+          expect(x.server.keys.get(oldKey)?.body).toMatchObject({ settlement: { state: 'confirmed' } });
+        } else expect(g.settledAt).toBe(settledAt);
+        expect(g.state).toBe('confirmed');
+        expect(new Set(x.server.cnRequests('settle').map(keyOf)).size).toBe(2);
+        cleanup();
+      }
+    });
+
+    it('P2-06 (recovery), D-P2-10 A. Void and Reverse are hidden on every invoice while the attempt can still Continue issuing, and come back once it cannot (the sign-in past 8 minutes, the register decided)', async () => {
+      const x = await registeredOnly({ count: 3 });
+      await click('issued-view-close');
+      await click('issued-list-retry'); // the sign-in cleared the list read before it (LIST_TEXT.renewed)
+      await listReady();
+      await open(3);
+      await settle();
+      expect(screen.queryByTestId('issued-view-void')).toBeNull();
+      await click('issued-view-close');
+      x.r.clock.mono += 8 * 60_000 + 1_000;
+      x.r.clock.wall += 8 * 60_000 + 1_000;
+      await open(3);
+      await waitFor(() => expect(screen.queryByTestId('issued-view-void')).not.toBeNull());
+      expect(creditNoteHoldsSignIns(held(x.r), x.r.clock.mono, x.r.clock.wall)).toBe(false);
+    });
+
+    describe('fix list 1 (the chair-adjudicated review fixes)', () => {
+      /** ready(), then the issue's answer lost after it committed: unresolved with Check again and Look up attempt (no fake timers). */
+      async function lostIssue(o: Parameters<typeof ready>[0] = {}) {
+        const x = await ready(o);
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        return x;
+      }
+      const sectionCard = 'issued-credit-card';
+
+      it('F1 (A11Y-1). a card\'s second line is announced with its line, once: a Check again 429 at the issue → the alert region says unresolved and rateLimitedWait together', async () => {
+        const x = await lostIssue();
+        x.server.cnScripts.issue.push(chain(429, 'rate_limited', { 'retry-after': '7' }));
+        await press('check');
+        await until(() => expect(control('also')?.textContent).toBe(CREDIT_TEXT.rateLimitedWait(7)));
+        expect(inlineAlert()).toBe(`${CREDIT_TEXT.unresolved(false)} ${CREDIT_TEXT.rateLimitedWait(7)}`);
+        expect(x.server.cnRequests('settle')).toEqual([]);
+      });
+
+      it('F2 (SEC-1, ASY-4, CR-4). a confirmed same-token denial leaves a DETACHED card with no buttons (no Look up attempt, no Hide); a later known session change gives it back Look up attempt and Hide', async () => {
+        const x = await lostIssue();
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+        x.server.otherTab('uid-a'); // another tab's sign-in: a new token, adopted on the tab's return
+        await focusEvents();
+        await until(() => expect(held(x.r)?.csrf).toBeNull());
+        await showAndChoose(STORE_1);
+        await listReady();
+        await until(() => expect(cardButtons(sectionCard)).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+        x.server.cnOwners.delete('uid-a'); // demoted under that same token: the lookup's 403, the one check confirms it
+        await press('find', sectionCard);
+        await until(() => expect(cardText(sectionCard)).toBe(CREDIT_TEXT.noAccess));
+        expect(cardButtons(sectionCard)).toEqual([]);
+        expect(creditNamedOutside(tid('issued-section'))).toEqual([]); // T-g: the three approved names only
+        x.server.otherTab('uid-a');
+        await focusEvents();
+        await showAndChoose(STORE_1);
+        await listReady();
+        await until(() => expect(cardButtons(sectionCard)).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+        expect(x.server.cnRequests('settle')).toEqual([]);
+        vi.restoreAllMocks();
+      });
+
+      it('F3 (CR-1). a hold put from a lookup row (no issue sent by it) whose row the lookup no longer lists → notListed, never regUnknown ("No credit note was issued")', async () => {
+        const x = await lostIssue();
+        await reload(x.r);
+        await open(1);
+        await until(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowIssued]));
+        x.server.cnScripts.settle.push(503);
+        await click('issued-payments-credit-row-confirm');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(true)));
+        x.server.cnRegs.splice(0); // settled over 24 h ago elsewhere: the lookup no longer lists it
+        await press('find');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.notListed));
+        expect(creditNamedOutside(tid('issued-section'))).toEqual([]); // T-g: the three approved names only
+        expect(tid('issued-section').textContent).not.toMatch(/No credit note was issued/);
+      });
+
+      it('F4 (ASY-1). the page left while a stage was out (the section unmounted, the hold kept): its answer still counts, and the card back offers what its stage allows — issued with Confirm; registered with Continue issuing', async () => {
+        for (const stage of ['issue', 'register'] as const) {
+          const x = await ready();
+          x.server.hold[stage === 'issue' ? 'cnIssue' : 'cnRegister'] = 1;
+          fireEvent.click(tid('issued-credit-send'));
+          await until(() => expect(x.server.held.length, stage).toBe(1));
+          cleanup(); // another page of the app: the section goes, the module-level hold stays
+          x.server.held.shift()!.release();
+          await settle();
+          expect(held(x.r)?.state, stage).toBe(stage === 'issue' ? 'issued' : 'registered');
+          expect([x.server.cnRequests('proof').length, x.server.cnRequests('issue').length], stage).toEqual(stage === 'issue' ? [1, 1] : [0, 0]);
+          render(<ServerIssuedInvoices {...x.r.props()} />);
+          await showAndChoose(STORE_1);
+          await listReady();
+          if (stage === 'issue') {
+            expect(cardText(sectionCard)).toBe(issuedText);
+            expect(cardButtons(sectionCard)).toContain(CREDIT_TEXT.confirm);
+          } else {
+            expect(cardText(sectionCard)).toBe(CREDIT_TEXT.registeredOnly(true));
+            expect(cardButtons(sectionCard)).toContain(CREDIT_TEXT.continueIssuing);
+          }
+          expect(creditNamedOutside(tid('issued-section'))).toEqual([]); // T-g: the three approved names only
+          expect(x.server.cnRequests('settle'), stage).toEqual([]);
+          cleanup();
+        }
+      });
+
+      it('F5 (SF-1). a press that throws (the client never rejects; staged here) fails closed: internalError with Look up attempt, busy released, no unhandled rejection', async () => {
+        const server = seeded();
+        issueAt(server, STORE_1, 2);
+        server.cnOwners.add('uid-a');
+        const r = rig(server);
+        const real = r.props().issuing;
+        const issuing = { ...real, creditNoteProof: () => { throw new Error('synthetic'); } } as typeof real;
+        render(<ServerIssuedInvoices {...r.props({ issuing })} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+        await open(1);
+        await toConfirm();
+        await signIn();
+        await click('issued-credit-send');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.internalError));
+        expect(cardButtons()).toContain(CREDIT_TEXT.find);
+        expect(control('find')).toHaveAttribute('aria-disabled', 'false');
+        expect(server.cnRequests('issue')).toEqual([]);
+      });
+
+      it('F6 (SF-5, ATTR-01). two stored register answers that differ (the original\'s 201, a Check again\'s sealed 409) fail closed: internalError with Look up attempt', async () => {
+        const x = await ready();
+        await stalled(x, 'cnRegister');
+        x.server.hold.cnRegister = 1;
+        fireEvent.click(control('check')!);
+        await until(() => expect(x.server.held.length).toBe(2));
+        x.server.held.shift()!.release();
+        await until(() => expect(held(x.r)?.state).toBe('registered'));
+        x.server.held.shift()!.release(sealedAnswer('write_conflict'));
+        await settle();
+        expect(cardText()).toBe(CREDIT_TEXT.internalError);
+        expect(cardButtons()).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]);
+        expect([x.server.cnRequests('proof'), x.server.cnRequests('issue')]).toEqual([[], []]);
+      });
+
+      it('F7 (SF-7b). a sealed 409 word the outcome table does not list fails closed (internalError, Look up attempt, the hold kept): at the register it never ends the attempt; at the issue it never says "No credit note was issued"', async () => {
+        for (const stage of ['register', 'issue'] as const) {
+          const x = await ready();
+          x.server.cnScripts[stage].push(sealedAnswer('unlisted_word'));
+          await click('issued-credit-send');
+          await waitFor(() => expect(cardText(), stage).toBe(CREDIT_TEXT.internalError));
+          expect(held(x.r)?.state, stage).toBe(stage === 'register' ? 'registering' : 'issuing');
+          expect(cardButtons(), stage).toContain(CREDIT_TEXT.find);
+          expect(tid('issued-section').textContent, stage).not.toMatch(/No credit note was issued/);
+          cleanup();
+        }
+      });
+
+      it('F8 (SF-3). Check again whose session read fails (no sign-out, no wait) says the shipped unavailable text; the card keeps its line and Check again', async () => {
+        const x = await lostIssue();
+        x.server.currentStatus.push(503);
+        const before = x.server.cnRequests('issue').length;
+        await press('check');
+        await until(() => expect(inlineAlert()).toBe(ISSUED_TEXT.unavailable));
+        expect(x.server.cnRequests('issue')).toHaveLength(before);
+        expect(cardText()).toBe(CREDIT_TEXT.unresolved(true));
+        expect(cardButtons()).toContain(CREDIT_TEXT.checkAgain);
+      });
+
+      it('F8 (SF-6). a lookup row the hold cannot move to (released after it was known issued) fails closed instead of saying released', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push(sealedAnswer('already_issued'));
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.alreadyIssued));
+        const g = x.server.cnRegs.find((y) => y.attemptId === x.r.keys[0])!;
+        const [note] = x.server.addCreditNotes(x.made[0].id, 1, () => ({ issuedAt: x.server.cnTick() }));
+        g.state = 'issued';
+        g.creditNote = { id: note.id, issuedAt: note.issuedAt, withdrawnAt: null };
+        await click('issued-payments-credit-card-find');
+        await waitFor(() => expect(held(x.r)?.state).toBe('issued'));
+        Object.assign(g, { state: 'released', settledAt: x.server.cnTick(), creditNote: null }); // a server inconsistency
+        await click('issued-payments-credit-card-find');
+        await waitFor(() => expect(rowStates()).toEqual([CREDIT_TEXT.rowReleased]));
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.internalError));
+        expect(held(x.r)?.state).toBe('issued');
+      });
+
+      it('F9 (SEC-3). a settings read\'s 403 the one check confirms with the same token is rule 4 for the section: the credit-note card keeps its last state with no buttons', async () => {
+        const x = await lostIssue();
+        await click('issued-view-close');
+        await until(() => expect(cardButtons(sectionCard)).toContain(CREDIT_TEXT.find));
+        x.server.getStatus.push(403);
+        await click('issued-settings-open');
+        await waitFor(() => expect(panelPhase()).toBe('denied'));
+        await until(() => expect(cardButtons(sectionCard)).toEqual([]));
+        expect(cardText(sectionCard)).toBe(CREDIT_TEXT.noAccess);
+        expect(x.server.cnRequests('settle')).toEqual([]);
+      });
+
+      it('F10 (SEC-4). a 403 confirmed with the same token after the hold DETACHED (a store switch) is not rule 4: the detached card keeps Look up attempt and Hide', async () => {
+        const x = await ready();
+        x.server.hold.cnIssue = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.length).toBe(1));
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } });
+        await until(() => expect(held(x.r)?.csrf).toBeNull());
+        x.server.held.shift()!.release(chain(403, 'forbidden'));
+        await settle();
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+        await until(() => expect(cardButtons(sectionCard)).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+      });
+
+      it('T-c (T-03), P2-40, P2-28 (13) "replaced". attempt A ends while its register\'s first send is still out; attempt B starts and is issued; A\'s late answer then changes nothing on B — text, buttons, focus and the request log', async () => {
+        const x = await ready();
+        await stalled(x, 'cnRegister');
+        x.server.cnScripts.register.push(sealedAnswer('write_conflict')); // the Check again: the slot rule — A ends (unfinished)
+        await press('check');
+        await until(() => expect(held(x.r)?.state).toBe('ended'));
+        vi.useRealTimers();
+        const a = held(x.r)!.attemptId;
+        await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+        await toConfirm();
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        expect(held(x.r)?.attemptId).not.toBe(a);
+        await settle(); // the closed confirmation's queued focus to B's card heading lands first
+        const before = () => [cardText(), cardButtons(), document.activeElement, inlineSay(), inlineAlert(), held(x.r)?.state];
+        const was = before();
+        const sent = x.server.sent.length;
+        x.server.held.shift()!.release(); // A's original register, decided now
+        await settle();
+        expect(before()).toEqual(was);
+        expect(x.server.sent.slice(sent).filter((r) => !r.url.startsWith('/api/v1/session'))).toEqual([]);
+        expect(x.server.cnRequests('settle')).toEqual([]);
+        expect(creditNamedOutside(tid('issued-section'))).toEqual([]);
+      });
+
+      it('T-d (T-07), P2-28 (12). a late register 201 after the attempt was released, and a late proof 200 after it was issued, change no state and restore no action', async () => {
+        for (const late of ['register after released', 'proof after issued'] as const) {
+          const x = await ready();
+          if (late === 'register after released') {
+            await stalled(x, 'cnRegister');
+            await press('check'); // the replay answers 201
+            await until(() => expect(cardText(), late).toBe(CREDIT_TEXT.registeredOnly(true)));
+            await press('find');
+            await until(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+            fireEvent.click(tid('issued-payments-credit-row-release'));
+            await until(() => expect(held(x.r)?.state, late).toBe('released'));
+          } else {
+            x.server.hold.cnProof = 1;
+            fakeClock();
+            fireEvent.click(tid('issued-credit-send'));
+            await until(() => expect(x.server.held.length).toBe(1));
+            await pass(x.r, 30_000);
+            await until(() => expect(control('continue')).not.toBeNull());
+            await press('continue'); // its own proof (not held), then the issue
+            await until(() => expect(held(x.r)?.state, late).toBe('issued'));
+          }
+          const before = () => [cardText(), cardButtons(), held(x.r)?.state, writes(x.server)];
+          const was = before();
+          x.server.held.shift()!.release();
+          await settle();
+          expect(before(), late).toEqual(was);
+          expect(x.server.cnRequests('settle').length, late).toBe(late === 'register after released' ? 1 : 0); // only the Release itself
+          expect(creditNamedOutside(tid('issued-section')), late).toEqual([]);
+          vi.useRealTimers();
+          cleanup();
+        }
+      });
+
+      it('T-e (T-08). the windows at both edges, as literal constants: 8 minutes for a first send (inclusive), 9 for a Check again counted from the sign-in, 23 hours for a settlement replay (both exclusive) — each the larger of the monotonic and wall-clock times, so a short wall with a long monotonic time (and the reverse) has passed', () => {
+        expect([CREDIT_NOTE_FIRST_SEND_MS, CREDIT_NOTE_REPLAY_MS, CREDIT_NOTE_SETTLE_REPLAY_MS]).toEqual([480_000, 540_000, 82_800_000]);
+        const at = { mono: 1_000, wall: Date.UTC(2026, 10, 16, 12) };
+        const after = (mono: number, wall: number) => [at.mono + mono, at.wall + wall] as const;
+        expect([0, 480_000, 480_001].map((d) => signInFresh(at, ...after(d, d)))).toEqual([true, true, false]);
+        expect([signInFresh(at, ...after(480_001, 0)), signInFresh(at, ...after(0, 480_001))]).toEqual([false, false]);
+        const bytes = { key: 'k', body: 'b', firstMono: at.mono, firstWall: at.wall, completion: null, unstored: false };
+        const h = { csrf: 'c', signIn: at, register: bytes, issue: bytes, settle: { ...bytes, version: 2 } } as unknown as HeldCreditNote;
+        for (const stage of ['register', 'issue'] as const) {
+          expect([539_999, 540_000].map((d) => replayWindowOpen(h, stage, ...after(d, d))), stage).toEqual([true, false]);
+          expect([replayWindowOpen(h, stage, ...after(540_000, 0)), replayWindowOpen(h, stage, ...after(0, 540_000))], stage).toEqual([false, false]);
+        }
+        expect([82_799_999, 82_800_000].map((d) => replayWindowOpen(h, 'settle', ...after(d, d)))).toEqual([true, false]);
+        expect([replayWindowOpen(h, 'settle', ...after(82_800_000, 0)), replayWindowOpen(h, 'settle', ...after(0, 82_800_000))]).toEqual([false, false]);
+      });
+
+      it('F21 (A11Y-10). checkUntil is said through the status region (§2.6) when Check again is offered', async () => {
+        await lostIssue();
+        await until(() => expect(control('until')).not.toBeNull());
+        expect(inlineSay()).toBe(control('until')!.textContent);
+        expect(inlineAlert()).toBe(CREDIT_TEXT.unresolved(true)); // the line keeps its own region
+      });
+
+      it('F15 (ASY-2). busy has an owner: a Check again that answers while a later one is still out does not give the presses back', async () => {
+        const x = await ready();
+        await stalled(x, 'cnIssue');
+        x.server.hold.cnIssue = 2;
+        await press('check'); // #2, held
+        await pass(x.r, 30_000); // its 30 s: offered again
+        await until(() => expect(control('check')).toHaveAttribute('aria-disabled', 'false'));
+        await press('check'); // #3, held
+        await until(() => expect(x.server.held.length).toBe(3));
+        expect(control('find')).toHaveAttribute('aria-disabled', 'true');
+        x.server.held.splice(1, 1)[0].release(chain(409, 'request_in_progress')); // #2 answers while #3 is out
+        await settle();
+        expect(control('find')).toHaveAttribute('aria-disabled', 'true');
+        expect(describedBy('issued-payments-credit-card-find')).toBe(VIEW_TEXT.loading); // F16: why it is aria-disabled
+      });
+
+      it('F14 (ASY-6). Look up attempt holds the presses while its read is out: Continue issuing sends nothing meanwhile; the lookup\'s answer then speaks', async () => {
+        const x = await registeredOnly();
+        x.server.hold.cnLookup = 1;
+        const reads = x.server.details().length;
+        await press('find');
+        await until(() => expect(x.server.held.length).toBe(1));
+        expect(control('continue')).toHaveAttribute('aria-disabled', 'true');
+        fireEvent.click(control('continue')!);
+        await settle();
+        expect([x.server.cnRequests('proof').length, x.server.details().length]).toEqual([1, reads]);
+        x.server.held.shift()!.release();
+        await until(() => expect(control('continue')).toHaveAttribute('aria-disabled', 'false'));
+      });
+
+      it('F13 (ASY-5). a register\'s sealed invalid_state whose invoice re-read answers after the hold detached says nothing on the card (the lookup explains)', async () => {
+        const x = await ready();
+        x.server.cnScripts.register.push(sealedAnswer('invalid_state'));
+        x.server.hold.detail = 1;
+        await click('issued-credit-send');
+        await until(() => expect(x.server.held.length).toBe(1));
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } }); // a store switch detaches it
+        await until(() => expect(held(x.r)?.csrf).toBeNull());
+        x.server.held.shift()!.release();
+        await settle();
+        expect(held(x.r)?.state).toBe('registering');
+        expect(tid('issued-section').textContent).not.toMatch(/may have been voided|has been voided/);
+      });
+
+      it('F12 (ASY-3). "no Check again" is kept per settlement KEY: after a 404 shut the first key and its limit passed, a new key\'s lost answer offers Check again again', async () => {
+        const x = await ready();
+        await stalledSettle(x);
+        x.server.cnScripts.settle.push(404);
+        await press('check');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(false)));
+        expect(control('check')).toBeNull();
+        await pass(x.r, 23 * 60 * 60_000); // the first key's limit: its bytes go, the row path may hold a new key
+        await press('find');
+        await until(() => expect(screen.queryByTestId('issued-payments-credit-row-confirm')).not.toBeNull());
+        x.server.cnScripts.settle.push(503);
+        fireEvent.click(tid('issued-payments-credit-row-confirm'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.settleUnknown(true)));
+        expect(control('check')).not.toBeNull();
+        expect(new Set(x.server.cnRequests('settle').map(keyOf)).size).toBe(2);
+      });
+
+      it('F16 (A11Y-8). a card control the user left (focus moved on, the control still there) is forgotten: its later removal does not pull focus to the heading', async () => {
+        const x = await ready();
+        await stalled(x, 'cnIssue');
+        await advance(0); // the closed confirmation's queued focus to the card heading
+        fireEvent.click(tid('issued-view-close')); // the section-level card (no dialog's focus recovery)
+        await until(() => expect(control('check', sectionCard)).not.toBeNull());
+        act(() => { control('check', sectionCard)!.focus(); });
+        act(() => { control('check', sectionCard)!.blur(); }); // the user clicked plain text: focus on the body
+        await settle();
+        expect(document.activeElement).toBe(document.body);
+        await pass(x.r, 9 * 60_000); // the window passes: Check again goes
+        await until(() => expect(control('check', sectionCard)).toBeNull());
+        expect(document.activeElement).not.toBe(tid('issued-credit-card-heading')); // not the card's: the removed button had no focus (§2.6)
+      });
+
+      it('F17 (A11Y-2). the same words twice still speak (a fresh node in the region); a reopened dialog mounts its pair empty; closing it does not say the outcome again in the section pair', async () => {
+        const x = await lostIssue();
+        x.server.cnScripts.issue.push('lose');
+        const first = tid('issued-payments-credit-alert').firstElementChild;
+        expect(first?.textContent).toBe(CREDIT_TEXT.unresolved(true));
+        await press('check');
+        await until(() => expect(tid('issued-payments-credit-alert').firstElementChild).not.toBe(first));
+        expect(inlineAlert()).toBe(CREDIT_TEXT.unresolved(true));
+        await click('issued-view-close');
+        await settle();
+        expect(tid('issued-credit-alert').textContent).toBe('');
+        await click('issued-list-retry'); // the sign-in cleared the list read before it (LIST_TEXT.renewed)
+        await listReady();
+        await open(1);
+        expect([inlineSay(), inlineAlert()]).toEqual(['', '']);
+      });
+
+      it('F18 (CR-2). while this user\'s attempt on another invoice is open, another attempt\'s lookup row offers Release aria-disabled with the blockedOwn reason, and its press sends nothing', async () => {
+        const x = await lostIssue({ prepare: (s, m) => { s.addCreditReg({ invoiceId: m[1].id }); } });
+        await click('issued-view-close');
+        await click('issued-list-retry');
+        await listReady();
+        await open(2);
+        await until(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+        expect(tid('issued-payments-credit-row-release')).toHaveAttribute('aria-disabled', 'true');
+        expect(describedBy('issued-payments-credit-row-release')).toBe(`${CREDIT_TEXT.releaseHint} ${CREDIT_TEXT.blockedOwn}`);
+        fireEvent.click(tid('issued-payments-credit-row-release'));
+        await settle();
+        expect(x.server.cnRequests('settle')).toEqual([]);
+        expect(creditNamedOutside(tid('issued-section'))).toEqual([]); // T-g: the three approved names only
+      });
+
+      it('F19 (CR-3). a first-send issue refusal that offers no Check again (a step-up → issueStale) no longer holds Void and Reverse back', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push(chain(403, 'step_up_required'));
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.issueStale));
+        expect(cardButtons()).not.toContain(CREDIT_TEXT.checkAgain);
+        await click('issued-view-close');
+        await click('issued-list-retry');
+        await listReady();
+        await open(2);
+        await waitFor(() => expect(screen.queryByTestId('issued-view-void')).not.toBeNull());
+      });
+
+      it('F20 (CR-5, §4.1). the number\'s follow fails after the 201: the card shows numberPending with its own "Try again", which resumes the follow until CN-<n> loads', async () => {
+        const x = await ready();
+        await settle();
+        x.server.cnScripts.list.push(503);
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        expect(creditNamedOutside(tid('issued-section'))).toEqual([]); // T-g: the three approved names only
+        expect(control('number')?.textContent).toBe(CREDIT_TEXT.numberPending);
+        await waitFor(() => expect(inlineSay()).toBe(CREDIT_TEXT.numberPending)); // its own transition, once the follow stopped short
+        await press('retry');
+        await waitFor(() => expect(control('number')?.textContent).toMatch(/^CN-\d+$/));
+        expect(control('retry')).toBeNull();
+        expect(x.server.cnRequests('settle')).toEqual([]);
+      });
+
+      it('F16 (A11Y-6, A11Y-9, A11Y-11). a failed Continue review (the lookup not read to its end) moves focus to the Payments heading; the reason error describes each radio; the sign-in group keeps a name with its alert empty', async () => {
+        const x = await setup();
+        await open(1);
+        await startForm('5.00', null);
+        await click('issued-payments-credit-continue');
+        await waitFor(() => expect(tid('issued-payments-credit-form-reason-goodwill').getAttribute('aria-describedby')).toBe('issued-payments-credit-form-reason-error'));
+        expect(describedBy('issued-payments-credit-form-reason-goodwill')).toBe(CREDIT_TEXT.errReason);
+        fireEvent.click(tid('issued-payments-credit-form-reason-goodwill'));
+        x.server.cnScripts.lookup.push(503);
+        await click('issued-payments-credit-continue');
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull());
+        expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+        await click('issued-payments-credit-lookup-continue');
+        await waitFor(() => expect(action()).not.toBeNull());
+        await toConfirm();
+        await click('issued-credit-send');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-group')).not.toBeNull());
+        const group = tid('issued-credit-reauth-group');
+        const name = (group.getAttribute('aria-labelledby') ?? '').split(' ').map((id) => document.getElementById(id)?.textContent ?? '').join(' ').trim();
+        expect(name).toContain(VOID_TEXT.reauthExplain);
+      });
+    });
+
+    describe('fix list 2 (the review of fix list 1)', () => {
+      const sectionCard = 'issued-credit-card';
+      async function lostIssue(o: Parameters<typeof ready>[0] = {}) {
+        const x = await ready(o);
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        return x;
+      }
+      async function remount(r: Rig) {
+        cleanup();
+        render(<ServerIssuedInvoices {...r.props()} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+      }
+
+      it('G1 (RF1-01). the form\'s Cancel keeps the shared quiet button class (its padding, border and focus ring), never a boolean', async () => {
+        await setup();
+        await open(1);
+        await startForm('5.00', 'goodwill');
+        expect(tid('issued-payments-credit-cancel').className).toBe(`${quietClass} shrink-0 max-w-full whitespace-normal break-normal`); // T2-06: the whole class
+      });
+
+      it('G2 (RF1-02). a remount keeps rule 4 and the shut stages: after a confirmed same-token denial the card has no buttons; after issueStale no Check again, and Void is back', async () => {
+        const x = await lostIssue();
+        x.server.cnScripts.issue.push(chain(403, 'forbidden'));
+        await press('check');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.noAccess));
+        await remount(x.r);
+        expect([cardText(sectionCard), cardButtons(sectionCard)]).toEqual([CREDIT_TEXT.noAccess, []]);
+        cleanup();
+        const y = await ready();
+        y.server.cnScripts.issue.push(chain(403, 'step_up_required'));
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.issueStale));
+        await remount(y.r);
+        expect([cardText(sectionCard), held(y.r)?.state]).toEqual([CREDIT_TEXT.issueStale, 'issuing']); // T2-02: the card and its open hold are there
+        expect(cardButtons(sectionCard)).not.toContain(CREDIT_TEXT.checkAgain);
+        expect(cardButtons(sectionCard)).not.toContain(CREDIT_TEXT.continueIssuing);
+        await open(2);
+        await waitFor(() => expect(screen.queryByTestId('issued-view-void')).not.toBeNull());
+      });
+
+      it('G3 (RF1-03). Continue issuing whose proof answers after the section unmounted records it only: no issue key claimed, no issue sent; back, Continue issuing is offered', async () => {
+        const x = await registeredOnly();
+        x.server.hold.cnProof = 1;
+        await press('continue');
+        await until(() => expect(x.server.held.length).toBe(1));
+        cleanup();
+        x.server.held.shift()!.release();
+        await settle();
+        expect(x.server.held).toEqual([]); // T2-03: the held proof was released and answered
+        expect(x.server.cnRequests('proof')).toHaveLength(2); // the first send's and this press's only
+        expect([x.server.cnRequests('issue'), held(x.r)?.issue, held(x.r)?.state]).toEqual([[], null, 'registered']);
+        render(<ServerIssuedInvoices {...x.r.props()} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+        expect(cardButtons(sectionCard)).toContain(CREDIT_TEXT.continueIssuing);
+      });
+
+      it('G4 (RF1-04). a 403 confirmed at another store does not strip a detached card at its own store: Look up attempt and Hide stay', async () => {
+        const x = await lostIssue();
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } });
+        await until(() => expect(held(x.r)?.csrf).toBeNull());
+        x.server.getStatus.push(403);
+        await click('issued-settings-open');
+        await waitFor(() => expect(panelPhase()).toBe('denied'));
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+        await until(() => expect(cardButtons(sectionCard)).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+      });
+
+      it('G6 (RF1-06). a throw before the chain starts fails closed: internalError said, the confirmation closes (never left on sending), no unhandled rejection', async () => {
+        const server = seeded();
+        issueAt(server, STORE_1, 2);
+        server.cnOwners.add('uid-a');
+        const r = rig(server);
+        const holds = { ...r.cnHolds, put: () => { throw new Error('synthetic'); } } as CreditNoteHoldStore;
+        render(<ServerIssuedInvoices {...r.props({ creditNoteHolds: holds })} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+        await open(1);
+        await toConfirm();
+        await signIn();
+        await click('issued-credit-send');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        await waitFor(() => expect(inlineAlert()).toBe(CREDIT_TEXT.internalError));
+        expect(server.cnRequests('register')).toEqual([]);
+        expect(held(r)).toBeUndefined(); // T2-05: nothing held; the throw was caught (no unhandled rejection)
+      });
+
+      it('F17 part 4 (A11Y-3), T2-01. an outcome written while the confirmation is open (the page inert) is announced once, and only after it closes; the section pair stays empty while the view is open', async () => {
+        const x = await ready();
+        const pair = tid('issued-payments-credit-say');
+        const seen: Array<{ readonly text: string; readonly closed: boolean }> = [];
+        let node = pair.firstElementChild;
+        const o = new MutationObserver(() => {
+          const now = pair.firstElementChild;
+          if (now === node) return;
+          node = now;
+          if ((now?.textContent ?? '') !== '') seen.push({ text: now!.textContent!, closed: screen.queryByTestId('issued-credit-confirm') === null });
+        });
+        o.observe(pair, { childList: true, subtree: true, characterData: true });
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        await settle();
+        o.disconnect();
+        expect(seen).toEqual([{ text: issuedText, closed: true }]);
+        expect([tid('issued-credit-status').textContent, tid('issued-credit-alert').textContent]).toEqual(['', '']);
+        expect(x.server.cnRequests('settle')).toEqual([]);
+      });
+
+      it('H1 (R1). a press that throws late fails closed on ITS attempt only: a newer hold is left as it is', async () => {
+        const server = seeded();
+        const made = issueAt(server, STORE_1, 2);
+        server.cnOwners.add('uid-a');
+        const r = rig(server);
+        const real = r.props().issuing;
+        let reject: (e: Error) => void = () => undefined;
+        let called = false;
+        const issuing = { ...real, creditNoteProof: () => { called = true; return new Promise<never>((_, no) => { reject = no; }); } } as typeof real;
+        render(<ServerIssuedInvoices {...r.props({ issuing })} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+        await open(1);
+        await toConfirm();
+        await signIn();
+        await click('issued-credit-send');
+        await until(() => expect(held(r)?.state).toBe('registered'));
+        await until(() => expect(called).toBe(true)); // E: the proof leaves after the session read before it (P3), not with the 201
+        const a = held(r)!;
+        r.cnHolds.change('uid-a', a.attemptId, a.generation, { state: 'ended' });
+        r.cnHolds.remove('uid-a', a.attemptId);
+        const b = uuid(0xb0b1);
+        const put = r.cnHolds.put('uid-a', {
+          start: 'settle', version: 1, creditNoteId: null, attemptId: b, storeId: STORE_1, tenantId: TENANT_A, invoiceId: made[0].id, invoiceNumber: 1,
+          grossCents: 100, reason: 'goodwill', csrf: a.csrf as string, key: uuid(0xb0b2), body: settleBodyOf(TENANT_A, b, 1) as string,
+        } as Parameters<CreditNoteHoldStore['put']>[1]);
+        expect(put.kind).toBe('held');
+        expect(called).toBe(true);
+        act(() => { reject(new Error('synthetic')); });
+        await settle();
+        expect([held(r)?.attemptId, held(r)?.unresolved]).toEqual([b, false]);
+        expect(inlineAlert()).toBe(CREDIT_TEXT.internalError); // T2-04: said, on no card
+        expect(screen.queryByText(CREDIT_TEXT.internalError, { selector: '[data-testid$="-text"]' })).toBeNull();
+      });
+
+      it('H5 (R5). one access-loss transition, one announcement: a second same-token denial for the attempt says nothing again', async () => {
+        const x = await ready();
+        await stalled(x, 'cnIssue');
+        x.server.cnScripts.issue.push(chain(403, 'forbidden'));
+        await press('check');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.noAccess));
+        await settle();
+        const node = tid('issued-payments-credit-alert').firstElementChild;
+        x.server.held.shift()!.release(chain(403, 'forbidden'));
+        await settle();
+        await settle();
+        expect(tid('issued-payments-credit-alert').firstElementChild).toBe(node);
+        expect(cardButtons()).toEqual([]);
+        expect(x.server.cnRequests('issue')).toHaveLength(2); // T2-07: the original and the Check again only
+      });
+
+      it('H10 (CN-03). checkUntil and numberPending both apply: the status region says both', async () => {
+        const x = await ready();
+        await settle();
+        x.server.cnScripts.list.push(503);
+        const said = watch(tid('issued-payments-credit-say'));
+        await stalledSettle(x);
+        await until(() => expect(control('retry')).not.toBeNull());
+        // Fix list 3 (P9): each is said once when it comes, neither suppressing the other.
+        expect(said().filter((t) => t === CREDIT_TEXT.numberPending || t === control('until')!.textContent)).toEqual([CREDIT_TEXT.numberPending, control('until')!.textContent]);
+      });
+
+      it('H12 (CN-08). the number\'s "Try again" waits for a press still out (aria-disabled with its reason)', async () => {
+        const x = await ready();
+        await settle();
+        x.server.cnScripts.list.push(503);
+        await click('issued-credit-send');
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        x.server.hold.cnSettle = 1;
+        await press('confirm');
+        await until(() => expect(x.server.held.length).toBe(1));
+        expect(control('retry')).toHaveAttribute('aria-disabled', 'true');
+        expect(describedBy('issued-payments-credit-card-retry')).toBe(VIEW_TEXT.loading);
+        const reads = x.server.cnRequests('list').length;
+        fireEvent.click(control('retry')!);
+        await settle();
+        expect(x.server.cnRequests('list')).toHaveLength(reads);
+      });
+    });
+
+    describe('fix list 3 (the review of fix list 2)', () => {
+      const sectionCard = 'issued-credit-card';
+      /** ready(), with the issuing client changed by `over` (a throw staged where the client never throws). */
+      async function readyWith(over: (real: ReturnType<typeof createInvoiceIssuingClient>) => Partial<ReturnType<typeof createInvoiceIssuingClient>>) {
+        const server = seeded();
+        const made = issueAt(server, STORE_1, 2);
+        server.cnOwners.add('uid-a');
+        const r = rig(server);
+        const real = r.props().issuing as ReturnType<typeof createInvoiceIssuingClient>;
+        render(<ServerIssuedInvoices {...r.props({ issuing: { ...real, ...over(real) } })} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+        await open(1);
+        await toConfirm();
+        await signIn();
+        return { server, made, r };
+      }
+
+      it('P1 (RV2C-01, A2-3). remounted BEFORE any session read (Show not pressed): a confirmed no-access card still has no buttons and nothing is announced; after Show, still none, and no request leaves', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        x.server.cnScripts.issue.push(chain(403, 'forbidden'));
+        await press('check');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.noAccess));
+        cleanup();
+        render(<ServerIssuedInvoices {...x.r.props()} />);
+        await settle();
+        expect([cardText(sectionCard), cardButtons(sectionCard)]).toEqual([CREDIT_TEXT.noAccess, []]);
+        expect([tid('issued-credit-status').textContent, tid('issued-credit-alert').textContent]).toEqual(['', '']);
+        const sent = x.server.cnRequests().length;
+        await showAndChoose(STORE_1);
+        await listReady();
+        await settle();
+        expect(cardButtons(sectionCard)).toEqual([]);
+        expect(x.server.cnRequests().filter((q) => q.method === 'POST')).toHaveLength(x.server.cnRequests().slice(0, sent).filter((q) => q.method === 'POST').length);
+      });
+
+      it('P2 (CX2-01). a send that throws clears its 30 s timer: one internalError, and nothing at 30 s (no regUnknown)', async () => {
+        await readyWith(() => ({ registerCreditNote: () => { throw new Error('synthetic'); } }));
+        fakeClock();
+        const said = watch(tid('issued-payments-credit-alert'));
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.internalError));
+        await advance(31_000);
+        await settle();
+        expect(cardText()).toBe(CREDIT_TEXT.internalError);
+        expect(said().filter((t) => t !== '')).toEqual([CREDIT_TEXT.internalError]);
+      });
+
+      it('P3 (CX2-02/03, §3.6 rule 1). the session is read again before the proof and before the issue: another token between them → the hold detaches and nothing more is sent', async () => {
+        for (const between of ['register and proof', 'proof and issue'] as const) {
+          const x = await ready();
+          x.server.hold[between === 'register and proof' ? 'cnRegister' : 'cnProof'] = 1;
+          fireEvent.click(tid('issued-credit-send'));
+          await until(() => expect(x.server.held.length, between).toBe(1));
+          x.server.otherTab('uid-a'); // another tab's sign-in: a new token
+          x.server.held.shift()!.release();
+          await until(() => expect(held(x.r)?.csrf, between).toBeNull());
+          await settle();
+          expect([x.server.cnRequests('proof').length, x.server.cnRequests('issue').length], between).toEqual(between === 'register and proof' ? [0, 0] : [1, 0]);
+          expect(held(x.r)?.issue, between).toBeNull();
+          cleanup();
+        }
+      });
+
+      it('P4 (A2-1, P2-53). a confirmation opened and closed does not mount again what the pair said before it ("Credit note confirmed.")', async () => {
+        const x = await ready();
+        await click('issued-credit-send');
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        await click('issued-payments-credit-card-confirm');
+        await waitFor(() => expect(inlineSay()).toBe(CREDIT_TEXT.confirmed));
+        await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+        const said = watch(tid('issued-payments-credit-say'));
+        await toConfirm();
+        await click('issued-credit-keep');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        await settle();
+        expect(said().filter((t) => t === CREDIT_TEXT.confirmed)).toEqual([]);
+        expect(x.server.cnRequests('register')).toHaveLength(1);
+      });
+
+      it('P6, G5 (A2-6, A2-5). the hold on invoice 1 answers while invoice 2\'s dialog is open: that dialog\'s pair says it once; closing it repeats nothing in the section pair', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        x.server.hold.cnIssue = 1;
+        await press('check');
+        await until(() => expect(x.server.held.length).toBe(1));
+        await click('issued-view-close');
+        await click('issued-list-retry');
+        await listReady();
+        await open(2);
+        x.server.held.shift()!.release();
+        await waitFor(() => expect(inlineSay()).toBe(issuedText));
+        await click('issued-view-close');
+        await settle();
+        expect(tid('issued-credit-status').textContent).not.toBe(issuedText); // not said again (its numberPending may follow: a new line)
+      });
+
+      it('P5 (A2-2), verified. a Check again answered 409 in progress is ONE status announcement (inProgress): Check again is cooling, so no checkUntil rides on it', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        const pair = tid('issued-payments-credit-say');
+        const seen: string[] = [];
+        let node = pair.firstElementChild;
+        const o = new MutationObserver(() => { const now = pair.firstElementChild; if (now !== node) { node = now; if ((now?.textContent ?? '') !== '') seen.push(now!.textContent!); } });
+        o.observe(pair, { childList: true, subtree: true, characterData: true });
+        x.server.cnScripts.issue.push(chain(409, 'request_in_progress'));
+        await press('check');
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.inProgress));
+        await settle();
+        o.disconnect();
+        expect(seen).toEqual([CREDIT_TEXT.inProgress]);
+        expect(control('until')).toBeNull();
+      });
+
+      it('H9 (CN-02). the number\'s "Try again" whose read throws fails closed: internalError, Look up attempt, the attempt unresolved, no unhandled rejection', async () => {
+        let boom = false;
+        const x = await readyWith((real) => ({ listCreditNotes: (...a: Parameters<typeof real.listCreditNotes>) => { if (boom) throw new Error('synthetic'); return real.listCreditNotes(...a); } }));
+        await settle();
+        x.server.cnScripts.list.push(503);
+        await click('issued-credit-send');
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        boom = true;
+        await press('retry');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.internalError));
+        expect(cardButtons()).toContain(CREDIT_TEXT.find);
+        expect(held(x.r)?.unresolved).toBe(true);
+      });
+    });
+
+    describe('fix list 4 (the review of fix list 3)', () => {
+      const sectionCard = 'issued-credit-card';
+      async function back(r: Rig) {
+        render(<ServerIssuedInvoices {...r.props()} />);
+        await showAndChoose(STORE_1);
+        await listReady();
+      }
+
+      it('Q1 (RV3C-01). the page left while the issue is out and back past its 30 s: the card offers what the hold\'s state derives (Check again, Look up attempt), never a dead "sending" line', async () => {
+        const x = await ready();
+        x.server.hold.cnIssue = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.cnRequests('issue')).toHaveLength(1));
+        cleanup();
+        x.r.clock.mono += 31_000;
+        x.r.clock.wall += 31_000;
+        await back(x.r);
+        expect(cardText(sectionCard)).toBe(CREDIT_TEXT.unresolved(true));
+        expect(cardButtons(sectionCard)).toEqual(expect.arrayContaining([CREDIT_TEXT.checkAgain, CREDIT_TEXT.find]));
+      });
+
+      it('Q1 (RV3C-01). the page left during the session read before the proof (after an in-time register 201), and back: Continue issuing and Look up attempt per the registration\'s own line', async () => {
+        const x = await ready();
+        x.server.hold.cnRegister = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.length).toBe(1));
+        x.server.hold.current = 1;
+        x.server.held.shift()!.release();
+        await until(() => expect(x.server.held.length).toBe(1)); // the session read before the proof
+        cleanup();
+        x.server.held.shift()!.release();
+        await settle();
+        expect([held(x.r)?.state, x.server.cnRequests('proof')]).toEqual(['registered', []]);
+        await back(x.r);
+        expect(cardText(sectionCard)).toBe(CREDIT_TEXT.registeredOnly(true));
+        expect(cardButtons(sectionCard)).toEqual(expect.arrayContaining([CREDIT_TEXT.continueIssuing, CREDIT_TEXT.find]));
+      });
+
+      it('Q3 (RV3C-04). the session read before the proof fails: the shipped connect-failure text; the registration\'s line offers Continue issuing, and no proof leaves', async () => {
+        const x = await ready();
+        x.server.hold.cnRegister = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.length).toBe(1));
+        x.server.currentStatus.push(503);
+        x.server.held.shift()!.release();
+        await waitFor(() => expect(inlineAlert()).toBe(ISSUED_TEXT.unavailable));
+        expect(cardText()).toBe(CREDIT_TEXT.registeredOnly(true));
+        expect(cardButtons()).toContain(CREDIT_TEXT.continueIssuing);
+        expect(x.server.cnRequests('proof')).toEqual([]);
+      });
+    });
+
+    describe('fix list 5 (owner-directed)', () => {
+      const take = (server: Server, kind: string) => {
+        const i = server.held.findIndex((h) => h.kind === kind);
+        if (i < 0) throw new Error(`nothing held: ${kind}`);
+        return server.held.splice(i, 1)[0];
+      };
+      /** The register held, Show more's page held, then the session read before the proof held (hold order: register, list, current). */
+      async function atProofSession() {
+        // Over 1,000 notes: the list's 20-page read stops with Show more (a read the chain does not wait for).
+        const x = await ready({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 1001); } });
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-more')).not.toBeNull(), { timeout: 10_000 });
+        x.server.hold.cnRegister = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnRegister']));
+        x.server.hold.cnList = 1;
+        fireEvent.click(tid('issued-payments-credit-more')); // a section read whose page will answer 403 (the page behind is inert, not gone)
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnRegister', 'cnList']));
+        x.server.hold.current = 1;
+        take(x.server, 'cnRegister').release();
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnList', 'current'])); // cnSession's read is out
+        return x;
+      }
+
+      it('C (P2-89) self-check, fix list 6 › C. the request-log checker refuses: no backing lookup; another mount with the same token; a lookup answered after the send; a later lookup showing issued or released, or a later complete one missing it; a replay with other bytes', () => {
+        const server = seeded();
+        madeServers.splice(madeServers.indexOf(server), 1); // staged here, not by a test of the section
+        const inv = uuid(0x1a01);
+        const att = uuid(0xa1);
+        const push = (r: Sent, epoch: number, answeredAt: number | null, text?: string) => {
+          server.sent.push(r);
+          server.cnMeta.set(r, { epoch, answeredAt });
+          if (text !== undefined) server.cnAnswers.set(r, { status: 200, text });
+        };
+        const head = (h: Record<string, string>) => new Headers({ 'x-tmpos-session-csrf': 't', ...h });
+        const lookup = (state: string | null, epoch = 1, answeredAt: number | null = server.sent.length + 1, after = false) => push(
+          { method: 'GET', url: `${STORES_PATH}/${STORE_1}/credit-note-attempts${after ? '?after=x' : ''}`, headers: head({}), body: undefined, signal: null }, epoch, answeredAt,
+          JSON.stringify({ attempts: state === null ? [] : [{ attemptId: att, invoiceId: inv, state }], nextCursor: null }),
+        );
+        const settle = (body: string | null, epoch = 1) => push(
+          { method: 'POST', url: `${STORES_PATH}/${STORE_1}/invoices/${inv}/credit-note-settlement`, headers: head({ 'idempotency-key': uuid(0xe1) }), body: body ?? undefined, signal: null }, epoch, null,
+        );
+        const release = settleBodyOf(TENANT_A, att, 1);
+        const run = (stage: () => void) => { server.sent.length = 0; server.cnMeta.clear(); server.cnAnswers.clear(); stage(); return () => checkP289(server); };
+        expect(run(() => { lookup('open'); settle(release); })()).toBe(1);
+        expect(run(() => { settle(release); })).toThrow(/follows a lookup that listed its attempt/);
+        expect(run(() => { lookup('open', 1); settle(release, 2); })).toThrow(/follows a lookup that listed its attempt/); // another mount, same token
+        expect(run(() => { lookup('open', 1, 5); settle(release); })).toThrow(/follows a lookup that listed its attempt/); // answered after the send
+        for (const later of ['issued', 'released'] as const) expect(run(() => { lookup('open'); lookup(later); settle(release); }), later).toThrow(/lists its attempt open/);
+        expect(run(() => { lookup('open'); lookup(null); settle(release); })).toThrow(/a complete lookup after the backing one omits/);
+        expect(run(() => { lookup('open'); settle(release); settle(settleBodyOf(TENANT_A, uuid(0xa2), 1)); })).toThrow(/replays its key with the held bytes/);
+        // fix list 8 › N6: both answered BEFORE the send; the earlier-sent (issued) answered after the later-sent (open):
+        // delivery order would pick issued and fail this Release; send order picks open and passes it.
+        expect(run(() => { lookup('issued', 1, 2); lookup('open', 1, 1); settle(release); })()).toBe(1);
+        // fix list 7 › CX6-01: pages count in SEND order (a stale earlier read answered late never decides).
+        expect(run(() => { lookup('issued', 1, 3); lookup('open', 1, 2); settle(release); })()).toBe(1); // earlier-sent issued, delivered after a later-sent open
+        expect(run(() => { lookup('open', 1, 3); lookup('issued', 1, 2); settle(release); })).toThrow(/lists its attempt open/); // later-sent issued, delivered before the send
+      });
+
+      it('fix list 6 › B (1)(2), fix list 7 › F1. "Don\'t issue" and Escape close the confirmation only: the form keeps its amount and reason; focus goes straight to the Payments heading — never Continue, never body; nothing is sent', async () => {
+        for (const how of ['keep', 'escape'] as const) {
+          const x = await setup();
+          await open(1);
+          await toConfirm('5.00', 'goodwill');
+          const focused: Element[] = [];
+          const on = (e: FocusEvent) => { focused.push(e.target as Element); };
+          document.addEventListener('focusin', on);
+          if (how === 'keep') await click('issued-credit-keep');
+          else fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+          await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm'), how).toBeNull());
+          await settle();
+          document.removeEventListener('focusin', on);
+          expect(focused, `${how}: one focus move, straight to the heading`).toEqual([document.getElementById('issued-payments-title')]);
+          expect(tid('issued-payments-credit-form-amount'), how).toHaveValue('5.00');
+          expect(tid('issued-payments-credit-form-reason-goodwill'), how).toBeChecked();
+          expect(action(), how).toBeNull();
+          expect(document.activeElement, how).toBe(document.getElementById('issued-payments-title'));
+          expect(x.server.cnRequests().filter((q) => q.method === 'POST'), how).toEqual([]);
+          cleanup();
+        }
+      });
+
+      it('fix list 6 › B (3) (P2-13, SCN-09). Escape during the sign-in wait ends the wait and closes the confirmation; the form keeps its values', async () => {
+        const pending: Array<() => void> = [];
+        const x = await setup({ identity: (r) => ({ idToken: async () => 'tok-a', reauthMethod: () => 'password', reauthenticate: (uid, pw) => new Promise((done) => { r.reauth.push(pw); pending.push(() => done('tok-a')); }) }) });
+        await open(1);
+        await toConfirm('5.00', 'goodwill');
+        await click('issued-credit-send');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-password')).not.toBeNull());
+        type('issued-credit-reauth-password', 'correct horse');
+        await click('issued-credit-reauth-confirm');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-stop')).not.toBeNull());
+        fireEvent.keyDown(tid('issued-credit-reauth-password'), { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        for (const late of pending) late();
+        await settle();
+        expect(tid('issued-payments-credit-form-amount')).toHaveValue('5.00');
+        expect(tid('issued-payments-credit-form-reason-goodwill')).toBeChecked();
+        expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+        expect(x.server.cnRequests().filter((q) => q.method === 'POST')).toEqual([]);
+      });
+
+      it('fix list 6 › B (4) (B2), fix list 7 › F1, CX6-03. Close or Escape while sending: closedInFlight is said once, the form is kept, focus goes straight to the Payments heading (never Continue, never body); the late answer still applies to the card', async () => {
+        for (const how of ['keep', 'escape'] as const) {
+          const x = await ready();
+          x.server.hold.cnRegister = 1;
+          await click('issued-credit-send');
+          await until(() => expect(x.server.held.length, how).toBe(1));
+          const pair = tid('issued-payments-credit-say');
+          const seen: string[] = [];
+          let node = pair.firstElementChild;
+          const o = new MutationObserver(() => { const now = pair.firstElementChild; if (now !== node) { node = now; if ((now?.textContent ?? '') !== '') seen.push(now!.textContent!); } });
+          o.observe(pair, { childList: true, subtree: true });
+          const focused: Element[] = [];
+          const on = (e: FocusEvent) => { focused.push(e.target as Element); };
+          document.addEventListener('focusin', on);
+          if (how === 'keep') fireEvent.click(tid('issued-credit-keep')); // a press that moves no focus by itself
+          else fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+          await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm'), how).toBeNull());
+          await settle();
+          expect(document.activeElement, how).toBe(document.getElementById('issued-payments-title'));
+          expect(tid('issued-payments-credit-form-amount'), how).toHaveValue('5.00');
+          x.server.held.shift()!.release();
+          await waitFor(() => expect(cardText(), how).toBe(issuedText));
+          await settle();
+          o.disconnect();
+          document.removeEventListener('focusin', on);
+          expect(focused, `${how}: one focus move, straight to the heading`).toEqual([document.getElementById('issued-payments-title')]);
+          expect(seen.filter((t) => t === CREDIT_TEXT.closedInFlight), how).toEqual([CREDIT_TEXT.closedInFlight]);
+          expect(document.activeElement, how).not.toBe(document.body);
+          cleanup();
+        }
+      });
+
+      it('fix list 7 › F1 (CX6-02). the late answer lands between Close and the close timer: focus goes once, to what is there then (the action the reset brought back), never Continue, never body', async () => {
+        const x = await ready();
+        x.server.hold.cnRegister = 1;
+        await click('issued-credit-send');
+        await until(() => expect(x.server.held.length).toBe(1));
+        const focused: Element[] = [];
+        const on = (e: FocusEvent) => { focused.push(e.target as Element); };
+        document.addEventListener('focusin', on);
+        fakeClock(); // the close timer waits
+        fireEvent.click(tid('issued-credit-keep'));
+        x.server.held.shift()!.release();
+        await until(() => expect(cardText()).toBe(issuedText)); // answered and the form reset, timer still pending
+        await advance(0);
+        await settle();
+        document.removeEventListener('focusin', on);
+        expect(focused).toHaveLength(1); // one move, straight to its target
+        expect(document.activeElement).not.toBe(document.body);
+        expect([document.getElementById('issued-payments-title'), action()]).toContain(document.activeElement);
+      });
+
+      it('fix list 7 › F2 (§2.6 "Vanishes while focused"). after Close while sending the owner is in the kept form; the answer resets it: focus to the Payments heading, never body', async () => {
+        const x = await ready();
+        x.server.hold.cnRegister = 1;
+        await click('issued-credit-send');
+        await until(() => expect(x.server.held.length).toBe(1));
+        await click('issued-credit-keep');
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        await settle();
+        act(() => { tid('issued-payments-credit-form-amount').focus(); });
+        x.server.held.shift()!.release();
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull());
+        await settle();
+        expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+      });
+
+      it('fix list 8 › CX7-01, not reproduced (§2.6 "Vanishes while focused"). Close while sending a credit of the WHOLE remaining amount, then into the kept form: the answer takes the form away; focus to the Payments heading — never body, never the view\'s Close', async () => {
+        const x = await setup();
+        await open(1);
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-remaining')).not.toBeNull()); // the payments read answered
+        const whole = (tid('issued-payments-remaining').textContent ?? '').replace(/[$,]/g, '');
+        await toConfirm(whole, 'goodwill');
+        await signIn();
+        x.server.hold.cnRegister = 1;
+        await click('issued-credit-send');
+        await until(() => expect(x.server.held.length).toBe(1));
+        fireEvent.click(tid('issued-credit-keep'));
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        await settle();
+        act(() => { tid('issued-payments-credit-form-amount').focus(); });
+        const focused: Element[] = [];
+        const on = (e: FocusEvent) => { focused.push(e.target as Element); };
+        document.addEventListener('focusin', on);
+        x.server.held.shift()!.release();
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.issued('$' + whole, 'Goodwill')));
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull());
+        await settle();
+        document.removeEventListener('focusin', on);
+        expect(focused.filter((el) => el.getAttribute('data-testid') === 'issued-view-close')).toEqual([]);
+        expect(document.activeElement).toBe(document.getElementById('issued-payments-title'));
+      });
+
+      it('fix list 7 › F3 (A1). numberPending is said once for the attempt: a later list re-read that ends short again (after Confirm, around a review note) does not say it again', async () => {
+        const x = await ready({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 50, () => ({ issuedAt: cnTime(1) })); } });
+        await settle();
+        const pair = tid('issued-payments-credit-say');
+        const mounted: string[] = [];
+        let node = pair.firstElementChild;
+        const o = new MutationObserver(() => { const now = pair.firstElementChild; if (now !== node) { node = now; mounted.push(now?.textContent ?? ''); } });
+        o.observe(pair, { childList: true, subtree: true });
+        x.server.cnScripts.list.push(503);
+        await click('issued-credit-send');
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        await waitFor(() => expect(mounted).toContain(CREDIT_TEXT.numberPending));
+        x.server.cnScripts.list.push(503); // Confirm's list re-read fails too: still short
+        await press('confirm');
+        await waitFor(() => expect(cardText()).toBe(CREDIT_TEXT.confirmed));
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
+        x.server.cnScripts.list.push(503); // the review's list read ends short again
+        x.server.paymentsStatus.push(503); // and the review closes with its note
+        await startForm('1.00', 'goodwill');
+        await click('issued-payments-credit-continue');
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-form')).toBeNull());
+        await waitFor(() => expect(control('retry')).not.toBeNull());
+        await settle();
+        o.disconnect();
+        expect(mounted.filter((t) => t === CREDIT_TEXT.numberPending)).toEqual([CREDIT_TEXT.numberPending]);
+      });
+
+      it('fix list 6 › D1 (P2-82, §3.6 rule 4). a card offering Continue issuing: the void eligibility read gets a 403 the one check confirms with the same token — the card loses its buttons and no proof or issue is sent', async () => {
+        const x = await registeredOnly();
+        const proofs = x.server.cnRequests('proof').length;
+        await click('issued-view-close');
+        await click('issued-list-retry');
+        await listReady();
+        x.server.eligStatus.push(403);
+        await open(1);
+        await waitFor(() => expect(cardButtons()).toEqual([]));
+        expect(cardText()).toBe(CREDIT_TEXT.noAccessShort);
+        await settle();
+        expect([x.server.cnRequests('proof').length, x.server.cnRequests('issue').length]).toEqual([proofs, 0]);
+      });
+
+      it('fix list 6 › D1b (RF1-04). a denial confirmed through denialOf at STORE_2 (settings) does not strip the STORE_1 card: back at STORE_1 it keeps Look up attempt and Hide, and Look up reads under the same token (the store switch itself detached the hold, so Continue issuing cannot be offered there)', async () => {
+        const x = await registeredOnly();
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } });
+        await until(() => expect(held(x.r)?.csrf).toBeNull());
+        x.server.getStatus.push(403);
+        await click('issued-settings-open');
+        await waitFor(() => expect(panelPhase()).toBe('denied'));
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_1 } });
+        await until(() => expect(cardButtons('issued-credit-card')).toEqual([CREDIT_TEXT.find, CREDIT_TEXT.hide]));
+        expect(cardText('issued-credit-card')).not.toBe(CREDIT_TEXT.noAccessShort);
+        const lookups = x.server.cnRequests('lookup').length;
+        await press('find', 'issued-credit-card');
+        await until(() => expect(x.server.cnRequests('lookup').length).toBeGreaterThan(lookups));
+      });
+
+      it('A1 (RV3C-02, A3-1). while the review note "unfinished" is up, a row Release answers: released is said once (in the dialog, not again by the section after close); settleNotDone takes the alert region from the note', async () => {
+        for (const answer of ['released', 'not done'] as const) {
+          const x = await setup();
+          await open(1);
+          await startForm('5.00', 'goodwill');
+          x.server.addCreditReg({ invoiceId: x.made[0].id }); // registered meanwhile (another device): the review closes unfinished
+          await click('issued-payments-credit-continue');
+          await waitFor(() => expect(inlineAlert(), answer).toBe(CREDIT_TEXT.unfinished));
+          await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-row-release')).not.toBeNull());
+          if (answer === 'not done') x.server.cnScripts.settle.push(chain(409, 'write_conflict'));
+          await click('issued-payments-credit-row-release');
+          if (answer === 'released') {
+            await waitFor(() => expect(inlineSay(), answer).toBe(CREDIT_TEXT.released));
+            await click('issued-view-close');
+            await settle();
+            expect(tid('issued-credit-status').textContent, answer).toBe('');
+          } else {
+            await waitFor(() => expect(inlineAlert(), answer).toBe(CREDIT_TEXT.settleNotDone));
+          }
+          cleanup();
+        }
+      });
+
+      it('A2 (RV3C-03, A3-2). a write made while the dialog\'s invoice still loads (the issuer not yet mounted) is said by that dialog\'s pair once it mounts', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.unresolved(true)));
+        x.server.hold.cnIssue = 1;
+        await press('check');
+        await until(() => expect(x.server.held.length).toBe(1));
+        await click('issued-view-close');
+        await click('issued-list-retry');
+        await listReady();
+        x.server.hold.detail = 1;
+        await user().click(openButton(1));
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnIssue', 'detail']));
+        take(x.server, 'cnIssue').release(); // the Check again's 201 while the detail still loads
+        await settle();
+        take(x.server, 'detail').release();
+        await viewReady(1);
+        await waitFor(() => expect(inlineSay()).toBe(issuedText));
+      });
+
+      it('A3 (A3-3), not reproduced. Check again going out and coming back with the same deadline does not say "You can check again until …" again', async () => {
+        const x = await ready();
+        x.server.cnScripts.issue.push('lose');
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(control('until')).not.toBeNull());
+        const until0 = control('until')!.textContent;
+        // Each region write mounts a new node: count the nodes that carry the deadline (watch() would merge equal ends).
+        const pair = tid('issued-payments-credit-say');
+        const nodes: string[] = [];
+        let node = pair.firstElementChild;
+        const o = new MutationObserver(() => { const now = pair.firstElementChild; if (now !== node) { node = now; nodes.push(now?.textContent ?? ''); } });
+        o.observe(pair, { childList: true, subtree: true });
+        x.server.hold.cnIssue = 1;
+        await press('check');
+        await until(() => expect(x.server.held.length).toBe(1));
+        expect(control('until')).toBeNull(); // in flight: Check again and its deadline are gone meanwhile
+        x.server.held.shift()!.release(chain(503, 'service_unavailable'));
+        await until(() => expect(control('check')).not.toBeNull());
+        await settle();
+        expect(control('until')!.textContent).toBe(until0);
+        o.disconnect();
+        expect(nodes.filter((t) => t === until0)).toEqual([]);
+      });
+
+      it('fix list 6 › A4 (CX3-03, CX5-05). a credit-note write made while the confirmation is open ("sending") is spoken once by the confirmation\'s own pair, and the issuer pair does not mount it after Close; signedIn lives only in the confirmation\'s pair', async () => {
+        const x = await ready();
+        expect(tid('issued-credit-confirm-status').textContent).toMatch(/^Signed in again at /);
+        expect([inlineSay(), inlineAlert()]).toEqual(['', '']); // signedIn never reaches c.live (CX5-05: confirmed by design, not a defect)
+        // fix list 8 › CX7-04 (H5's rule): one announcement per NODE the region holds — a new node, or new words in its node;
+        // this pair renders its words as a text node, so that node (not textContent per record) is what is tracked.
+        const texts = (el: HTMLElement) => {
+          const seen: string[] = [];
+          let node: Node | null = el.firstChild;
+          let words = node?.textContent ?? '';
+          const o = new MutationObserver(() => {
+            const now = el.firstChild;
+            const t = now?.textContent ?? '';
+            if (now !== node || t !== words) { node = now; words = t; if (t !== '') seen.push(t); }
+          });
+          o.observe(el, { childList: true, subtree: true, characterData: true });
+          return () => { o.disconnect(); return seen; };
+        };
+        const confirmPair = texts(tid('issued-credit-confirm-status'));
+        const issuer = tid('issued-payments-credit-say');
+        const mounted: string[] = [];
+        let node = issuer.firstElementChild;
+        const o = new MutationObserver(() => { const now = issuer.firstElementChild; if (now !== node) { node = now; if ((now?.textContent ?? '') !== '') mounted.push(now!.textContent!); } });
+        o.observe(issuer, { childList: true, subtree: true });
+        x.server.hold.cnRegister = 1;
+        await click('issued-credit-send');
+        await until(() => expect(x.server.held.length).toBe(1));
+        await click('issued-credit-keep'); // "Close" while sending: observed through it
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+        const spoken = confirmPair();
+        x.server.held.shift()!.release();
+        await waitFor(() => expect(cardText()).toBe(issuedText));
+        await settle();
+        o.disconnect();
+        expect(spoken.filter((t) => t === CREDIT_TEXT.sending)).toEqual([CREDIT_TEXT.sending]);
+        expect(mounted).not.toContain(CREDIT_TEXT.sending);
+      });
+
+      it('D (a) (CX4-01). a 403 whose one fresh check waits on the session read cnSession started, confirmed with the same token: no proof or issue is sent, and the card has no buttons', async () => {
+        const x = await atProofSession();
+        take(x.server, 'cnList').release(chain(403, 'forbidden')); // its fresh check shares the pending session read
+        await settle();
+        take(x.server, 'current').release(); // the same token
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.noAccessShort)); // fix list 6 › D2: the check has settled (its read answered) first
+        expect(cardButtons()).toEqual([]);
+        await settle();
+        expect([x.server.cnRequests('proof'), x.server.cnRequests('issue')]).toEqual([[], []]);
+      });
+
+      it('D (b) (CX4-01). the proof already left when a section read\'s 403 is confirmed with the same token: its answer is judged, no issue is sent, and the card has no buttons', async () => {
+        const x = await ready({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 1001); } });
+        await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-more')).not.toBeNull(), { timeout: 10_000 });
+        x.server.hold.cnProof = 1;
+        fireEvent.click(tid('issued-credit-send'));
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnProof']));
+        x.server.hold.cnList = 1;
+        fireEvent.click(tid('issued-payments-credit-more'));
+        await until(() => expect(x.server.held.map((h) => h.kind)).toEqual(['cnProof', 'cnList']));
+        take(x.server, 'cnList').release(chain(403, 'forbidden'));
+        await until(() => expect(cardText()).toBe(CREDIT_TEXT.noAccessShort));
+        take(x.server, 'cnProof').release(); // a valid 200: judged, and the chain stops before the issue
+        await settle();
+        await settle();
+        expect(x.server.cnRequests('issue')).toEqual([]);
+        expect([cardText(), cardButtons()]).toEqual([CREDIT_TEXT.noAccessShort, []]);
+      });
+    });
+  });
+  describe('QA r2 (manual QA items 12 and 16): the next Tab after a scripted focus move goes on from where focus is, never to the dialog\'s Close', () => {
+    const heading = () => document.getElementById('issued-payments-title')!;
+    /** One Tab (or Shift+Tab) keydown on the focused element, as the browser sends it; the dialog moves focus itself. */
+    const tab = (shiftKey = false) => {
+      const from = document.activeElement as HTMLElement;
+      const e = createEvent.keyDown(from, { key: 'Tab', shiftKey });
+      fireEvent(from, e);
+      expect(e.defaultPrevented, `${shiftKey ? 'Shift+Tab' : 'Tab'} handled by the dialog`).toBe(true);
+      return document.activeElement;
+    };
+
+    it('QA r2 › item 12. "Don\'t issue" and Escape close the confirmation only (the issued dialog stays): amount and reason keep their values, focus is on the Payments heading; Tab then goes to the next stop after it (the kept amount, in this fixture with no payment rights), Shift+Tab to the stop before it (the lines\' scroll region) — never the dialog\'s Close', async () => {
+      for (const how of ['keep', 'escape'] as const) {
+        await setup();
+        await open(1);
+        await toConfirm('5.00', 'goodwill');
+        if (how === 'keep') await click('issued-credit-keep');
+        else fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm'), how).toBeNull());
+        await settle();
+        expect(screen.queryByTestId('issued-view'), `${how}: only the topmost dialog closed`).not.toBeNull();
+        expect(tid('issued-payments-credit-form-amount'), how).toHaveValue('5.00');
+        expect(tid('issued-payments-credit-form-reason-goodwill'), how).toBeChecked();
+        expect(document.activeElement, how).toBe(heading());
+        expect(tab(), how).toBe(tid('issued-payments-credit-form-amount'));
+        expect(document.activeElement, how).not.toBe(tid('issued-view-close'));
+        act(() => { heading().focus(); });
+        expect(tab(true), how).toBe(tid('issued-view-lines-scroll')); // the invoice lines' scroll region (tabindex 0), just above Payments
+        expect(document.activeElement, how).not.toBe(tid('issued-view-close'));
+        cleanup();
+      }
+    });
+
+    it('QA r2 › item 12 (payment rights). with Record payment shown, "Don\'t issue" puts focus on the Payments heading; Tab then goes to Record payment (the next stop after it), Shift+Tab to the lines\' scroll region — never the dialog\'s Close', async () => {
+      await setup({ prepare: (s) => { s.recorders.add('uid-a'); } });
+      await open(1);
+      await waitFor(() => expect(screen.queryByTestId('issued-payments-record')).not.toBeNull());
+      await toConfirm('5.00', 'goodwill');
+      await click('issued-credit-keep');
+      await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).toBeNull());
+      await settle();
+      expect(document.activeElement).toBe(heading());
+      expect(tab()).toBe(tid('issued-payments-record'));
+      act(() => { heading().focus(); });
+      expect(tab(true)).toBe(tid('issued-view-lines-scroll'));
+      expect(document.activeElement).not.toBe(tid('issued-view-close'));
+    });
+
+    it('QA r2 › item 16. issued: focus is on the card\'s heading; Tab goes to "Confirm credit note", Shift+Tab to the stop before the card (the action) — never the dialog\'s Close; the wrap at the dialog\'s ends is unchanged', async () => {
+      await ready({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 1, () => ({ issuedAt: cnTime(1) })); } });
+      await click('issued-credit-send');
+      await waitFor(() => expect(cardText()).toBe(issuedText));
+      await waitFor(() => expect(tid('issued-payments-credit-card-number').textContent).toBe('CN-2'));
+      const cardHeading = tid('issued-payments-credit-card-heading');
+      await waitFor(() => expect(document.activeElement).toBe(cardHeading));
+      expect(tab()).toBe(tid('issued-payments-credit-card-confirm'));
+      expect(document.activeElement).toHaveTextContent(CREDIT_TEXT.confirm);
+      act(() => { cardHeading.focus(); });
+      expect(tab(true)).toBe(tid('issued-payments-credit-issue'));
+      // The ends still wrap: Shift+Tab on Close (the first stop) → the last stop; Tab there → Close.
+      act(() => { tid('issued-view-close').focus(); });
+      const last = tab(true);
+      expect(last).not.toBe(tid('issued-view-close'));
+      expect(tid('issued-view').contains(last)).toBe(true);
+      expect(tab()).toBe(tid('issued-view-close'));
+    });
+  });
+  describe('P2-46a, P2-46c: focus inside the credit-note confirmation', () => {
+    /** One Tab (or Shift+Tab) keydown on the focused element, as the browser sends it; at its ends the dialog moves focus itself. */
+    const tab = (shiftKey = false) => {
+      const from = document.activeElement as HTMLElement;
+      const e = createEvent.keyDown(from, { key: 'Tab', shiftKey });
+      fireEvent(from, e);
+      expect(e.defaultPrevented, `${shiftKey ? 'Shift+Tab' : 'Tab'} handled by the dialog`).toBe(true);
+      return document.activeElement;
+    };
+
+    it('P2-46a. Tab and Shift+Tab stay inside the credit-note confirmation', async () => {
+      await setup();
+      await open(1);
+      await toConfirm('5.00', 'goodwill');
+      const dialog = screen.getByRole('alertdialog', { name: CREDIT_TEXT.title });
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-keep')));
+      // Its stops: "Don't issue" first, "Issue credit note" last. The browser moves between the stops inside; the dialog wraps
+      // at both ends, so neither key ever reaches the issued dialog behind it (inert) or the page.
+      expect(tab(true)).toBe(tid('issued-credit-send'));
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(tab()).toBe(tid('issued-credit-keep'));
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      // With the sign-in group: "Don't issue", the password, "Confirm sign-in" (the last stop) — the same wrap.
+      await click('issued-credit-send');
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-reauth-password')));
+      act(() => { tid('issued-credit-keep').focus(); });
+      expect(tab(true)).toBe(tid('issued-credit-reauth-confirm'));
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(tab()).toBe(tid('issued-credit-keep'));
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(tid('issued-view').contains(document.activeElement)).toBe(false);
+    });
+
+    it('P2-46c. with a provider-only re-authentication, focus goes to the provider button', async () => {
+      const { server } = await setup({ identity: (r) => ({ ...r.props().identity!, reauthMethod: () => 'google' }) });
+      await open(1);
+      await toConfirm('5.00', 'goodwill');
+      await click('issued-credit-send');
+      await waitFor(() => expect(tid('issued-credit-confirm-alert').textContent).toBe(CREDIT_TEXT.signInNeeded));
+      expect(screen.queryByTestId('issued-credit-reauth-password')).toBeNull(); // no password field: the provider's own window
+      await waitFor(() => expect(document.activeElement).toBe(tid('issued-credit-reauth-confirm')));
+      expect(document.activeElement).toHaveTextContent('Sign in with Google again');
+      expect(server.cnRequests('register')).toEqual([]);
+    });
+  });
+});
+
+// Doc 18 (M7B credit activity), the shop slice: the "Credit activity" sub-section of the issued-invoices section, over the
+// fake's store-wide route (GET /api/v1/stores/{id}/credit-notes). AUTHORED, NOT RUN. Every (B2) case below is a CONTROLLED
+// response of this fake (a scripted same-token 403 and a directory that no longer lists the store), never live runtime
+// coverage: doc 18 §13 flags that the shipped runtime ends the session on these mutations instead.
+describe('Issued invoices — the store-wide credit activity (doc 18 §4, §8.4; shop slice AUTHORED, NOT RUN)', { timeout: 30_000 }, () => {
+  beforeEach(() => { madeServers.length = 0; });
+  afterEach(afterEachP289);
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const actUrl = (after?: string, storeId = STORE_1) => `${STORES_PATH}/${storeId}/credit-notes${after === undefined ? '' : `?after=${after}`}`;
+  const actPhase = () => screen.queryByTestId('issued-credit-activity-state')?.getAttribute('data-phase') ?? 'none';
+  const actIs = (phase: string) => waitFor(() => expect(actPhase()).toBe(phase));
+  const actText = () => tid('issued-credit-activity-state').textContent;
+  const actShown = () => screen.queryByTestId('issued-credit-activity') !== null;
+  const actNumbers = () => screen.queryAllByTestId('issued-credit-activity-number').map((x) => x.textContent);
+  const actButtons = () => (actShown() ? within(tid('issued-credit-activity')).queryAllByRole('button').map((b) => b.textContent) : []);
+  const reads = (server: Server, from = 0) => server.activityReads().slice(from).map((x) => x.url);
+  const csrfOf = (x: Sent) => x.headers.get('x-tmpos-session-csrf');
+  const select = (id: string) => fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: id } });
+  const options = () => [...(tid('issued-store') as HTMLSelectElement).options].map((o) => o.value);
+  /** Every note of the store's issued invoices, newest number first (what the route serves; the fake's own objects). */
+  const desc = (server: Server, storeId = STORE_1) => (server.issued.get(storeId) ?? []).flatMap((i) => server.creditNotes.get(i.id) ?? []).sort((a, b) => b.number - a.number);
+  /** One note as the route writes it. */
+  const wire = (server: Server, c: CreditNoteWire) => ({
+    id: c.id, number: c.number, invoiceId: c.invoiceId, invoiceNumber: [...server.issued.values()].flat().find((i) => i.id === c.invoiceId)!.number,
+    grossCents: c.grossCents, reason: c.reason, issuedAt: c.issuedAt, issuedByName: c.issuedByName, withdrawal: c.withdrawal,
+  });
+  /** The held request of `kind` answers: the fake decides it now, or `late` stands in for it. Works under fake timers. */
+  const releaseHeld = async (server: Server, kind: string, late?: Response) => {
+    await until(() => expect(server.held.some((h) => h.kind === kind)).toBe(true));
+    server.held.splice(server.held.findIndex((h) => h.kind === kind), 1)[0].release(late);
+    await flush();
+  };
+  /** The store owner with the credit-note keys at STORE_1 (or `storeId`), the activity read on; `ready` false skips the issued list's wait. */
+  async function setup(o: { uid?: string; owner?: boolean; storeId?: string; count?: number; ready?: boolean; prepare?: (server: Server, made: Issued[]) => void } = {}) {
+    const server = seeded();
+    const storeId = o.storeId ?? STORE_1;
+    const made = issueAt(server, storeId, o.count ?? 2);
+    if (o.owner !== false) server.cnOwners.add(o.uid ?? 'uid-a');
+    o.prepare?.(server, made);
+    const r = rig(server);
+    const page = render(<ServerIssuedInvoices {...r.props({ uid: o.uid ?? 'uid-a', creditActivity: true })} />);
+    await showAndChoose(storeId);
+    if (o.ready !== false) await listReady();
+    return { server, made, r, page };
+  }
+  /** Opens invoice `n` with its credit-note list (names) and the lookup read to the end. */
+  async function openWithCredit(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'exhausted'));
+    await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-issued-by').length).toBeGreaterThan(0));
+  }
+
+  it('CA-01, CA-07, CA-22. the owner reads the store\'s notes newest number first, 50 a page (the cursor the 50th id); Show more walks 125 notes over three pages strictly descending with no repeat and no gap, keeps focus on itself and announces "{n} more loaded."; the last page takes it away and focus goes to the heading', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 70); s.addCreditNotes(m[1].id, 55); } });
+    await actIs('ready');
+    const all = desc(server);
+    expect(all).toHaveLength(125);
+    expect(reads(server)).toEqual([actUrl()]);
+    expect(actNumbers()).toEqual(all.slice(0, 50).map((c) => `CN-${c.number}`));
+    expect(actButtons()).toEqual([ACTIVITY_TEXT.refresh, CREDIT_TEXT.showMore]);
+    act(() => { tid('issued-credit-activity-more').focus(); }); // from the keyboard: focus, then Enter
+    await user().keyboard('{Enter}');
+    await waitFor(() => expect(actNumbers()).toHaveLength(100));
+    expect(document.activeElement).toBe(tid('issued-credit-activity-more'));
+    expect(tid('issued-credit-activity-state')).toHaveAttribute('role', 'status');
+    expect(actText()).toBe(CREDIT_TEXT.moreLoaded(50));
+    await user().keyboard('{Enter}');
+    await waitFor(() => expect(actNumbers()).toHaveLength(125));
+    expect(actText()).toBe(CREDIT_TEXT.moreLoaded(25));
+    expect(screen.queryByTestId('issued-credit-activity-more')).toBeNull();
+    expect(document.activeElement).toBe(tid('issued-credit-activity-title'));
+    expect(actNumbers()).toEqual(all.map((c) => `CN-${c.number}`)); // 125 .. 1: strictly descending, none twice, none missing
+    expect(new Set(screen.queryAllByTestId('issued-credit-activity-item').map((li) => li.getAttribute('data-id'))).size).toBe(125);
+    expect(reads(server)).toEqual([actUrl(), actUrl(all[49].id), actUrl(all[99].id)]);
+  });
+
+  it('CA-01, CA-21, CA-31. the shell (heading one level under the section\'s, the intro) renders with Loading while page one is out; an empty store says "No credit notes have been issued at this store yet." only after the read to nextCursor null; it sits after the issued list and before the issuing settings', async () => {
+    const { server } = await setup({ prepare: (s) => { s.hold.activity = 1; } });
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    expect(actPhase()).toBe('loading');
+    expect(actText()).toBe(ACTIVITY_TEXT.loading);
+    expect(tid('issued-credit-activity-title')).toHaveTextContent(ACTIVITY_TEXT.title);
+    expect(tid('issued-credit-activity-title').tagName).toBe('H4');
+    expect(tid('issued-title').tagName).toBe('H3');
+    expect(tid('issued-credit-activity-intro')).toHaveTextContent(ACTIVITY_TEXT.intro);
+    expect(actButtons()).toEqual([]);
+    await releaseHeld(server, 'activity');
+    await actIs('ready');
+    expect(actText()).toBe(ACTIVITY_TEXT.empty);
+    expect(screen.queryByTestId('issued-credit-activity-list')).toBeNull();
+    expect(actButtons()).toEqual([ACTIVITY_TEXT.refresh]);
+    expect(tid('issued-list-area').compareDocumentPosition(tid('issued-credit-activity')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tid('issued-credit-activity').compareDocumentPosition(tid('issued-store-area')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('CA-11, CA-12, CA-22. each row in §4.2\'s order — CN-<n>, Invoice <n>, Active or Withdrawn as text, the gross, the reason label — then "Issued {time}" in a time element and "Issued by" (null → "Name not set"); a withdrawn note adds "Withdrawn {time}" with its reason label and "Withdrawn by"; names inside bdi, wrapping anywhere', async () => {
+    const long = 'N'.repeat(1000);
+    const { server } = await setup({
+      prepare: (s, m) => {
+        s.addCreditNotes(m[0].id, 1, () => ({ grossCents: 1500, reason: 'pricing_error', issuedByName: long, issuedAt: cnTime(10) }));
+        s.addCreditNotes(m[1].id, 1, () => ({ grossCents: 2000, reason: 'billing_error', issuedByName: null, issuedAt: cnTime(11), withdrawal: { withdrawnAt: cnTime(20), reason: 'wrong_amount', withdrawnByName: null } }));
+      },
+    });
+    await actIs('ready');
+    const [newest, older] = desc(server);
+    const [withdrawn, active] = screen.getAllByTestId('issued-credit-activity-item');
+    expect(withdrawn.querySelector('p')?.textContent).toBe(`CN-${newest.number} · Invoice 2 · Withdrawn · $20.00 · Billing error`);
+    expect(active.querySelector('p')?.textContent).toBe(`CN-${older.number} · Invoice 1 · Active · $15.00 · Pricing error`);
+    const issued = within(withdrawn).getByTestId('issued-credit-activity-issued-at');
+    expect(issued.tagName).toBe('TIME');
+    expect(issued).toHaveAttribute('datetime', cnTime(11));
+    expect(issued.parentElement).toHaveTextContent(`Issued ${utcText(cnTime(11))}`);
+    expect(within(withdrawn).getByTestId('issued-credit-activity-issued-by')).toHaveTextContent('Issued by Name not set');
+    const out = within(withdrawn).getByTestId('issued-credit-activity-withdrawn-at');
+    expect(out.tagName).toBe('TIME');
+    expect(out).toHaveAttribute('datetime', cnTime(20));
+    expect(out.parentElement).toHaveTextContent(`Withdrawn ${utcText(cnTime(20))} · Wrong amount`);
+    expect(within(withdrawn).getByTestId('issued-credit-activity-withdrawn-by')).toHaveTextContent('Withdrawn by Name not set');
+    const by = within(active).getByTestId('issued-credit-activity-issued-by');
+    expect(by.className).toContain('[overflow-wrap:anywhere]');
+    expect(by.querySelector('bdi')?.textContent).toBe(long);
+    expect(within(active).queryByTestId('issued-credit-activity-withdrawn-at')).toBeNull();
+    expect(within(tid('issued-credit-activity-list')).queryAllByRole('button')).toEqual([]); // no action on any row
+  });
+
+  it('CA-12, CA-20. the decoder fails closed to the error state with Try again and no rows — a name over 1,000 characters or with a control character, another store\'s id, a cursor not behind a full page, numbers not descending, a tax key, an empty page with a cursor — and Try again restarts at page one', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    const [a, b] = desc(server);
+    const page = (notes: unknown[], nextCursor: string | null = null, storeId = STORE_1) => json(200, { store: { id: storeId }, creditNotes: notes, nextCursor });
+    const bad: Response[] = [
+      page([{ ...wire(server, a), issuedByName: 'N'.repeat(1001) }]), page([{ ...wire(server, a), issuedByName: 'A\u0007B' }]), page([wire(server, a)], null, STORE_2),
+      page([wire(server, a), wire(server, b)], b.id), page([wire(server, b), wire(server, a)]), page([{ ...wire(server, a), taxCents: 0 }]), page([], a.id),
+    ];
+    for (const answer of bad) {
+      server.activityScripts.push(answer);
+      await user().click(tid(actPhase() === 'ready' ? 'issued-credit-activity-refresh' : 'issued-credit-activity-retry'));
+      await actIs('failed');
+      expect(actText()).toBe(ACTIVITY_TEXT.failed);
+      expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+      expect(actButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+    }
+    const from = server.activityReads().length;
+    await user().click(tid('issued-credit-activity-retry'));
+    await actIs('ready');
+    expect(reads(server, from)).toEqual([actUrl()]);
+    expect(actNumbers()).toHaveLength(2);
+  });
+
+  it('CA-20, CA-38. across pages: a Show more page repeating a loaded id, or not below the last loaded number, is the error state (no partial rows shown as complete); a page answering a cursor 400 too', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 55); } });
+    await actIs('ready');
+    const all = desc(server);
+    const page = (notes: CreditNoteWire[]) => json(200, { store: { id: STORE_1 }, creditNotes: notes.map((c) => wire(server, c)), nextCursor: null });
+    for (const answer of [page([all[49], ...all.slice(51, 55)]), page([all[10]]), json(400, { error: 'invalid_request', requestId: 'req-synthetic' })]) {
+      if (actPhase() !== 'ready') { await user().click(tid('issued-credit-activity-retry')); await actIs('ready'); }
+      server.activityScripts.push(answer);
+      await user().click(tid('issued-credit-activity-more'));
+      await actIs('failed');
+      expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+      expect(actText()).toBe(ACTIVITY_TEXT.failed);
+    }
+  });
+
+  it('CA-14, CA-29. a 429 with Retry-After: the wait text and Try again held back; nothing of this sub-section is sent before the wait passes — Try again and a store re-choice included — and the timer only gives Try again back; then it reads page one', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); s.retryAfter = '30'; } });
+    await actIs('ready');
+    fakeClock();
+    server.activityScripts.push(429);
+    fireEvent.click(tid('issued-credit-activity-more'));
+    await until(() => expect(actPhase()).toBe('rate-limited'));
+    expect(actText()).toBe(LIST_TEXT.waiting);
+    expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+    expect(tid('issued-credit-activity-retry')).toHaveAttribute('aria-disabled', 'true');
+    const sent = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-retry'));
+    select(STORE_2);
+    select(STORE_1);
+    await flush();
+    expect(actPhase()).toBe('rate-limited');
+    expect(server.activityReads()).toHaveLength(sent);
+    await advance(31_000);
+    await until(() => expect(tid('issued-credit-activity-retry')).toHaveAttribute('aria-disabled', 'false'));
+    expect(server.activityReads()).toHaveLength(sent);
+    fireEvent.click(tid('issued-credit-activity-retry'));
+    await until(() => expect(actPhase()).toBe('ready'));
+    expect(reads(server, sent)).toEqual([actUrl()]);
+  });
+
+  it('CA-15a, CA-16 (401), CA-28. a page answered 401 (the server ended the session: a role change or a store reassignment): the section\'s ended text, every activity row gone, nothing re-sent — a focus, a tab return, Reconnect itself — until a store is chosen again', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    await actIs('ready');
+    server.activityScripts.push(401);
+    await user().click(tid('issued-credit-activity-more'));
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+    expect(tid('issued-stores-state')).toHaveTextContent(ISSUED_TEXT.ended);
+    expect(actShown()).toBe(false);
+    expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+    const sent = server.activityReads().length;
+    await focusEvents();
+    expect(server.activityReads()).toHaveLength(sent);
+    await click('issued-retry'); // Reconnect
+    await storesReady();
+    await settle();
+    expect(server.activityReads()).toHaveLength(sent);
+    select(STORE_1);
+    await actIs('ready');
+    expect(reads(server, sent)).toEqual([actUrl()]);
+  });
+
+  it('CA-16 (403 after the check). a store reassignment that races an admitted request: its 403 runs the one fresh session check, which finds the session ended → (B0), the session-end path, with no directory read', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    server.hold.activity = 1;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    server.expire();
+    const at = server.sent.length;
+    await releaseHeld(server, 'activity', chain(403, 'forbidden'));
+    await waitFor(() => expect(tid('issued-stores-state')).toHaveTextContent(ISSUED_TEXT.ended));
+    await settle();
+    expect(sentFrom(server, at)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+    expect(actShown()).toBe(false);
+  });
+
+  it('CA-15b (C part only), CA-26, CA-32 (A). a same-token 403 with the store still listed under the same tenant (a demotion the session read cannot show): ONE fresh check, then the directory read directly under the same token; only this view goes — rows dropped, the sub-section hidden with no text; the CN-P2 names, lookup rows and holds are untouched, the picker unchanged; nothing more is asked for this store in this generation, until the store choice changes', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const { server, r } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); s.addCreditReg({ invoiceId: m[0].id, number: 1, state: 'released', settledAt: cnTime(5) }); } });
+    await actIs('ready');
+    await openWithCredit(1);
+    expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-rows', '1');
+    const before = options();
+    const cn = server.cnRequests().length;
+    const logins = server.logins().length;
+    server.cnOwners.delete('uid-a'); // the route's owner rule now refuses this session (PERM:563-565)
+    const at = server.sent.length;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    await settle();
+    expect(sentFrom(server, at)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${actUrl()}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${STORES_PATH}`]);
+    expect(csrfOf(server.sent[at + 3])).toBe(csrfOf(server.sent[at + 1]));
+    expect(tid('issued-section').textContent).not.toContain(ACTIVITY_TEXT.title);
+    expect(options()).toEqual(before);
+    expect((tid('issued-store') as HTMLSelectElement).value).toBe(STORE_1);
+    expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'exhausted');
+    expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-rows', '1');
+    expect(screen.queryAllByTestId('issued-payments-credit-issued-by')).toHaveLength(2);
+    expect(server.cnRequests()).toHaveLength(cn); // no rule-4 reload
+    expect(r.cnHolds.get('uid-a')).toBeUndefined();
+    expect(server.logins()).toHaveLength(logins);
+    const sent = server.activityReads().length;
+    await focusEvents();
+    await click('issued-view-close');
+    await settle();
+    expect(server.activityReads()).toHaveLength(sent);
+    server.cnOwners.add('uid-a');
+    select(STORE_2);
+    await actIs('ready');
+    select(STORE_1);
+    await actIs('ready');
+    expect(reads(server, sent)).toEqual([actUrl(undefined, STORE_2), actUrl()]);
+  });
+
+  it('CA-32 (B2), a CONTROLLED response — not live runtime coverage (doc 18 §13 flag): a fake same-token 403 with a fake directory that no longer lists the store, or lists it under another tenant: D17 rule 4\'s second bullet only — the lookup rows go, the list reloads in the view the server gives now (no names) — plus this view; no token adoption, the store stays chosen, the picker unchanged', async () => {
+    for (const lost of ['gone', 'other-tenant'] as const) {
+      const { server, r } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); s.addCreditReg({ invoiceId: m[0].id, number: 1, state: 'released', settledAt: cnTime(5) }); } });
+      await actIs('ready');
+      await openWithCredit(1);
+      const before = options();
+      const logins = server.logins().length;
+      const lists = server.cnRequests('list').length;
+      server.activityScripts.push(403);
+      server.cnNamesHidden.add('uid-a');
+      server.stores['uid-a'] = lost === 'gone' ? server.stores['uid-a'].filter((x) => x.id !== STORE_1) : server.stores['uid-a'].map((x) => (x.id === STORE_1 ? store(STORE_1, 'Main Street', false, TENANT_B) : x));
+      const at = server.sent.length;
+      fireEvent.click(tid('issued-credit-activity-refresh'));
+      await waitFor(() => expect(actShown()).toBe(false));
+      await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'denied'));
+      expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-rows', '0');
+      await waitFor(() => expect(server.cnRequests('list').length).toBeGreaterThan(lists));
+      await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-issued-by')).toEqual([]));
+      expect(sentFrom(server, at).slice(0, 4), lost).toEqual([`GET ${TENANT_SESSION_PATHS.current}`, `GET ${actUrl()}`, `GET ${TENANT_SESSION_PATHS.current}`, `GET ${STORES_PATH}`]);
+      expect(server.logins(), lost).toHaveLength(logins);
+      expect((tid('issued-store') as HTMLSelectElement).value).toBe(STORE_1);
+      expect(options()).toEqual(before);
+      expect(r.cnHolds.get('uid-a')).toBeUndefined();
+      cleanup();
+    }
+  });
+
+  it('CA-32 (B2 after a renewal), a CONTROLLED response — not live runtime coverage: a sign-in renewal keeps the picker and does not re-read the directory, so a store listed before it is still "listed before"; a fake same-token 403 with a fake directory that no longer lists it is then (B2), not (A): the lookup rows go and the list reloads without names, plus this view; no token adoption, the store still chosen', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.staleLogins = true; s.addCreditNotes(m[0].id, 2); s.addCreditReg({ invoiceId: m[0].id, number: 1, state: 'released', settledAt: cnTime(5) }); } });
+    await actIs('ready');
+    await click('issued-settings-open');
+    await panelReady();
+    await renewBySignIn();
+    await actIs('ready');
+    await click('issued-list-retry'); // the renewal cleared the list read under the old token (LIST_TEXT.renewed)
+    await listReady();
+    await openWithCredit(1);
+    const logins = server.logins().length;
+    const lists = server.cnRequests('list').length;
+    server.activityScripts.push(403);
+    server.cnNamesHidden.add('uid-a');
+    server.stores['uid-a'] = server.stores['uid-a'].filter((x) => x.id !== STORE_1);
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'denied'));
+    expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-rows', '0');
+    await waitFor(() => expect(server.cnRequests('list').length).toBeGreaterThan(lists));
+    await waitFor(() => expect(screen.queryAllByTestId('issued-payments-credit-issued-by')).toEqual([]));
+    expect(server.logins()).toHaveLength(logins);
+    expect((tid('issued-store') as HTMLSelectElement).value).toBe(STORE_1);
+  });
+
+  // CA-32 (A, never listed) is not constructed here: the shop sends this read only for a store in the picker, and the picker
+  // is always a directory answer recorded as "listed" under the generation and token that hold it (begin, Reconnect and the
+  // first token re-read it; renew and renewKeepingView carry it over). A never-listed store needs a shop defect the rig cannot make.
+
+  it('CA-32 (sequence), CA-30. the directory read is sent only after the same-token check, under this sub-section\'s own request number: a store switch while it is out drops its answer — no rule-4 clearing, the new store\'s view stands, the picker unchanged', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    const before = options();
+    server.activityScripts.push(403);
+    server.hold.stores = 1;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'stores')).toBe(true));
+    const dir = server.sent.length - 1;
+    expect(server.sent[dir - 1].url).toBe(TENANT_SESSION_PATHS.current);
+    expect(server.sent[dir - 2].url).toBe(actUrl());
+    select(STORE_2);
+    await actIs('ready');
+    server.stores['uid-a'] = server.stores['uid-a'].filter((x) => x.id !== STORE_1); // what would read as (B2)
+    await releaseHeld(server, 'stores');
+    await settle();
+    expect(actPhase()).toBe('ready');
+    expect(server.cnRequests()).toEqual([]);
+    expect(options()).toEqual(before);
+  });
+
+  it('CA-25, CA-32 (B1). a 403 whose fresh check finds another token (another tab\'s session): the answer is dropped silently — nothing hidden or said for it — the generation begins again (the chosen store cleared, the stores read again) and the view reads page one under the new token once a store is chosen', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    const old = csrfOf(server.activityReads()[0]);
+    server.hold.activity = 1;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    server.otherTab('uid-a');
+    await releaseHeld(server, 'activity', chain(403, 'forbidden'));
+    await waitFor(() => expect((tid('issued-store') as HTMLSelectElement).value).toBe(''));
+    await storesReady();
+    expect(actShown()).toBe(false);
+    expect(tid('issued-connection-changed')).toHaveTextContent(ISSUED_TEXT.connection);
+    const sent = server.activityReads().length;
+    select(STORE_1);
+    await actIs('ready');
+    const fresh = server.activityReads().slice(sent);
+    expect(fresh.map((x) => x.url)).toEqual([actUrl()]);
+    expect(csrfOf(fresh[0])).not.toBe(old);
+    expect(actNumbers()).toHaveLength(2);
+  });
+
+  it('CA-39. the directory read after a same-token 403 fails — 403, 429, an outage, an unreadable answer: (U) this view hidden, no rule-4 cascade, the picker unchanged; a 401 there is (B0), the session-end path', async () => {
+    const answers: Array<[string, Response]> = [
+      ['403', chain(403, 'forbidden')], ['429', chain(429, 'rate_limited', { 'retry-after': '1' })], ['503', chain(503, 'service_unavailable')],
+      ['unreadable', new Response('<html>', { status: 200, headers: { 'content-type': 'text/html' } })], ['401', chain(401, 'unauthenticated')],
+    ];
+    for (const [name, late] of answers) {
+      const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+      await actIs('ready');
+      const before = options();
+      server.activityScripts.push(403);
+      server.hold.stores = 1;
+      fireEvent.click(tid('issued-credit-activity-refresh'));
+      await releaseHeld(server, 'stores', late);
+      if (name === '401') {
+        await waitFor(() => expect(tid('issued-stores-state')).toHaveAttribute('data-phase', 'signed-out'));
+        expect(tid('issued-stores-state')).toHaveTextContent(ISSUED_TEXT.ended);
+      } else {
+        await waitFor(() => expect(actShown(), name).toBe(false));
+        await settle();
+        expect(options(), name).toEqual(before);
+        expect((tid('issued-store') as HTMLSelectElement).value, name).toBe(STORE_1);
+        expect(tid('issued-stores-state'), name).toHaveAttribute('data-phase', 'ready');
+      }
+      expect(server.cnRequests(), name).toEqual([]);
+      cleanup();
+    }
+  });
+
+  it('CA-41. the fresh session check after a 403 fails — a 429 or an outage: (U) this view hidden, no cascade and no directory read; after the 429 nothing of this sub-section is sent before Retry-After passes', async () => {
+    for (const status of [429, 503]) {
+      const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); s.retryAfter = '30'; } });
+      await actIs('ready');
+      server.hold.activity = 1;
+      fireEvent.click(tid('issued-credit-activity-refresh'));
+      await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+      server.currentStatus.push(status); // what the one check answers
+      const at = server.sent.length;
+      await releaseHeld(server, 'activity', chain(403, 'forbidden'));
+      await waitFor(() => expect(actShown()).toBe(false));
+      await settle();
+      expect(sentFrom(server, at), String(status)).toEqual([`GET ${TENANT_SESSION_PATHS.current}`]);
+      if (status === 429) {
+        const sent = server.activityReads().length;
+        select(STORE_2);
+        select(STORE_1);
+        await settle();
+        expect(actPhase()).toBe('rate-limited');
+        expect(server.activityReads()).toHaveLength(sent);
+      }
+      cleanup();
+    }
+  });
+
+  it('CA-42. a store the directory marks readOnly gets no request of this sub-section and no sub-section; after an (A) denial nothing more is asked for that store until the store choice changes', async () => {
+    const { server } = await setup({ storeId: STORE_RO, prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await settle();
+    expect(server.activityReads()).toEqual([]);
+    expect(actShown()).toBe(false);
+    select(STORE_1);
+    await actIs('ready');
+    expect(reads(server)).toEqual([actUrl()]);
+    server.activityScripts.push(403);
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    await settle();
+    const sent = server.activityReads().length;
+    await focusEvents();
+    expect(server.activityReads()).toHaveLength(sent);
+    select(STORE_RO);
+    await settle();
+    expect(server.activityReads()).toHaveLength(sent);
+    select(STORE_1);
+    await actIs('ready');
+    expect(reads(server, sent)).toEqual([actUrl()]);
+  });
+
+  it('CA-43. a 404 not_found (the route absent): the error state, never Empty, no cascade and no automatic retry; Try again reads page one again', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); s.activityScripts.push(404); } });
+    await actIs('failed');
+    expect(actText()).toBe(ACTIVITY_TEXT.failed);
+    expect(actButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+    await settle();
+    const after = server.sent.slice(server.sent.indexOf(server.activityReads()[0]) + 1);
+    expect(after.filter((x) => x.url === STORES_PATH || /credit-notes/.test(x.url))).toEqual([]);
+    expect(server.activityReads()).toHaveLength(1);
+    await user().click(tid('issued-credit-activity-retry'));
+    await actIs('ready');
+    expect(reads(server)).toEqual([actUrl(), actUrl()]);
+    expect(actNumbers()).toHaveLength(2);
+  });
+
+  it('CA-44. this tab\'s own issue (201) at the store re-reads page one of the loaded view once, and the new note shows first; its own Confirm (200) re-reads it once more', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[1].id, 1, () => ({ issuedAt: cnTime(1) })); } });
+    await actIs('ready');
+    await user().click(openButton(1));
+    await viewReady(1);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-issue')).not.toBeNull());
+    await user().click(tid('issued-payments-credit-issue'));
+    type('issued-payments-credit-form-amount', '5.00');
+    fireEvent.click(tid('issued-payments-credit-form-reason-goodwill'));
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).not.toBeNull());
+    await click('issued-credit-send');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-password')).not.toBeNull());
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    await waitFor(() => expect(tid('issued-credit-confirm-status').textContent).toMatch(/^Signed in again at /));
+    await actIs('ready'); // the sign-in's renewal read page one once under the new token
+    const before = server.activityReads().length;
+    await click('issued-credit-send');
+    await waitFor(() => expect(tid('issued-payments-credit-card-text').textContent).toBe(CREDIT_TEXT.issued('$5.00', 'Goodwill')));
+    await waitFor(() => expect(server.activityReads()).toHaveLength(before + 1));
+    await actIs('ready');
+    expect(reads(server, before)).toEqual([actUrl()]);
+    expect(desc(server)).toHaveLength(2);
+    expect(actNumbers()[0]).toBe(`CN-${desc(server)[0].number}`);
+    await click('issued-payments-credit-card-confirm');
+    await waitFor(() => expect(tid('issued-payments-credit-card-text').textContent).toBe(CREDIT_TEXT.confirmed));
+    await waitFor(() => expect(server.activityReads()).toHaveLength(before + 2));
+    await settle();
+    expect(reads(server, before)).toEqual([actUrl(), actUrl()]);
+  });
+
+  /** Invoice `n` open, the form filled ($5.00 Goodwill), reviewed, and the confirmation's sign-in done (renewKeepingView). */
+  async function signedInToIssue(n: number) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-issue')).not.toBeNull());
+    await user().click(tid('issued-payments-credit-issue'));
+    type('issued-payments-credit-form-amount', '5.00');
+    fireEvent.click(tid('issued-payments-credit-form-reason-goodwill'));
+    await click('issued-payments-credit-continue');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-confirm')).not.toBeNull());
+    await click('issued-credit-send');
+    await waitFor(() => expect(screen.queryByTestId('issued-credit-reauth-password')).not.toBeNull());
+    type('issued-credit-reauth-password', 'correct horse');
+    await click('issued-credit-reauth-confirm');
+    await waitFor(() => expect(tid('issued-credit-confirm-status').textContent).toMatch(/^Signed in again at /));
+  }
+
+  it('CA-29, CA-44 (an own write during a wait). this tab\'s own 201 lands while a 429 wait is on and a Show more is out: the re-read sends nothing and cuts the Show more off (dropActivity first), so its late page lands nowhere; the wait text stands', async () => {
+    const { server } = await setup({ count: 25, prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); s.retryAfter = '30'; } });
+    await actIs('ready');
+    await signedInToIssue(25); // invoice 25: on the issued list's first page
+    await actIs('ready');
+    server.hold.cnIssue = 1;
+    await click('issued-credit-send');
+    await until(() => expect(server.held.some((h) => h.kind === 'cnIssue')).toBe(true));
+    server.hold.activity = 1;
+    fireEvent.click(tid('issued-credit-activity-more'));
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    server.listStatus.push(429);
+    fireEvent.click(tid('issued-list-retry')); // the issued list's own read starts the section's wait
+    await waitFor(() => expect(listPhase()).toBe('rate-limited'));
+    const sent = server.activityReads().length;
+    await releaseHeld(server, 'cnIssue');
+    await waitFor(() => expect(tid('issued-payments-credit-card-text').textContent).toBe(CREDIT_TEXT.issued('$5.00', 'Goodwill')));
+    await actIs('rate-limited');
+    expect(server.activityReads()).toHaveLength(sent);
+    await releaseHeld(server, 'activity');
+    await settle();
+    expect(actPhase()).toBe('rate-limited');
+    expect(actNumbers()).toEqual([]);
+  });
+
+  it('CA-32 (B2) with D17 rule 4, a CONTROLLED response — not live runtime coverage: a credit-note press (Continue issuing) while this view\'s 403 is being classified waits for that check like any same-token 403 check of the section, and the (B2) verdict then stops its send — no proof, no issue', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[1].id, 1); } });
+    await actIs('ready');
+    await signedInToIssue(1);
+    server.cnScripts.proof.push(503);
+    await click('issued-credit-send');
+    await waitFor(() => expect(tid('issued-payments-credit-card-text').textContent).toBe(CREDIT_TEXT.registeredOnly(true)));
+    await settle();
+    const proofs = server.cnRequests('proof').length;
+    const issues = server.cnRequests('issue').length;
+    server.activityScripts.push(403);
+    server.hold.stores = 1; // the classification's directory read
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'stores')).toBe(true));
+    fireEvent.click(tid('issued-payments-credit-card-continue'));
+    await settle(); // the press's own reads answered; its session step now waits for the pending check
+    expect(server.cnRequests('proof')).toHaveLength(proofs);
+    server.stores['uid-a'] = server.stores['uid-a'].filter((x) => x.id !== STORE_1); // what the held directory read now answers
+    await releaseHeld(server, 'stores');
+    await waitFor(() => expect(actShown()).toBe(false));
+    await settle();
+    expect(server.cnRequests('proof')).toHaveLength(proofs);
+    expect(server.cnRequests('issue')).toHaveLength(issues);
+  });
+
+  it('CA-27 (a hidden view across a renewal). a view an (A) 403 hid reads page one exactly once after a sign-in renewal (the generation moved: doc 18 §4.1, §4.3), under the new token, and shows its rows again', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.staleLogins = true; s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    await click('issued-settings-open');
+    await panelReady();
+    server.cnOwners.delete('uid-a');
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    await settle();
+    server.cnOwners.add('uid-a');
+    const sent = server.activityReads().length;
+    const old = csrfOf(server.activityReads()[sent - 1]);
+    await renewBySignIn();
+    await actIs('ready');
+    await settle();
+    const after = server.activityReads().slice(sent);
+    expect(after.map((x) => x.url)).toEqual([actUrl()]);
+    expect(csrfOf(after[0])).not.toBe(old);
+    expect(actNumbers()).toHaveLength(2);
+  });
+
+  it('CA-20 (tenant binding, doc 18 §4.4). page one binds the store\'s tenant as the directory lists it, and each Show more page is sent and applied only under that same tenant: a traversal under an unchanged directory entry walks to the end', async () => {
+    // The mismatch branch (the directory listing the chosen store under another tenant within one generation) has no UI path
+    // in this rig: the picker is re-read only by `begin` or Reconnect, which clear the store and the traversal first.
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    await actIs('ready');
+    expect(server.stores['uid-a'].find((x) => x.id === STORE_1)?.tenantId).toBe(TENANT_A);
+    await user().click(tid('issued-credit-activity-more'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(51));
+    expect(actPhase()).toBe('ready');
+  });
+
+  it('CA-29, CA-38, CA-21 (a failed Show more). page one loaded, then Show more answered 429: the rows AND the cursor go (no Show more, only Try again, the wait text), nothing of this sub-section is sent during the wait, and Try again after it sends page one with no after= and replaces the chain; the same for a non-429 failure (503) without a wait', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); s.retryAfter = '30'; } });
+    await actIs('ready');
+    const cursor = () => tid('issued-credit-activity').getAttribute('data-cursor');
+    expect(cursor()).toBe('held'); // page one with a cursor behind it
+    const all = desc(server);
+    fakeClock();
+    server.activityScripts.push(429);
+    const from = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-more'));
+    await until(() => expect(actPhase()).toBe('rate-limited'));
+    expect(cursor()).toBe('none'); // the cursor went with the rows
+    expect(reads(server, from)).toEqual([actUrl(all[49].id)]);
+    expect(actText()).toBe(LIST_TEXT.waiting);
+    expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+    expect(actButtons()).toEqual([CREDIT_TEXT.tryAgain]); // only Try again: Show more has no cursor to send
+    const waited = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-retry'));
+    await flush();
+    expect(server.activityReads()).toHaveLength(waited);
+    await advance(31_000);
+    await until(() => expect(tid('issued-credit-activity-retry')).toHaveAttribute('aria-disabled', 'false'));
+    expect(server.activityReads()).toHaveLength(waited);
+    fireEvent.click(tid('issued-credit-activity-retry'));
+    await until(() => expect(actPhase()).toBe('ready'));
+    expect(reads(server, waited)).toEqual([actUrl()]); // page one, no after=: a fresh traversal
+    expect(actNumbers()).toEqual(all.slice(0, 50).map((c) => `CN-${c.number}`));
+    expect(cursor()).toBe('held');
+    vi.useRealTimers();
+    server.activityScripts.push(503);
+    const before = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-more'));
+    await actIs('failed');
+    expect(cursor()).toBe('none'); // the 503 drops the cursor with the rows too
+    expect(reads(server, before)).toEqual([actUrl(all[49].id)]);
+    expect(screen.queryAllByTestId('issued-credit-activity-item')).toEqual([]);
+    expect(actButtons()).toEqual([CREDIT_TEXT.tryAgain]); // only Try again: no cursor left to resume from
+    const failedAt = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-retry'));
+    await actIs('ready');
+    expect(reads(server, failedAt)).toEqual([actUrl()]);
+    expect(actNumbers()).toHaveLength(50);
+  });
+
+  it('CA-38, CA-45. Refresh starts a new traversal at page one and REPLACES the loaded chain (page one alone, Show more back) with focus kept on it; a Show more page with a newer status than page one is appended as served, never re-sorted or rewritten; during a wait Refresh and Show more send nothing', async () => {
+    const { server } = await setup({ count: 25, prepare: (s, m) => { s.addCreditNotes(m[0].id, 60); } });
+    await actIs('ready');
+    const all = desc(server);
+    const statuses = () => screen.queryAllByTestId('issued-credit-activity-status').map((x) => x.textContent);
+    all[1].withdrawal = { withdrawnAt: cnTime(900), reason: 'entered_in_error', withdrawnByName: 'Ada Owner' }; // on page one, after it loaded
+    all[55].withdrawal = { withdrawnAt: cnTime(901), reason: 'wrong_invoice', withdrawnByName: 'Ada Owner' }; // on page two
+    await user().click(tid('issued-credit-activity-more'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(60));
+    expect(statuses()[1]).toBe('Active');
+    expect(statuses()[55]).toBe('Withdrawn');
+    expect(actNumbers()).toEqual(all.map((c) => `CN-${c.number}`));
+    await user().click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(50));
+    await actIs('ready');
+    expect(document.activeElement).toBe(tid('issued-credit-activity-refresh'));
+    expect(statuses()[1]).toBe('Withdrawn');
+    expect(screen.queryByTestId('issued-credit-activity-more')).not.toBeNull();
+    expect(reads(server)).toEqual([actUrl(), actUrl(all[49].id), actUrl()]);
+    server.retryAfter = '30';
+    server.listStatus.push(429);
+    await user().click(tid('issued-load-more')); // another read of the section starts the wait
+    await waitFor(() => expect(tid('issued-credit-activity-refresh')).toHaveAttribute('aria-disabled', 'true'));
+    const n = server.activityReads().length;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    fireEvent.click(tid('issued-credit-activity-more'));
+    await settle();
+    expect(server.activityReads()).toHaveLength(n);
+    expect(actPhase()).toBe('ready');
+    expect(actNumbers()).toHaveLength(50);
+  });
+
+  it('CA-27. a context change drops every row and reads page one once: a store switch (and back); a sign-in renewal, under the new token; a later, separate renewal reloads once more; a second change while a reload is still out shows the error (its late page changes nothing); another user gets a section of their own', async () => {
+    const { server, r, page } = await setup({ prepare: (s, m) => { s.staleLogins = true; s.addCreditNotes(m[0].id, 51); } });
+    await actIs('ready');
+    await user().click(tid('issued-credit-activity-more'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(51));
+    select(STORE_2);
+    await actIs('ready');
+    expect(actNumbers()).toEqual([]);
+    select(STORE_1);
+    await actIs('ready');
+    expect(actNumbers()).toHaveLength(50);
+    expect(reads(server).slice(2)).toEqual([actUrl(undefined, STORE_2), actUrl()]);
+    await click('issued-settings-open');
+    await panelReady();
+    const sent = server.activityReads().length;
+    const old = csrfOf(server.activityReads()[sent - 1]);
+    await renewBySignIn();
+    await actIs('ready');
+    const after = server.activityReads().slice(sent);
+    expect(after.map((x) => x.url)).toEqual([actUrl()]);
+    expect(csrfOf(after[0])).not.toBe(old);
+    const renewAgain = async () => {
+      const logins = server.logins().length;
+      server.puts.push(chain(403, 'step_up_required'));
+      fill();
+      await click('issued-settings-save');
+      await waitFor(() => expect(tid('issued-settings-reauth-group')).toBeInTheDocument());
+      type('issued-settings-reauth-password', 'correct horse');
+      await click('issued-settings-reauth-confirm');
+      await waitFor(() => expect(server.logins().length).toBeGreaterThan(logins));
+      await settle();
+    };
+    // A second, separate renewal after that reload succeeded: one more reload, never the error (D17:571 counts within one load).
+    const separate = server.activityReads().length;
+    await renewAgain();
+    await actIs('ready');
+    expect(reads(server, separate)).toEqual([actUrl()]);
+    expect(actNumbers()).toHaveLength(50);
+    // Within ONE load: a renewal while the reload it started is still out shows the error.
+    server.hold.activity = 1;
+    await renewAgain();
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    expect(actPhase()).toBe('loading');
+    await renewAgain();
+    await actIs('failed');
+    expect(actText()).toBe(ACTIVITY_TEXT.failed);
+    const n = server.activityReads().length;
+    await releaseHeld(server, 'activity');
+    await settle();
+    expect(actPhase()).toBe('failed');
+    expect(server.activityReads()).toHaveLength(n);
+    page.rerender(<ServerIssuedInvoices {...r.props({ uid: 'uid-b', creditActivity: true })} />);
+    expect(actShown()).toBe(false);
+  });
+
+  it('CA-30. races: a page answered after a store switch and back (a later request of the same kind), or after a sign-out began, is dropped with no state change', async () => {
+    const { server, r } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2); } });
+    await actIs('ready');
+    const shown = actNumbers();
+    server.hold.activity = 1;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    select(STORE_2);
+    select(STORE_1);
+    await actIs('ready');
+    const strange = { ...wire(server, desc(server)[0]), id: uuid(0xfeed), number: 999 };
+    await releaseHeld(server, 'activity', json(200, { store: { id: STORE_1 }, creditNotes: [strange], nextCursor: null }));
+    await settle();
+    expect(actNumbers()).toEqual(shown);
+    server.hold.activity = 1;
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await until(() => expect(server.held.some((h) => h.kind === 'activity')).toBe(true));
+    await act(async () => { await r.props().session!.logout(); });
+    await releaseHeld(server, 'activity', json(200, { store: { id: STORE_1 }, creditNotes: [strange], nextCursor: null }));
+    await settle();
+    expect(actShown()).toBe(false);
+    expect(screen.queryAllByTestId('issued-credit-activity-number')).toEqual([]);
+  });
+
+  it('CA-31. the first-load shell before any 200: an outage gives the error with Try again, a 429 the wait text, a 401 the section\'s ended text', async () => {
+    for (const status of [503, 429, 401]) {
+      const { server } = await setup({ ready: false, prepare: (s) => { s.activityScripts.push(status); s.retryAfter = '30'; } });
+      if (status === 401) {
+        await waitFor(() => expect(tid('issued-stores-state')).toHaveTextContent(ISSUED_TEXT.ended));
+        expect(actShown()).toBe(false);
+      } else {
+        await actIs(status === 503 ? 'failed' : 'rate-limited');
+        expect(actText()).toBe(status === 503 ? ACTIVITY_TEXT.failed : LIST_TEXT.waiting);
+        expect(actButtons()).toEqual([CREDIT_TEXT.tryAgain]);
+        expect(tid('issued-credit-activity-title')).toHaveTextContent(ACTIVITY_TEXT.title);
+      }
+      expect(server.activityReads(), String(status)).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it('CA-21. the §4.3 strings exactly; none says paid, unpaid, refund or balance or fails the shipped FORBIDDEN scan; "withdraw" appears only inside this view\'s list (the shipped scan\'s scope widened to it alone, as DIS-16 did for three button names) and only as "Withdrawn" / "Withdrawn by"; a 403 leaves no text', async () => {
+    expect({ ...ACTIVITY_TEXT, invoice: ACTIVITY_TEXT.invoice(7) }).toEqual({
+      title: 'Credit activity', intro: 'Credit notes issued at this store, newest first. Use it to spot a credit note issued twice. It does not stop one being issued.',
+      loading: 'Loading credit activity…', empty: 'No credit notes have been issued at this store yet.', failed: "Credit activity couldn't be loaded.", refresh: 'Refresh', invoice: 'Invoice 7',
+    });
+    for (const said of [...Object.values({ ...ACTIVITY_TEXT, invoice: ACTIVITY_TEXT.invoice(7) }), LIST_TEXT.waiting, ISSUED_TEXT.ended, CREDIT_TEXT.tryAgain, CREDIT_TEXT.showMore, CREDIT_TEXT.moreLoaded(3)]) {
+      expect(said).not.toMatch(FORBIDDEN);
+      expect(said).not.toMatch(/\b(un)?paid\b|refund|balance|withdraw/i);
+    }
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 2, (i) => (i === 0 ? { withdrawal: { withdrawnAt: cnTime(800), reason: 'wrong_amount', withdrawnByName: 'Ada Owner' } } : {})); } });
+    await actIs('ready');
+    const view = tid('issued-credit-activity');
+    expect(view.textContent).not.toMatch(FORBIDDEN);
+    expect(view.textContent).not.toMatch(/\b(un)?paid\b|refund|balance/i);
+    expect(tid('issued-credit-activity-list').textContent?.match(/\w*withdraw\w*/gi)).toEqual(['Withdrawn', 'Withdrawn', 'Withdrawn']); // status, time line, "Withdrawn by"
+    const outside = tid('issued-section').cloneNode(true) as Element;
+    outside.querySelector('[data-testid="issued-credit-activity-list"]')?.remove();
+    expect(outside.textContent).not.toMatch(/withdraw/i);
+    expect(unvoided(outsidePayments(tid('issued-section')))).not.toMatch(FORBIDDEN);
+    expect(creditNamedOutside(tid('issued-section'))).toEqual([]);
+    server.cnOwners.delete('uid-a');
+    fireEvent.click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    expect(tid('issued-section').textContent).not.toMatch(/Credit activity|credit activity|No credit notes have been issued/);
+  });
+
+  it('CA-24. the sub-section never sends a write: a traversal, Show more, Refresh, Try again and a 403\'s classification are GETs only', async () => {
+    const { server } = await setup({ prepare: (s, m) => { s.addCreditNotes(m[0].id, 51); } });
+    await actIs('ready');
+    await user().click(tid('issued-credit-activity-more'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(51));
+    await user().click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actNumbers()).toHaveLength(50));
+    server.activityScripts.push(503);
+    await user().click(tid('issued-credit-activity-refresh'));
+    await actIs('failed');
+    await user().click(tid('issued-credit-activity-retry'));
+    await actIs('ready');
+    server.activityScripts.push(403);
+    await user().click(tid('issued-credit-activity-refresh'));
+    await waitFor(() => expect(actShown()).toBe(false));
+    await settle();
+    expect(server.writes()).toEqual([]);
+    expect(server.activityReads().every((x) => x.method === 'GET' && x.body === undefined)).toBe(true);
+    expect(server.activityReads()).toHaveLength(6);
   });
 });

@@ -687,6 +687,16 @@ test('S1b-25: only the operator CLI and the test suites may import the executor'
     'tests/db/invoiceCreditNoteRoutine.integration.test.mjs',
     'tests/db/invoiceCreditNoteCutover.integration.test.mjs',
     'tests/db/invoiceCreditNoteHttp.integration.test.mjs',
+    // M7B credit activity read (doc 18 §15(a) step 2): the store credit activity routine suite (migration 039) stands up the
+    // directory's migrations through 039 on the harness's disposable cluster, rolls 039 back through its down file (and finds
+    // 038's down failing while 039 is applied) and re-applies it — through the SAME trusted executor and assertDisposableTestDsn.
+    // Same category (tests/db/ suites), same reasoning; the containment property above is untouched.
+    'tests/db/storeCreditActivityRoutine.integration.test.mjs',
+    // M7B credit activity read (doc 18 §6.6, §13 H rows): the store credit activity HTTP suite stands up the directory's
+    // migrations through 039 on the harness's DURABLE disposable cluster through the SAME trusted executor and
+    // assertDisposableTestDsn, then drives the composed tenant entry. Same category (tests/db/ suites), same reasoning; the
+    // containment property above is untouched. Registered in CI after the credit-note steps (2026-11-19, execution pending).
+    'tests/db/storeCreditActivityHttp.integration.test.mjs',
     // M7B-PAYMENTS-P2 PRQ-1: the payment proof durability suite stands up every migration in the directory (037 included) on
     // the two DURABLE disposable clusters it starts itself, then crash-restarts them, through the SAME trusted executor and
     // assertDisposableTestDsn. Same category (tests/db/ suites), same reasoning; the containment property above is untouched.

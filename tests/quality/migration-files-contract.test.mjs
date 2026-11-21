@@ -437,19 +437,25 @@ const PINNED = {
   // bytes this stage writes. The file names are assembled at run time, as 036's and 037's are.
   [`038_m7b_invoice_${'credit'}_note.up.sql`]: 'f0d6988cd8ba514e4516d8be67997478a53ec04d86324b04bab806be147a77f9',
   [`038_m7b_invoice_${'credit'}_note.down.sql`]: '34654e6d2ab14fae5496e022ef47c095baef0079249d0cab67d7812eef7549e7',
+  // Phase 4.0 M7B-CREDITACTIVITY — the store-wide credit-activity read (docs/phase-4/18): in 038's schema, one STABLE SECURITY
+  // DEFINER routine granted to tmpos_app alone and a rollback-order anchor granted to nobody; no table, column, row or index
+  // (001-038 byte for byte). Its down drops both and is run only on disposable databases (D-CA-18 C). The two sha256 values pin
+  // the 039 bytes this stage writes. The file names are assembled at run time, as 038's are.
+  [`039_m7b_store_${'credit'}_activity.up.sql`]: 'd72058b61d95c1cc68f278843a5e3b8aa41ca0b46c858e1f58589c58d8cf25a1',
+  [`039_m7b_store_${'credit'}_activity.down.sql`]: '4ebd2d4d03f03321d19d5688f33c3f1423d2918ac32fff89c4ea4a99b12ce14d',
 };
 
 const port = createNodeFsPort(ABS_DIR, REL_DIR);
 const descriptors = discoverMigrations(port);
 
-test('the migrations directory holds exactly the seventy-six expected files', () => {
+test('the migrations directory holds exactly the seventy-eight expected files', () => {
   const names = descriptors.map((d) => d.relPath.slice(`${REL_DIR}/`.length)).sort();
   assert.deepEqual(names, Object.keys(PINNED).sort());
 });
 
 test('every version pairs an up with a down, in stable numeric order', () => {
   const pairs = pairMigrations(descriptors);
-  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038']);
+  assert.deepEqual(pairs.map((p) => p.version), ['001', '002', '003', '004', '005', '006', '007', '008', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036', '037', '038', '039']);
   for (const p of pairs) {
     assert.equal(p.up.direction, 'up');
     assert.equal(p.down.direction, 'down');

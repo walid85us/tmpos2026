@@ -88,7 +88,15 @@ import {
   paymentAmountOf, recordBodyOf, registerBodyOf, reverseBodyOf, settleBodyOf, type InvoicePaymentReversalReason, type ReverseResult, type InvoicePaymentMethod, type PaymentAttempt, type ProofResult, type RecordResult, type RegisterResult, type SettleResult,
   type InvoiceAmounts, type InvoiceIssuingClient, type InvoiceLine, type InvoicePayment, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type IssuingSettings, type IssuingSettingsErrors,
   type IssuedStatus, type IssuingSettingsFields, type PaymentsPage, type SaveSettingsResult, type Seller, type SettingsValues, type VoidResult,
+  INVOICE_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, creditNoteAttemptsFollow, creditNotesFollow, type CreditNoteAttempt, type InvoiceCreditNote,
+  creditNoteIssueBodyOf, creditNoteRegisterBodyOf, type CreditNoteCommandResult, type CreditNoteProofResult, type InvoiceCreditNoteReason,
+  storeCreditActivityFollows, type StoreCreditNote,
 } from './invoiceIssuingClient';
+import {
+  CREDIT_NOTE_FIRST_SEND_MS, CREDIT_NOTE_REPLAY_MS, CREDIT_NOTE_SETTLE_REPLAY_MS, CREDIT_NOTE_STAGE_WAIT_MS, creditNoteElapsed, creditNoteHolds as shopCreditNoteHolds,
+  isLiveCreditNote, isOpenCreditNote, replayWindowOpen, sendBlockOf, signInFresh,
+  type CreditNoteDecision, type CreditNoteHoldStore, type CreditNoteSignIn, type CreditNoteStage, type CreditNoteState, type CreditNoteTicket, type HeldCreditNote,
+} from './invoiceCreditNoteHold';
 import { firebaseShopIdentity, type ShopIdentity } from './ServerCustomerLevels';
 import { CHECK_CUTOFF_MS } from './ServerCustomerDirectory';
 import { pickerWaitText } from './ServerCustomerPicker';
@@ -388,6 +396,225 @@ export const VOID_TEXT = Object.freeze({
   waiting: 'Too many requests: this comes back once the wait has passed.',
 });
 
+/**
+ * Credit notes (M7B-CREDITNOTES-CN-P2, doc 17 §2.7, D-P2-4): the invoice's list and the attempts lookup's states, exactly as
+ * the wording table has them. "Withdraw" only ever for a credit note; nothing here says paid, unpaid or refund.
+ */
+export const CREDIT_TEXT = Object.freeze({
+  listTitle: 'Credit notes',
+  listEmpty: 'No credit notes on this invoice.',
+  /** Appended for the store owner only (the lookup answered them), and only after a read to the end under one view. */
+  listEmptyOwner: 'None have been issued yet.',
+  listLoading: 'Loading credit notes…',
+  listFailed: "Credit notes couldn't be loaded.",
+  tryAgain: 'Try again',
+  showMore: 'Show more',
+  moreLoaded: (n: number) => `${n} more loaded.`,
+  number: (n: number) => `CN-${n}`,
+  active: 'Active',
+  withdrawn: 'Withdrawn',
+  issuedAt: 'Issued',
+  withdrawnAt: 'Withdrawn',
+  issuedBy: 'Issued by',
+  withdrawnBy: 'Withdrawn by',
+  nameNotSet: 'Name not set',
+  numberPending: 'The credit note number will show here when its row in the list loads.',
+  lookupFailed: "We couldn't check for unfinished credit notes on this invoice, so issuing is off for now.",
+  lookupIncomplete: "We haven't checked all your unfinished credit notes yet, so issuing is off for now.",
+  continueChecking: 'Continue checking',
+  // The issue side: the action, its form, the confirmation and its sign-in, the card and the lookup rows (§2.7, exact).
+  action: 'Issue credit note',
+  legend: 'Issue a credit note',
+  amountLabel: 'Amount (USD)',
+  amountHint: (remaining: string) => `Up to ${remaining} remaining.`,
+  reasonLegend: 'Reason',
+  continue: 'Continue',
+  cancel: 'Cancel',
+  errFormat: 'Enter an amount in dollars and cents, such as 12.50, without $ or commas.',
+  errDecimals: 'Enter an amount with no more than two decimal places.',
+  errZero: 'Enter an amount of at least $0.01.',
+  errOver: (remaining: string) => `The amount can't be more than the ${remaining} remaining.`,
+  errReason: 'Choose a reason.',
+  errSummary: 'Fix the marked fields to continue.',
+  reviewVoided: "This invoice was voided, so a credit note can't be issued.",
+  title: 'Issue a credit note?',
+  consequence: (amount: string) => `This creates a separate credit note and lowers what the customer owes on this invoice by ${amount}. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer. You can't undo it here.`,
+  keep: "Don't issue",
+  close: 'Close',
+  closeWarning: "Closing this window doesn't cancel the credit note. It may still be issued.",
+  closedInFlight: 'Closed. The credit note is still being sent.',
+  signInNeeded: 'Issuing a credit note needs a recent sign-in. Sign in again to continue. No credit note has been issued yet.',
+  signInTimeout: "Sign-in didn't finish within 30 seconds. No credit note has been issued yet. Try again.",
+  signedIn: (at: string, until: string) => `Signed in again at ${at}. Check the details, then press Issue credit note below before ${until}.`,
+  signInExpired: (at: string) => `Your sign-in from ${at} is too old to issue now. Sign in again to continue. No credit note has been issued yet.`,
+  sending: 'Issuing the credit note…',
+  /** The words "press Continue issuing, or" only while Continue issuing is offered. */
+  registeredOnly: (canContinue: boolean) => `Registered. No credit note has been issued from this attempt yet. Check the amounts, then ${canContinue ? 'press Continue issuing, or ' : ''}look up this attempt to release it.`,
+  continueIssuing: 'Continue issuing',
+  continueHint: 'This uses the attempt you already registered. No new attempt is made.',
+  continueLapsed: "Your sign-in is too old to continue this attempt, and a new sign-in can't use it. Look up this attempt to release it, then start again.",
+  continueAfterSignIn: "This attempt can't continue after a new sign-in. Look up this attempt to release it, then start again.",
+  anotherNoteFound: 'Credit notes were issued on this invoice since you started this attempt. Check them before you continue.',
+  anotherNoteUnknown: "We couldn't compare every credit note on this invoice with the list from when you started, so one may have been issued since. Check the list before you continue.",
+  issueAnother: 'Issue another credit note',
+  anotherHint: "This issues one more credit note on this invoice. If one of this invoice's credit notes already covers it, look up this attempt to release it instead.",
+  regUnknown: 'No credit note was issued from this attempt. If the lookup finds it open, you can release it here.',
+  issued: (amount: string, reason: string) => `Credit note issued: ${amount}, ${reason}.`,
+  issuedHint: "Confirm it to finish. Until you confirm, you can't issue another credit note on this invoice.",
+  confirmHint: 'The credit note is already issued. Confirming only closes this attempt. It moves no money.',
+  confirm: 'Confirm credit note',
+  confirmed: 'Credit note confirmed.',
+  release: 'Release attempt',
+  released: 'Attempt released. No credit note was issued from it.',
+  releaseHint: 'Release this attempt to free the invoice. Then you can issue a new credit note, for a smaller amount if needed.',
+  overRemaining: 'No credit note was issued: the amount is more than what remains on this invoice now.',
+  voided: 'No credit note was issued: this invoice was voided.',
+  attemptReleased: 'No credit note was issued: this attempt was released.',
+  invalidStateUnknown: 'No credit note was issued from this attempt. The invoice may have been voided, or the attempt released. Look up this attempt.',
+  issueStale: 'Your sign-in was too old, so no credit note was issued. Look up this attempt to release it, then start again.',
+  alreadyIssued: 'A credit note already exists for this attempt. Look up this attempt to confirm it.',
+  cantContinue: "This attempt can't continue from here. Look up attempt to see what happened.",
+  unfinished: 'You have an unfinished credit note on this invoice. Confirm or release it before you issue another.',
+  notAccepted: 'No credit note was issued: the server did not accept this request.',
+  notAllowed: "You can't issue credit notes at this store now. No credit note was issued.",
+  /** The words "Check again, or" only while Check again is offered. */
+  unresolved: (canCheck: boolean) => `We can't tell whether this credit note was issued. Don't assume it wasn't. ${canCheck ? 'Check again, or look' : 'Look'} up this attempt.`,
+  replayGone: "We can't check this attempt from this sign-in, so we don't know whether the credit note was issued. Look up this attempt to see.",
+  notListed: "We can't tell whether this credit note was issued. The lookup didn't find this attempt. Check this invoice's credit notes later.",
+  inProgress: "This request is still being processed. We don't know the result yet. Check again in a few seconds.",
+  rateLimited: (n: number) => `Too many tries at once. Wait ${n} second${n === 1 ? '' : 's'}, then try again.`,
+  rateLimitedWait: (n: number) => `Too many tries at once. Wait ${n} second${n === 1 ? '' : 's'}, then check again.`,
+  noAccess: "Your access to credit notes at this store changed, so you can't finish this attempt. It may already have been issued. Ask an owner to check this invoice's credit notes.",
+  noAccessShort: "Your access to credit notes at this store changed, so you can't finish this attempt.",
+  endedUnknown: "You were signed out, so we can't tell whether this credit note was issued. Sign in again, then look up this attempt.",
+  /** The shipped session-end text, reused (§2.7): a first-send 401 that proves nothing ran. */
+  ended: ISSUED_TEXT.ended,
+  internalError: 'Something went wrong with this request, so nothing more was sent. Look up this attempt.',
+  settleNotDone: "We couldn't confirm that this attempt was finished for this account. Look up this attempt.",
+  /** The words "Check again, or" only while Check again is offered. */
+  settleUnknown: (canCheck: boolean) => `We can't tell whether this attempt was finished. ${canCheck ? 'Check again, or look' : 'Look'} up this attempt to see.`,
+  find: 'Look up attempt',
+  checkAgain: 'Check again',
+  checkUntil: (at: string) => `You can check again until ${at}.`,
+  checkReplayHint: "Sends the same request again. If it wasn't recorded yet, this can finish it. It never starts a new attempt.",
+  checkReadHint: 'Only checks this attempt. It changes nothing.',
+  hide: 'Hide this attempt',
+  hideWarning: "This only hides it here. It releases nothing, issues nothing and moves no money, and it doesn't tell us whether the credit note was issued. If the attempt is still open, it still blocks your next credit note on this invoice. Check this invoice's credit notes later.",
+  rowOpen: (at: string) => `Registered, not issued when checked at ${at}`,
+  rowIssued: 'Issued, not confirmed',
+  rowReleased: 'Released',
+  rowConfirmed: 'Confirmed',
+  blockedOwn: 'Confirm or release the unfinished credit note below first.',
+  /** Inside Payments only: it names payments and voids (Appendix A). */
+  blockedSibling: 'Finish your unfinished payment, reversal or void attempt first.',
+  blockedRemaining: 'Nothing remains to credit on this invoice.',
+});
+/**
+ * The store-wide "Credit activity" sub-section (doc 18 §4.3, exact): detection, never prevention. Its rows reuse
+ * CREDIT_TEXT's words; "Withdrawn" appears only on a credit note of this list (the word scan's one widened scope, §4.3).
+ */
+export const ACTIVITY_TEXT = Object.freeze({
+  title: 'Credit activity',
+  intro: 'Credit notes issued at this store, newest first. Use it to spot a credit note issued twice. It does not stop one being issued.',
+  loading: 'Loading credit activity…',
+  empty: 'No credit notes have been issued at this store yet.',
+  failed: "Credit activity couldn't be loaded.",
+  refresh: 'Refresh',
+  invoice: (n: number) => `Invoice ${n}`,
+});
+/** A wall-clock reading as the shop's other times read ("YYYY-MM-DD HH:MM:SS UTC"). */
+const clockText = (wallMs: number): string => utcText(new Date(wallMs).toISOString());
+/** The credit-note live pair: `n` counts writes, so each transition mounts fresh text (the same words twice still speak). */
+interface CreditLive { readonly status: string; readonly alert: string; readonly n: number; readonly sn: number; readonly an: number }
+const CN_QUIET: CreditLive = Object.freeze({ status: '', alert: '', n: 0, sn: 0, an: 0 });
+/** What a pair shows of `live`: each region only what was written there after `from` (its mount, or the other pair's turn). */
+const liveSince = (live: CreditLive, from: number): CreditLive => ({
+  ...live, status: live.sn > from ? live.status : '', alert: live.an > from ? live.alert : '',
+});
+/**
+ * What a card said that must outlive the section (a page left in the app and back, §3.6): the stage keys whose replay it said
+ * is unavailable, and a confirmed no-access line (rule 4) with the token it was confirmed under. Kept per hold store and user
+ * beside the module-level hold, for its attempt only; a reload (a new store) forgets both, as it forgets the hold.
+ */
+interface CreditCardMemo { readonly attemptId: string; readonly stages: readonly { readonly stage: CreditNoteStage; readonly key: string }[]; readonly bare: CreditSay | null; readonly last: CreditSay | null }
+const cnMemos = new WeakMap<CreditNoteHoldStore, Map<string, CreditCardMemo>>();
+const cnMemoOf = (store: CreditNoteHoldStore): Map<string, CreditCardMemo> => {
+  const was = cnMemos.get(store);
+  if (was !== undefined) return was;
+  const made = new Map<string, CreditCardMemo>();
+  cnMemos.set(store, made);
+  return made;
+};
+/** An attempt that is over (confirmed, released or ended): not a type guard, so the caller keeps its type. */
+const cnEnded = (h: HeldCreditNote): boolean => !isOpenCreditNote(h);
+/**
+ * What a credit-note card says for one attempt (doc 17 §3.1): its line (polite, or an alert), a second line, whether
+ * "Look up attempt" is offered, and a confirmed no-access card's "no buttons at all" (rule 4).
+ */
+export interface CreditSay {
+  readonly attemptId: string; readonly text: string; readonly alert: boolean; readonly also: string; readonly find: boolean; readonly bare: boolean;
+  /** The token a confirmed no-access (`bare`) was confirmed under: a later known session change lifts it (§3.6 rule 4). */
+  readonly bareAt: string | null;
+  /** The stage whose "Check again" this line backs (§3.1); shown only while the hold would let it leave now (§3.2). */
+  readonly check: CreditNoteStage | null;
+  /** "Continue issuing", or "Issue another credit note" once D-P2-15 stated other notes or an uncertainty (§3.2 E4). */
+  readonly cont: 'continue' | 'another' | null;
+  /** A line whose words follow what is offered at render (the §2.7 variants), else null (`text` as said). */
+  readonly kind: 'registeredOnly' | 'unresolved' | 'settleUnknown' | null;
+}
+/** What a credit-note card shows and offers now (doc 17 §3.1-§3.3; §3.6 rule 4: a confirmed no-access card offers nothing). */
+export interface CreditCardView {
+  readonly text: string; readonly alert: boolean; readonly also: string; readonly confirm: boolean; readonly find: boolean;
+  readonly check: CreditNoteStage | null; readonly until: string; readonly cont: 'continue' | 'another' | null; readonly hide: boolean;
+  /** The notes D-P2-15 listed (anotherNoteFound / anotherNoteUnknown), from the current generation's list; never on a detached card. */
+  readonly notes: readonly InvoiceCreditNote[];
+  /** §4.1: the number's follow failed or did not reach its row — "Try again" resumes it (from the failed page's cursor). */
+  readonly retry: boolean;
+}
+/**
+ * D-P2-10 A: a credit-note hold that can still Check again or Continue issuing — Void and Reverse, whose sign-in would detach
+ * it, are hidden everywhere meanwhile: a registered attempt with no issue key and a sign-in ≤ 8 minutes old (Continue issuing,
+ * and the proof's Check again before it), or an undecided register, issue or settlement inside its replay window (sent, in
+ * flight or cooling). `closed`: the stages whose replay the card has said is unavailable ('proof': no continuation either);
+ * `bare`: a confirmed no-access card, which offers nothing (rule 4).
+ */
+export function creditNoteHoldsSignIns(h: HeldCreditNote | undefined, mono: number, wall: number, closed: readonly CreditNoteStage[] = [], bare = false): boolean {
+  if (!isLiveCreditNote(h) || bare) return false;
+  if (h.state === 'registered' && h.registrationId !== null && h.issue === null && !closed.includes('proof') && signInFresh(h.signIn, mono, wall)) return true;
+  // Only a stage the hold could still Check again in its state (a registered hold never replays its register).
+  return (['register', 'issue', 'settle'] as const).some((s) => !closed.includes(s) && CHECKS_IN[s].includes(h.state) && h[s] !== null && h[s]?.completion === null && replayWindowOpen(h, s, mono, wall));
+}
+/** The states in which each stage's Check again means anything: a register only while registering, the proof only before the issue key, the issue only while issuing. */
+const CHECKS_IN: Readonly<Record<CreditNoteStage, readonly CreditNoteState[]>> = Object.freeze({
+  register: ['registering'], proof: ['registered'], issue: ['issuing'], settle: ['registering', 'registered', 'issuing', 'issued'],
+});
+/** Whether "Check again" of `stage` may leave now (§3.2 items 2-6): the hold's own gate — token, bytes, window or limit, nothing in flight, no cool-down. */
+const checkLeaves = (h: HeldCreditNote, stage: CreditNoteStage, mono: number, wall: number): boolean =>
+  CHECKS_IN[stage].includes(h.state) && (stage !== 'proof' || h.issue === null) && sendBlockOf(h, stage, stage !== 'proof', mono, wall) === null;
+/** Whether a continuation may be pressed now (E1's own facts and E6's window; its press judges E1-E7 again, in order). */
+const continueLeaves = (h: HeldCreditNote, mono: number, wall: number): boolean =>
+  isLiveCreditNote(h) && h.state === 'registered' && h.registrationId !== null && h.issue === null && signInFresh(h.signIn, mono, wall)
+  && sendBlockOf(h, 'proof', false, mono, wall) === null;
+/** Milliseconds until what a card offers can change by time alone — a cool-down, a stage's 30 s, the 8- and 9-minute and 23-hour windows — or null. */
+function cnNextChange(h: HeldCreditNote, mono: number, wall: number): number | null {
+  const at: number[] = [];
+  for (const t of Object.values(h.notBefore)) if (t !== undefined && t > mono) at.push(t - mono);
+  for (const s of h.sends) if (!s.answered && s.mono + CREDIT_NOTE_STAGE_WAIT_MS > mono) at.push(s.mono + CREDIT_NOTE_STAGE_WAIT_MS - mono);
+  const until = (from: CreditNoteSignIn | null, limit: number): void => {
+    const e = from === null ? Number.NaN : creditNoteElapsed(from, mono, wall);
+    if (Number.isFinite(e) && e <= limit) at.push(limit - e + 1);
+  };
+  until(h.signIn, CREDIT_NOTE_FIRST_SEND_MS);
+  until(h.signIn, CREDIT_NOTE_REPLAY_MS);
+  until(h.settle?.firstMono != null && h.settle.firstWall != null ? { mono: h.settle.firstMono, wall: h.settle.firstWall } : null, CREDIT_NOTE_SETTLE_REPLAY_MS);
+  return at.length === 0 ? null : Math.max(0, Math.min(...at));
+}
+/** What `say` may carry beyond the line (doc 17 §3.1): its region, a second line, the buttons it backs, a focus on Look up attempt. */
+interface CreditSayOptions {
+  readonly alert?: boolean; readonly also?: string; readonly find?: boolean; readonly bare?: boolean;
+  readonly check?: CreditNoteStage; readonly cont?: 'continue' | 'another'; readonly kind?: CreditSay['kind']; readonly focusFind?: boolean;
+}
+
 /** The shop's payment reversal (M7B-PAYMENTS-P2C). A reversal is never called a refund: it returns no money. */
 export const REVERSE_TEXT = Object.freeze({
   open: 'Reverse payment',
@@ -524,6 +751,27 @@ export interface ServerIssuedInvoicesProps {
   readonly paymentHolds?: PaymentHoldStore;
   /** The reversal hold (default the shop's one, invoiceReversalHold.ts): tests give each rig its own. */
   readonly reversalHolds?: ReversalHoldStore;
+  /** The credit-note hold (default the shop's one, invoiceCreditNoteHold.ts): tests give each rig its own. */
+  readonly creditNoteHolds?: CreditNoteHoldStore;
+  /** Handed the section's credit-note reads while mounted (null on unmount): the component tests drive the refresh with it; the shop passes none. */
+  readonly creditReads?: (reads: CreditReads | null) => void;
+  /**
+   * Whether the chosen store's "Credit activity" is read (doc 18 §4; default true, the shop passes none). The component
+   * tests' older describes pass false so their request logs and scripted session answers stay exactly as written.
+   */
+  readonly creditActivity?: boolean;
+}
+
+/** The section's credit-note reads (doc 17 §4.1 and §3.3) as the issue side calls them. */
+export interface CreditReads {
+  /** This invoice's list again from page one, followed to `target` (an issue's creditNote.id) when one is given. */
+  readonly refresh: (storeId: string, invoiceId: string, target: string | null) => void;
+  /** The attempts lookup from page one (a new lookup generation): open, Try again, Look up attempt, a re-read after an answer. */
+  readonly lookup: (storeId: string, invoiceId: string) => void;
+  /** The number of note `id` once its row has loaded under this generation and token, else null (numberPending). */
+  readonly numberOf: (storeId: string, invoiceId: string, id: string) => number | null;
+  /** Drop every credit-note row, name, cursor and lookup row now (doc 17 §3.6 rule 3). */
+  readonly drop: () => void;
 }
 
 /** One section per signed-in user (keyed by UID): nothing a previous user's reads answer ever reaches it. */
@@ -533,9 +781,12 @@ export function ServerIssuedInvoices(props: ServerIssuedInvoicesProps) {
   // layout effect, so before a late answer of the previous section's request).
   const payHolds = props.paymentHolds ?? shopPaymentHolds;
   const revHolds = props.reversalHolds ?? shopReversalHolds;
-  useLayoutEffect(() => { holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); revHolds.detachOthers(props.uid); }, [holds, payHolds, revHolds, props.uid]);
+  const cnHolds = props.creditNoteHolds ?? shopCreditNoteHolds;
+  useLayoutEffect(() => {
+    holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); revHolds.detachOthers(props.uid); cnHolds.detachOthers(props.uid);
+  }, [holds, payHolds, revHolds, cnHolds, props.uid]);
   if (props.uid === null) return null;
-  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} reversalHolds={revHolds} />;
+  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} reversalHolds={revHolds} creditNoteHolds={cnHolds} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -583,7 +834,30 @@ interface ListState {
 }
 /** The open issued-invoice dialog: which open it is, what it reads, and its store as the server's list named it (null: none). */
 interface ViewOpen { readonly id: number; readonly storeId: string; readonly invoiceId: string; readonly store: StoreEntry | null }
+/**
+ * The credit-note reads of ONE invoice under ONE section generation AND token (doc 17 §3.6 rule 2): `failSession` keeps the
+ * number and Reconnect's token comes in as a first token, so the token is part of the key. Any token change, a sign-out, a
+ * renewal or a confirmed denial drops it whole; nothing read under one session joins another's.
+ */
+interface CreditSlice {
+  readonly id: number; readonly n: number; readonly csrf: string | null; readonly storeId: string; readonly invoiceId: string;
+  readonly list: CreditNotesList | null; readonly lookup: CreditNotesLookup | null;
+}
 
+/**
+ * The chosen store's credit activity (doc 18 §4) under ONE generation AND token: its traversal's rows (newest number first,
+ * as served) and the cursor after them. `hidden`: a classified 403 (§8.4) — nothing rendered, nothing asked again for this
+ * store under this generation. `via`: which press started the traversal (its button stays, so focus stays on it);
+ * `reloaded`: started by a context change (a second one shows the error, D17:571).
+ */
+interface ActivityState {
+  readonly n: number; readonly csrf: string | null; readonly storeId: string;
+  readonly phase: 'loading' | 'ready' | 'failed' | 'rate-limited' | 'hidden';
+  readonly rows: readonly StoreCreditNote[]; readonly next: string | null; readonly complete: boolean; readonly more: boolean;
+  readonly said: string; readonly via: 'refresh' | 'retry' | null; readonly reloaded: boolean;
+  /** The chosen store's tenant as the directory listed it when page one was asked: every later page needs the same (§4.4). */
+  readonly tenantId: string | null;
+}
 const STORES_IDLE: StoresState = Object.freeze({ phase: 'idle', text: '', stores: [] });
 const listOf = (gen: number, storeId: string, phase: ListState['phase'] = 'idle', text = ''): ListState =>
   Object.freeze({ gen, storeId, phase, text, rows: [], next: null, note: '' });
@@ -601,7 +875,7 @@ function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
 
 function IssuedSection({
   uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds, paymentHolds: payHolds = shopPaymentHolds,
-  reversalHolds: revHolds = shopReversalHolds,
+  reversalHolds: revHolds = shopReversalHolds, creditNoteHolds: cnHolds = shopCreditNoteHolds, creditReads, creditActivity = true,
 }: ServerIssuedInvoicesProps & { readonly uid: string }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -677,6 +951,55 @@ function IssuedSection({
   const [payOut, setPayOut] = useState(false);
   const setPaying = (on: boolean): void => { paying.current = on; setPayOut(on || confirming.current); };
   const setConfirming = (on: boolean): void => { confirming.current = on; setPayOut(on || paying.current); };
+  // Credit notes (M7B-CREDITNOTES-CN-P2): one invoice's list and attempts lookup under one generation and token (CreditSlice),
+  // each read kind with its own sequence and abort; and the stores whose lookup 403 the one check confirmed under a
+  // generation and token (`${n}:${csrf}:${store}`): never asked again there (doc 17 §2.2).
+  const [credit, setCreditState] = useState<CreditSlice | null>(null);
+  const creditRef = useRef<CreditSlice | null>(null);
+  const creditIds = useRef(0);
+  const creditSeq = useRef({ list: 0, lookup: 0 });
+  const creditCtl = useRef<Record<'list' | 'lookup', AbortController | null>>({ list: null, lookup: null });
+  const lookupDenied = useRef(new Set<string>());
+  // The store-wide credit activity (doc 18 §4): its state, its own request sequence and abort (the directory read of a 403's
+  // classification takes a number of it too), and every store this tab's directory listed under this generation and token
+  // (id → tenantId): what §8.4 compares a same-token 403 against.
+  const [activity, setActivityState] = useState<ActivityState | null>(null);
+  const activityRef = useRef<ActivityState | null>(null);
+  const activitySeq = useRef(0);
+  const activityCtl = useRef<AbortController | null>(null);
+  const listed = useRef<{ readonly key: string; readonly stores: Map<string, string> }>({ key: '', stores: new Map() });
+  // The credit-note attempt (CN-P2 issue side): held in the credit-note hold for this uid, outside every dialog; what its card
+  // says (by attempt) and the section's live pair; the shop-observed sign-in under the token it gave (doc 17 §2.5: the only
+  // sign-in time this page knows); a press counter (a chain runs on only while its press is the latest credit-note press);
+  // a ref that holds a second press back; and a bump that makes the open dialog read its amounts again.
+  const cnHeld = useSyncExternalStore(cnHolds.subscribe, () => cnHolds.get(uid));
+  const [cnSay, setCnSay] = useState<CreditSay | null>(null);
+  const cnSayRef = useRef<CreditSay | null>(null);
+  // The stages whose replay the card has said is unavailable for this attempt ('proof': no continuation): never offered again.
+  // Kept per stage KEY: a new settlement key starts open again (§3.2 counts each key's own limit).
+  const cnMemo = cnMemoOf(cnHolds);
+  /** This attempt's memo (another attempt's is dropped). */
+  const memoFor = (a: string): CreditCardMemo => { const m = cnMemo.get(uid); return m?.attemptId === a ? m : { attemptId: a, stages: [], bare: null, last: null }; };
+  const [cnFocusFind, setCnFocusFind] = useState(0);
+  const [, setCnTick] = useState(0);
+  const [cnLive, setCnLiveState] = useState<CreditLive>(CN_QUIET);
+  const setCnLive = (x: { readonly status: string; readonly alert: string }): void => setCnLiveState((was) => ({ ...x, n: was.n + 1, sn: was.n + 1, an: was.n + 1 }));
+  /** A status-only line beside the card's (§2.6 status: checkUntil, numberPending): the alert region is left as it is. */
+  const setCnStatus = (status: string): void => setCnLiveState((was) => ({ ...was, status, n: was.n + 1, sn: was.n + 1 }));
+  const cnBusyBy = useRef(0);
+  // The list chain (by its sequence) that was still out when the lookup's denial was confirmed (rule 4): judged on arrival.
+  const creditViewLost = useRef(0);
+  // The token of the last same-token denial a check confirmed (rule 1): what a no-access line records (rule 4).
+  const cnDeniedAt = useRef<string | null>(null);
+  // Same-token denials confirmed so far, and the fresh checks still out (by the token the refused request carried).
+  const cnDenials = useRef(0);
+  const cnPendingChecks = useRef(new Set<{ readonly token: string | null; readonly check: Promise<void> }>());
+  const signedAt = useRef<(CreditNoteSignIn & { readonly csrf: string }) | null>(null);
+  const cnPress = useRef(0);
+  const cnSending = useRef(false);
+  const [cnBusy, setCnBusyState] = useState(false);
+  const [cnRereads, setCnRereads] = useState(0);
+  const cnTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const [payCool, setPayCool] = useState(false);
   const payCoolRef = useRef(false);
   const payCoolTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -718,6 +1041,7 @@ function IssuedSection({
   const closeView = (): void => {
     dropSignIn(null);
     dropLookup();
+    dropCredit(); // its credit-note rows, names and lookup go with it; an issue's refresh starts its own
     // A decided attempt's text (and a denial) goes with the dialog (R2 R4): a later open offers what its eligibility says.
     const done = payHolds.get(uid);
     const closing = viewRef.current;
@@ -726,6 +1050,9 @@ function IssuedSection({
     // The same for a settled reversal attempt of the closing invoice (P2C): an unresolved one stays (its card).
     const rev = revHolds.get(uid);
     if (rev !== undefined && (rev.state === 'reversed' || rev.state === 'refused') && closing !== null && rev.storeId === closing.storeId && rev.invoiceId === closing.invoiceId) revHolds.remove(uid, rev.key);
+    // And an ended credit-note attempt of the closing invoice (CN-P2): an open one stays (its card, its blockers).
+    const cn = cnHolds.get(uid);
+    if (cn !== undefined && cnEnded(cn) && closing !== null && cn.storeId === closing.storeId && cn.invoiceId === closing.invoiceId) cnHolds.remove(uid, cn.attemptId);
     revFindCtl.current?.abort();
     viewRef.current = null;
     setViewState(null);
@@ -807,6 +1134,8 @@ function IssuedSection({
     if (p !== undefined && p.csrf !== null && p.csrf !== csrf) detachPay(); // a payment attempt too (spec §7)
     const r = revHolds.get(uid);
     if (r !== undefined && r.csrf !== null && r.csrf !== csrf) detachRev(); // and a reversal attempt (P2C)
+    const c = cnHolds.get(uid);
+    if (c !== undefined && c.csrf !== null && c.csrf !== csrf) cnHolds.detach(uid); // and a credit-note attempt (doc 17 §3.6 rule 3)
   }
   /** Detach the reversal attempt for good (token change, sign-out, store switch): one still out is never left sending. */
   function detachRev(): void {
@@ -1230,15 +1559,1087 @@ function IssuedSection({
     return 'not';
   }
 
+  // ---- credit notes: the invoice's list and the attempts lookup (M7B-CREDITNOTES-CN-P2, doc 17 §2.2, §3.3, §3.6, §4.1) ----
+
+  const putCredit = (next: CreditSlice | null): void => { creditRef.current = next; setCreditState(next); };
+  /** Change the slice `id` names while it is still the one held (a dropped or replaced slice's continuation changes nothing). */
+  function patchCredit(id: number, next: Partial<Pick<CreditSlice, 'list' | 'lookup'>>): void {
+    const s = creditRef.current;
+    if (s !== null && s.id === id) putCredit({ ...s, ...next });
+  }
+  /** Whether a slice still belongs to the generation AND the token this section holds now (rule 2). */
+  const creditCurrent = (s: CreditSlice): boolean => s.n === gen.current.n && s.csrf === gen.current.csrf;
+  /** Every credit-note row, name, cursor and lookup row goes now, and every read out for them is stale (rule 3). */
+  function dropCredit(): void {
+    creditCtl.current.list?.abort();
+    creditCtl.current.lookup?.abort();
+    creditSeq.current = { list: creditSeq.current.list + 1, lookup: creditSeq.current.lookup + 1 };
+    if (creditRef.current !== null) putCredit(null);
+  }
+  /**
+   * The held slice when it is this invoice's under this generation and token, else a new empty one (the old one dropped) —
+   * or null while another invoice's dialog is open: a late refresh for a card never takes that dialog's list away.
+   */
+  function creditSliceFor(storeId: string, invoiceId: string): CreditSlice | null {
+    const s = creditRef.current;
+    if (s !== null && s.storeId === storeId && s.invoiceId === invoiceId && creditCurrent(s)) return s;
+    const v = viewRef.current;
+    if (v !== null && (v.storeId !== storeId || v.invoiceId !== invoiceId)) return null;
+    dropCredit();
+    const next: CreditSlice = { id: ++creditIds.current, n: gen.current.n, csrf: gen.current.csrf, storeId, invoiceId, list: null, lookup: null };
+    putCredit(next);
+    return next;
+  }
+  /** A dialog's open (or a renewal that kept it): the list and the lookup from page one, in a new slice. */
+  function startCredit(storeId: string, invoiceId: string): void {
+    dropCredit();
+    void readCreditList(storeId, invoiceId, 'first', null);
+    void readCreditLookup(storeId, invoiceId, 'start');
+  }
+
+  /**
+   * A credit-note read's 403: ONE fresh session check. 'denied' only when the token after it is the token the request
+   * carried (rule 1; never the void's `denialOf(() => false)`); 'gone' when another token (adopted here: a new generation)
+   * or a sign-out took over, or the asker went; else why it could not be checked.
+   */
+  function creditDenial(carried: string, stale: () => boolean): Promise<'denied' | 'gone' | Failure> {
+    return cnChecking(carried, creditDenialRun(carried, stale));
+  }
+  async function creditDenialRun(carried: string, stale: () => boolean): Promise<'denied' | 'gone' | Failure> {
+    const since = sessionEndsSoFar();
+    const s = await connect('fresh');
+    if (!alive.current || since !== sessionEndsSoFar()) return 'gone';
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') { failSession(failure); return 'gone'; }
+      if (failure.seconds !== undefined) startWait(failure.seconds);
+      return failure;
+    }
+    adopt(s.csrf);
+    if (s.csrf !== carried || stale()) return 'gone';
+    cnDeniedAt.current = carried; // the token this denial was confirmed under (rule 4's bare keeps it, not a later one)
+    cnDenials.current += 1;
+    return 'denied';
+  }
+  /**
+   * A 403's one fresh check, marked pending from the moment the 403 is seen (before its read): a chain about to send under
+   * that token waits for it (§3.6 rule 4 — a denial observed before the send blocks the send, CX4-01).
+   */
+  function cnChecking<T>(token: string | null, check: Promise<T>): Promise<T> {
+    const mark = { token, check: check.then(() => undefined, () => undefined) };
+    cnPendingChecks.current.add(mark);
+    void mark.check.then(() => { cnPendingChecks.current.delete(mark); });
+    return check;
+  }
+  /**
+   * A confirmed same-token denial in the section, or a list page that lost the owner's names ('view', rule 4): the lookup's
+   * rows and actions go (the action is hidden); only a confirmed 403 keeps it from being asked again under this generation
+   * and token at this store. A list holding or reading names reloads once from page one in the view the server gives now.
+   */
+  function creditDenied(source: 'list' | 'lookup' | 'other' | 'view', card = true, storeId?: string, token?: string | null): void {
+    if (token !== undefined && token !== null) cnDeniedAt.current = token; // a shipped read's check (denialOf): confirmed under it
+    const s = creditRef.current;
+    // Every card of this store keeps its last state and loses its buttons and listed notes (rule 4).
+    if (card) cnNoAccess(storeId ?? (s !== null && creditCurrent(s) ? s.storeId : storeRef.current));
+    if (s === null || !creditCurrent(s) || (storeId !== undefined && s.storeId !== storeId)) return;
+    if (source !== 'view') lookupDenied.current.add(`${s.n}:${s.csrf}:${s.storeId}`);
+    creditCtl.current.lookup?.abort();
+    creditSeq.current.lookup += 1;
+    patchCredit(s.id, { lookup: LOOKUP_DENIED });
+    const l = s.list;
+    if (source === 'list' || source === 'view' || l === null) return;
+    if (l.named === true || l.more) void readCreditList(s.storeId, s.invoiceId, 'first', null);
+    // A first read still out is not sent again: its page is judged on arrival (names → dropped and read once more; none → kept).
+    else if (l.phase === 'loading') creditViewLost.current = creditSeq.current.list;
+  }
+
+  /**
+   * The invoice's credit notes (doc 17 §4.1) on the readList skeleton (rule 1): a session check first, then pages under the
+   * slice's generation and token, this kind's own sequence and abort; an answer applies only while all of them, the store
+   * and the sign-out count stand. 'first' starts a chain at page one (following `target`, else the chain's own target);
+   * 'next' continues the shown chain from its cursor (Show more, or Try again after a transient failure). With a target
+   * the chain follows nextCursor on its own until that note loads, at most LOOKUP_PAGE_CAP pages a batch. Every page keeps
+   * the chain's view (names present or absent): a change drops every row and reloads from page one once; a page out of
+   * order, a second change or cursor 400, a refusal or a malformed page fails closed (no rows).
+   */
+  async function readCreditList(storeId: string, invoiceId: string, mode: 'first' | 'next', target: string | null, whole = false): Promise<void> {
+    const slice = mode === 'first' ? creditSliceFor(storeId, invoiceId) : creditRef.current;
+    if (slice === null || slice.storeId !== storeId || slice.invoiceId !== invoiceId || !creditCurrent(slice)) return;
+    const was = slice.list;
+    if (mode === 'next' && (was === null || was.next === null || was.more || (was.phase !== 'ready' && was.phase !== 'failed'))) return;
+    const n = ++creditSeq.current.list;
+    creditCtl.current.list?.abort();
+    const controller = new AbortController();
+    creditCtl.current.list = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || n !== creditSeq.current.list || creditRef.current?.id !== slice.id
+      || !creditCurrent(slice) || since !== sessionEndsSoFar() || storeRef.current !== storeId;
+    const base: CreditNotesList = mode === 'next' && was !== null ? { ...was, more: true, said: '' } : { ...CREDIT_LIST_START, target: target ?? was?.target ?? null };
+    patchCredit(slice.id, { list: base });
+    let notes = base.notes;
+    let named = base.named;
+    // A chain from page one still knows the slice's last view (one slice: one generation and token): named → unnamed across a
+    // refresh is rule 4's access loss; the page itself is already in the new view, so nothing is read again for it.
+    let lastView = mode === 'first' ? was?.named ?? null : null;
+    // The slice's view outlives a chain that ends without one (an empty page, a failure): the next refresh still compares.
+    const keptView = mode === 'first' ? was?.named ?? null : base.named;
+    let cursor = base.next;
+    let { reloaded, restarted } = base;
+    let fresh = mode === 'first'; // a chain started again here says no "{n} more loaded."
+    const done = (phase: CreditNotesList['phase'], keep: boolean, complete = false): void => {
+      if (stale()) return;
+      patchCredit(slice.id, {
+        list: keep
+          ? { ...base, phase, notes, named: named ?? keptView, next: cursor, complete, more: false, reloaded, restarted, said: !fresh && phase === 'ready' ? CREDIT_TEXT.moreLoaded(notes.length - base.notes.length) : '' }
+          : { ...base, phase, notes: [], named: phase === 'denied' ? null : keptView, next: null, complete: false, more: false, reloaded, restarted, said: '' },
+      });
+    };
+    if (waitRef.current) return done('failed', true);
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      if (failure.seconds !== undefined) startWait(failure.seconds);
+      return done('failed', true);
+    }
+    if (adopt(s.csrf) || stale()) return; // another token: a new generation dropped this slice
+    for (let page = 0; ; page += 1) {
+      const answer = await issuing.listCreditNotes(storeId, invoiceId, cursor, s.csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        const got = answer.page;
+        if (creditViewLost.current === n && got.named !== null) {
+          creditViewLost.current = 0;
+          if (got.named) { // read before the confirmed denial with the owner's names: the list reloads once in the new view (rule 4)
+            if (reloaded) return done('failed', false);
+            reloaded = true;
+            fresh = true;
+            notes = [];
+            named = null;
+            cursor = null;
+            page = -1;
+            continue;
+          }
+        }
+        if (lastView !== null && got.named !== null) {
+          if (lastView && !got.named) creditDenied('view');
+          lastView = null;
+        }
+        const follows = creditNotesFollow(named, notes, got);
+        if (follows === 'view-changed') {
+          if (named === true && got.named === false) creditDenied('view'); // the owner's names are gone: so are the lookup's rows
+          if (reloaded) return done('failed', false);
+          reloaded = true;
+          fresh = true;
+          notes = [];
+          named = null;
+          cursor = null;
+          page = -1;
+          continue;
+        }
+        if (follows === 'broken') return done('failed', false);
+        notes = [...notes, ...got.creditNotes];
+        named = got.named ?? named;
+        cursor = got.nextCursor;
+        if (cursor === null) return done('ready', true, true);
+        // `whole`: the D-P2-15 reads (the baseline, a continuation's current set) follow to nextCursor null, at most a batch.
+        if ((whole || (base.target !== null && !notes.some((note) => note.id === base.target))) && page + 1 < LOOKUP_PAGE_CAP) continue;
+        return done('ready', true);
+      }
+      if (answer.kind === 'bad-cursor' && !restarted) {
+        restarted = true;
+        fresh = true;
+        notes = [];
+        named = null;
+        cursor = null;
+        page = -1;
+        continue;
+      }
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+      if (answer.kind === 'denied') {
+        const verdict = await creditDenial(s.csrf, stale);
+        if (verdict === 'gone' || stale()) return;
+        if (verdict !== 'denied') return done('failed', true);
+        creditDenied('list');
+        return done('denied', false);
+      }
+      if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return done('failed', true); }
+      return done('failed', answer.kind === 'unavailable'); // not found, malformed, a second cursor 400: nothing kept
+    }
+  }
+
+  /**
+   * This owner's attempts at the store (doc 17 §2.2, §3.3), kept for this invoice: the issue action's gate (D-P2-3) once
+   * read to exhaustion as observed — not evidence that none exists. The readList skeleton under one scan generation, in
+   * batches of LOOKUP_PAGE_CAP pages: 'start' begins a lookup generation at page one; 'continue' resumes an incomplete one
+   * from its last good cursor (a context change in between made a new slice: page one). A 403 the one check confirms hides
+   * it for this generation and token; a malformed page or one that does not advance fails (Try again); the cap, a 429, a
+   * 503 or no answer stops it incomplete with its rows (Continue checking); one cursor-400 restart per lookup generation.
+   */
+  async function readCreditLookup(storeId: string, invoiceId: string, mode: 'start' | 'continue'): Promise<void> {
+    const slice = creditSliceFor(storeId, invoiceId);
+    if (slice === null) return;
+    const was = slice.lookup;
+    if (mode === 'continue' && was !== null && was.phase !== 'incomplete') return;
+    if (lookupDenied.current.has(`${slice.n}:${slice.csrf}:${storeId}`)) return patchCredit(slice.id, { lookup: LOOKUP_DENIED }); // never asked again here
+    const resume = mode === 'continue' && was !== null;
+    const n = ++creditSeq.current.lookup;
+    creditCtl.current.lookup?.abort();
+    const controller = new AbortController();
+    creditCtl.current.lookup = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || n !== creditSeq.current.lookup || creditRef.current?.id !== slice.id
+      || !creditCurrent(slice) || since !== sessionEndsSoFar() || storeRef.current !== storeId;
+    let rows = resume ? was.rows : [];
+    let cursor = resume ? was.cursor : null;
+    let seen = resume ? was.seen : [];
+    let restarted = resume ? was.restarted : false;
+    let owner = was?.owner === true;
+    const put = (phase: CreditNotesLookup['phase']): void => {
+      if (!stale()) patchCredit(slice.id, { lookup: phase === 'failed' ? { ...LOOKUP_FAILED, owner } : { phase, rows, cursor, seen, restarted, owner } });
+    };
+    put('loading');
+    if (waitRef.current) return put('incomplete');
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      if (failure.seconds !== undefined) startWait(failure.seconds);
+      return put('incomplete');
+    }
+    if (adopt(s.csrf) || stale()) return; // another token: a new generation dropped this slice
+    for (let page = 0; ; page += 1) {
+      if (page === LOOKUP_PAGE_CAP) return put('incomplete');
+      const answer = await issuing.creditNoteAttempts(storeId, cursor, s.csrf, controller.signal);
+      if (stale()) return;
+      if (answer.kind === 'ok') {
+        if (!creditNoteAttemptsFollow(seen, answer.attempts)) return put('failed'); // out of order, or a row this scan already has
+        const checkedAt = wall();
+        rows = [...rows, ...answer.attempts.filter((a) => a.invoiceId === invoiceId).map((a) => Object.freeze({ ...a, checkedAt }))];
+        seen = [...seen, ...answer.attempts];
+        cursor = answer.nextCursor;
+        owner = true;
+        if (cursor === null) return put('exhausted');
+        continue;
+      }
+      if (answer.kind === 'bad-cursor' && !restarted) {
+        restarted = true;
+        rows = [];
+        cursor = null;
+        seen = [];
+        page = -1;
+        continue;
+      }
+      if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+      if (answer.kind === 'denied') {
+        const verdict = await creditDenial(s.csrf, stale);
+        if (verdict === 'gone' || stale()) return;
+        return verdict === 'denied' ? creditDenied('lookup') : put('incomplete');
+      }
+      if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return put('incomplete'); }
+      return put(answer.kind === 'unavailable' ? 'incomplete' : 'failed'); // malformed, a second cursor 400
+    }
+  }
+
+  // ---- issuing a credit note (M7B-CREDITNOTES-CN-P2, doc 17 §2.5-§2.6, §3.1, §3.3) ----
+
+  /** The shop-observed sign-in under the token this section holds now, whatever its age; null: none under it. */
+  const lastSignIn = (): CreditNoteSignIn | null => (signedAt.current !== null && signedAt.current.csrf === gen.current.csrf ? signedAt.current : null);
+  /** The same while a first send may still use it (≤ 8 minutes, §2.5). */
+  const freshSignIn = (): CreditNoteSignIn | null => {
+    const s = lastSignIn();
+    return s !== null && signInFresh(s, clock(), wall()) ? s : null;
+  };
+  /** Every sign-in this section saw finish (the dialog's, the settings'): when, under the token it gave. */
+  function stampSignIn(csrf: string): void { signedAt.current = { mono: clock(), wall: wall(), csrf }; }
+  const stageKey = (h: HeldCreditNote | undefined, stage: CreditNoteStage): string => (stage === 'proof' ? '' : h?.[stage]?.key ?? '');
+  const shutIn = (h: HeldCreditNote | undefined, stage: CreditNoteStage): boolean =>
+    h !== undefined && memoFor(h.attemptId).stages.some((x) => x.stage === stage && x.key === stageKey(h, stage));
+  const shutHas = (a: string, stage: CreditNoteStage): boolean => { const h = cnHolds.get(uid); return h?.attemptId === a && shutIn(h, stage); };
+  const shut = (a: string, stage: CreditNoteStage): void => {
+    const key = stageKey(cnHolds.get(uid), stage);
+    const m = memoFor(a);
+    cnMemo.set(uid, { ...m, stages: [...m.stages, { stage, key }] });
+  };
+  /** A confirmed no-access line (rule 4) while the token it was confirmed under is still this section's. */
+  // Before this mount has read a session (a remount, nothing pressed yet), the attached hold's own token stands for it: a
+  // sign-out detaches the hold, so rule 4 still lifts on a known session change (§3.6).
+  const bareNow = (s: CreditSay | null | undefined): boolean => s?.bare === true && s.bareAt !== null && s.bareAt === (gen.current.csrf ?? cnHolds.get(uid)?.csrf ?? null);
+  /**
+   * What the card says for `attemptId` and which buttons that line backs, announced once in the live pair (polite, or an
+   * alert) — nothing for a hidden card (D-P2-6: the hold still judges its answers). A stage shut stays shut.
+   */
+  function say(attemptId: string, text: string, o: CreditSayOptions = {}): void {
+    // Rule 4 sticks: a later answer (a late original, a stale stage) never gives a confirmed no-access card its buttons back.
+    // One access-loss transition, one announcement: a second no-access line for the same attempt changes nothing.
+    if (bareNow(memoFor(attemptId).bare)) return;
+    const alert = o.alert ?? false;
+    const next: CreditSay = {
+      attemptId, text, alert, also: o.also ?? '', find: o.find ?? false, bare: o.bare ?? false, bareAt: o.bare === true ? cnDeniedAt.current ?? gen.current.csrf : null, kind: o.kind ?? null,
+      check: o.check !== undefined && !shutHas(attemptId, o.check) ? o.check : null, cont: o.cont !== undefined && !shutHas(attemptId, 'proof') ? o.cont : null,
+    };
+    // The card's last line outlives this section (a page left and back keeps it; rule 4's with its token), said or not.
+    cnMemo.set(uid, { ...memoFor(attemptId), last: next, ...(next.bare ? { bare: next } : {}) });
+    if (!alive.current) return;
+    cnSayRef.current = next;
+    setCnSay(next);
+    if (o.focusFind === true) setCnFocusFind((x) => x + 1);
+    const h = cnHolds.get(uid);
+    if (h?.attemptId === attemptId && h.hidden) return;
+    // The second line is part of the transition (§2.6: noAccessShort, rateLimitedWait … are alert strings): one announcement.
+    const words = next.also === '' ? text : `${text} ${next.also}`;
+    setCnLive(alert || next.also !== '' ? { status: '', alert: words } : { status: words, alert: '' });
+  }
+  /** What the live pair says when no card line changes (a press that could not leave, a row that could not be held). */
+  const sayAside = (text: string): void => { if (alive.current) setCnLive({ status: '', alert: text }); };
+  /** A press that threw (never expected: the client does not reject) fails closed: internalError and "Look up attempt". */
+  /**
+   * A press that threw (never expected: the client does not reject) fails closed: internalError and "Look up attempt" — on the
+   * attempt whose press it was (`a`, read when pressed), never on a newer one; with none (or another), the live pair only.
+   */
+  const cnThrew = (a: string | undefined) => (): void => {
+    const h = cnHolds.get(uid);
+    if (h === undefined || a === undefined || h.attemptId !== a) return sayAside(CREDIT_TEXT.internalError);
+    if (isOpenCreditNote(h)) cnHolds.change(uid, h.attemptId, h.generation, { unresolved: true });
+    say(h.attemptId, CREDIT_TEXT.internalError, { alert: true, find: true });
+  };
+  /** The attempt a press acts on, read at the press. */
+  const pressed = (): string | undefined => cnHolds.get(uid)?.attemptId;
+  /** A press whose session check failed (not a sign-out, no wait running): the shipped connect-failure text; the card keeps its line and buttons. */
+  const cnUnavailable = (stands: () => boolean): void => { if (stands() && !waitRef.current) sayAside(ISSUED_TEXT.unavailable); };
+  /** A line whose words follow what it offers (registeredOnly, unresolved, settleUnknown: §2.7), said with the words true now. */
+  function sayOffer(attemptId: string, kind: NonNullable<CreditSay['kind']>, o: CreditSayOptions = {}): void {
+    const h = cnHolds.get(uid);
+    const can = h !== undefined && h.attemptId === attemptId && (kind === 'registeredOnly'
+      ? o.cont === 'continue' && !shutHas(attemptId, 'proof') && continueLeaves(h, clock(), wall())
+      : o.check !== undefined && !shutHas(attemptId, o.check) && checkLeaves(h, o.check, clock(), wall()));
+    say(attemptId, CREDIT_TEXT[kind](can), { ...o, kind });
+  }
+  /** Busy has an owner (the list's `busyBy` pattern): only the latest press to take it gives it back. */
+  const takeCnBusy = (): number => { cnSending.current = true; if (alive.current) setCnBusyState(true); return ++cnBusyBy.current; };
+  const giveCnBusy = (me: number): void => { if (cnBusyBy.current !== me) return; cnSending.current = false; if (alive.current) setCnBusyState(false); };
+  const rereadAmounts = (): void => setCnRereads((x) => x + 1);
+  /** Mark the attempt unresolved: from here no success runs on into the next stage (§2.6 item 3). */
+  const unsure = (a: string, g: number): void => { cnHolds.change(uid, a, g, { unresolved: true }); };
+
+  /**
+   * One stage's send through the hold (its last gate and record), its answer judged there (attribution and class, §2.6
+   * item 4, §3.6), and the 30 s presentation boundary meanwhile (`late`): the request itself is never aborted.
+   */
+  async function cnSend<R extends CreditNoteCommandResult | CreditNoteProofResult>(
+    a: string, g: number, stage: CreditNoteStage, csrf: string, call: (t: CreditNoteTicket) => Promise<R>, late: () => void, replay = false,
+  ): Promise<{ readonly d: CreditNoteDecision; readonly r: R; readonly inTime: boolean } | null> {
+    const t = cnHolds.send(uid, a, g, stage, { replay, csrf, sessionEnds: sessionEndsSoFar() });
+    if (t === null) return null;
+    let inTime = true;
+    const pass = (): void => { inTime = false; if (alive.current) late(); };
+    const timer = setTimeout(() => { cnTimers.current.delete(timer); pass(); }, CREDIT_NOTE_STAGE_WAIT_MS);
+    cnTimers.current.add(timer);
+    let r: R;
+    try {
+      r = await call(t);
+    } finally {
+      clearTimeout(timer); // a throw too: its press fails closed once, and nothing is said at 30 s
+      cnTimers.current.delete(timer);
+    }
+    // An answer processed past the boundary before its timer ran is late too (the boundary is a time, not a callback).
+    if (inTime && clock() - t.mono >= CREDIT_NOTE_STAGE_WAIT_MS) pass();
+    // The hold outlives this section (a page left in the app): unmounted, the token is the hold's own — a sign-out still moves
+    // `sessionEndsSoFar`, and the next mount detaches on another token (§3.6 (c); the void settles BY KEY likewise).
+    const current = alive.current ? gen.current.csrf : cnHolds.get(uid)?.csrf ?? null;
+    return { d: cnHolds.decide(uid, t, { csrf: current, sessionEnds: sessionEndsSoFar() }, r), r, inTime };
+  }
+  /**
+   * A command's or the proof's 403 forbidden, apart from what it did to the attempt (§3.6): ONE fresh check comparing tokens
+   * (rule 1) — 'denied' (the same token: a confirmed denial, rule 4), 'gone' (another token or a sign-out: detached),
+   * 'unchecked' (the check could not answer); 'ok' for any other answer.
+   */
+  async function cnDenial(r: CreditNoteCommandResult | CreditNoteProofResult, csrf: string, a: string): Promise<'ok' | 'denied' | 'gone' | 'unchecked'> {
+    if (r.kind !== 'refused' || r.status !== 403 || r.error === 'step_up_required') return 'ok';
+    const verdict = await creditDenial(csrf, () => false);
+    // Rule 1: the same token AND the hold still attached; the denial counts at the refused request's store only.
+    const h = cnHolds.get(uid);
+    if (verdict !== 'denied') return verdict === 'gone' ? 'gone' : 'unchecked';
+    if (h === undefined || h.attemptId !== a || h.csrf !== csrf) return 'gone';
+    creditDenied('other', false, h.storeId); // the answer's own applier says it on the card
+    return 'denied';
+  }
+  /** A 401 signs the section out once its answer is applied (the hold detaches; T:1474 precedent) — only under the token it went with. */
+  const cnSignedOut = (r: CreditNoteCommandResult | CreditNoteProofResult, csrf: string): void => {
+    if (r.kind === 'refused' && r.status === 401 && gen.current.csrf === csrf) failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+  };
+  /** The invoice's state now, for an issue's sealed invalid_state (§3.1): its own read under `csrf`; null when it does not answer. */
+  async function cnInvoiceStatus(storeId: string, invoiceId: string, csrf: string): Promise<'issued' | 'voided' | null> {
+    const answer = await issuing.getIssued(storeId, invoiceId, csrf, new AbortController().signal);
+    return answer.kind === 'ok' ? answer.invoice.status : null;
+  }
+
+  /**
+   * "Issue credit note" in the confirmation (§2.5-§2.6): only with a shop-observed sign-in ≤ 8 minutes old under this token
+   * (else the sign-in group, nothing sent); the session read again; the register's key and exact bytes held — with the
+   * sign-in and the D-P2-15 baseline (the list as read so far, frozen here) — BEFORE it leaves; then the chain of this
+   * press. Resolves once the confirmation should close (the chain ended, or a stage passed its 30 s boundary).
+   */
+  async function issueCredit(viewId: number, store: StoreEntry, press: CreditPress): Promise<CreditIssueOutcome> {
+    if (cnSending.current) return { kind: 'not-sent', text: SETTINGS_TEXT.busy };
+    if (waitRef.current) return { kind: 'not-sent', text: pickerWaitText(waitLeft()) };
+    if (freshSignIn() === null) return { kind: 'sign-in', expired: lastSignIn() };
+    const me = takeCnBusy();
+    const mine = ++cnPress.current;
+    let attemptHeld: string | undefined; // the attempt this press held, once it has
+    try {
+      const n = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar() && storeRef.current === store.id && viewRef.current?.id === viewId;
+      const csrf = await payConnect(stands);
+      if (csrf === null) return stands() ? { kind: 'not-sent', text: waitRef.current ? pickerWaitText(waitLeft()) : ISSUED_TEXT.unavailable } : { kind: 'stale' };
+      if (adopt(csrf) || !stands()) return { kind: 'stale' };
+      const signIn = freshSignIn();
+      if (signIn === null) return { kind: 'sign-in', expired: lastSignIn() };
+      const attemptId = nextKey();
+      const key = nextKey();
+      const body = creditNoteRegisterBodyOf(store.tenantId, attemptId, press.grossCents, press.reason);
+      if (body === null) return { kind: 'not-sent', text: CREDIT_TEXT.notAccepted };
+      const s = creditRef.current;
+      const list = s !== null && s.storeId === store.id && s.invoiceId === press.invoiceId && creditCurrent(s) ? s.list : null;
+      const baseline = { ids: list?.notes.map((x) => x.id) ?? [], complete: list?.phase === 'ready' && list.complete };
+      const was = cnHolds.get(uid);
+      if (was !== undefined && cnEnded(was)) cnHolds.remove(uid, was.attemptId); // an ended one only: put refuses an open one
+      const put = cnHolds.put(uid, {
+        start: 'register', attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId: press.invoiceId, invoiceNumber: press.number,
+        grossCents: press.grossCents, reason: press.reason, csrf, key, body, signIn, baseline,
+      });
+      if (put.kind === 'lapsed') return { kind: 'sign-in', expired: signIn };
+      if (put.kind !== 'held') return { kind: 'not-sent', text: put.kind === 'busy' ? CREDIT_TEXT.unfinished : CREDIT_TEXT.notAccepted };
+      attemptHeld = attemptId;
+      say(attemptId, CREDIT_TEXT.sending); // once for the whole chain
+      return await new Promise<CreditIssueOutcome>((answer) => {
+        const shown = (): void => answer({ kind: 'shown' });
+        void runCredit(put.held, csrf, mine, shown).catch(cnThrew(put.held.attemptId)).finally(shown);
+      });
+    } catch {
+      cnThrew(attemptHeld)(); // never expected before the chain either: fail closed and close the confirmation (never left on sending)
+      return { kind: 'shown' };
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+
+  /**
+   * One press's first-send chain (§2.6 item 3): register 201 → proof 200 → the ONE issue key claimed and held with its
+   * exact bytes → the issue. A stage's success runs on only while this press is still the latest credit-note press, before
+   * that stage's 30 s boundary, and while the attempt was never unresolved; and the issue only with the sign-in still
+   * ≤ 8 minutes old. Any other accepted answer only records its state; a late one never starts a later stage.
+   */
+  async function runCredit(h0: HeldCreditNote, csrf: string, press: number, shown: () => void): Promise<void> {
+    const a = h0.attemptId;
+    const g = h0.generation;
+    const onwards = (inTime: boolean): boolean => {
+      const h = cnHolds.get(uid);
+      return inTime && alive.current && cnPress.current === press && h !== undefined && h.attemptId === a && h.generation === g && h.csrf === csrf && !h.unresolved;
+    };
+    const reg = await cnSend(a, g, 'register', csrf, (t) => issuing.registerCreditNote(h0.storeId, h0.invoiceId, t.key, t.body, csrf),
+      () => { unsure(a, g); say(a, CREDIT_TEXT.regUnknown, { alert: true, find: true, check: 'register' }); shown(); });
+    if (reg === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true }); // the hold refused the send: nothing left
+    const go = await cnRegisterAnswer(h0, csrf, reg.d, reg.r, await cnDenial(reg.r, csrf, a));
+    cnSignedOut(reg.r, csrf);
+    if (!go) return;
+    // Late, or another press since: recorded only — the card waits for "Continue issuing" (§2.6 item 3).
+    if (!onwards(reg.inTime)) return sayOffer(a, 'registeredOnly', { find: true, cont: 'continue' });
+    if (!(await cnSession(a, csrf, 'continue'))) return;
+    if (!onwards(reg.inTime)) return sayOffer(a, 'registeredOnly', { find: true, cont: 'continue' });
+    const proof = await cnSend(a, g, 'proof', csrf, (t) => issuing.creditNoteProof(h0.storeId, h0.invoiceId, t.body, a, csrf),
+      () => { unsure(a, g); sayOffer(a, 'registeredOnly', { find: true, cont: 'continue', check: 'proof' }); shown(); });
+    if (proof === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+    if (proof.d !== 'open' || proof.r.kind !== 'proof') {
+      cnProofAnswer(a, proof.d, proof.r, await cnDenial(proof.r, csrf, a));
+      return cnSignedOut(proof.r, csrf);
+    }
+    if (!onwards(proof.inTime)) return sayOffer(a, 'registeredOnly', { find: true, cont: 'continue' });
+    if (!(await cnSession(a, csrf, 'continue'))) return;
+    if (!onwards(proof.inTime)) return sayOffer(a, 'registeredOnly', { find: true, cont: 'continue' });
+    const h = cnHolds.get(uid) as HeldCreditNote;
+    // The 8-minute window again, just before the issue's first send (§2.6 item 3): a registration cannot use a new sign-in.
+    const lapsed = (): void => { shut(a, 'proof'); say(a, CREDIT_TEXT.continueLapsed, { alert: true, also: CREDIT_TEXT.registeredOnly(false), find: true }); };
+    if (!signInFresh(h.signIn, clock(), wall())) return lapsed();
+    const body = creditNoteIssueBodyOf({ expectedTenant: h.tenantId, registrationId: h.registrationId as string, attemptId: a, grossCents: h.grossCents, reason: h.reason, registrationProof: proof.r.proof });
+    const claim = body === null ? 'gone' : cnHolds.claimIssueKey(uid, a, g, nextKey(), body);
+    if (claim === 'lapsed') return lapsed();
+    if (claim !== 'claimed') return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+    const issue = await cnSend(a, g, 'issue', csrf, (t) => issuing.issueCreditNote(h.storeId, h.invoiceId, t.key, t.body, csrf),
+      () => { unsure(a, g); sayOffer(a, 'unresolved', { alert: true, find: true, check: 'issue' }); shown(); });
+    if (issue === null) return signInFresh(h.signIn, clock(), wall()) ? say(a, CREDIT_TEXT.internalError, { alert: true, find: true }) : lapsed();
+    await cnIssueAnswer(h, csrf, issue.d, issue.r, await cnDenial(issue.r, csrf, a));
+    cnSignedOut(issue.r, csrf);
+  }
+
+  /**
+   * §3.6 rule 1: the session read again immediately before a chain's proof or issue send. True: the same token, send. Else
+   * nothing more is sent — another token detached the hold (continueAfterSignIn), a sign-out began, or the read failed.
+   */
+  async function cnSession(a: string, csrf: string, cont: 'continue' | 'another'): Promise<boolean> {
+    const n = gen.current.n;
+    const since = sessionEndsSoFar();
+    const denials = cnDenials.current;
+    const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar();
+    const now = await payConnect(stands);
+    if (now === null) {
+      // Not read: the shipped connect-failure text. The first-send chain's card leaves "sending" for the registration's own
+      // line (its press then); a continuation's card keeps the line it stated and what that line offers.
+      if (stands() && cnSayRef.current?.attemptId === a && cnSayRef.current.text === CREDIT_TEXT.sending) sayOffer(a, 'registeredOnly', { find: true, cont });
+      cnUnavailable(stands);
+      return false;
+    }
+    if (adopt(now) || now !== csrf) {
+      say(a, CREDIT_TEXT.continueAfterSignIn, { alert: true, also: CREDIT_TEXT.registeredOnly(false), find: true });
+      return false;
+    }
+    // Every fresh check of a 403 seen under this token settles first; a denial it (or any check) confirmed stops the send.
+    for (;;) {
+      const out = [...cnPendingChecks.current].filter((x) => x.token === csrf || x.token === null);
+      if (out.length === 0) break;
+      await Promise.all(out.map((x) => x.check));
+    }
+    // Rule 4 (store-scoped, RF1-04): this card's own no-access line, or a same-token denial confirmed while this read was out.
+    if (bareNow(memoFor(a).bare) || (cnDenials.current !== denials && cnDeniedAt.current === csrf)) {
+      // The card waits for its no-access line from the refused read (this store); else it says what it has.
+      if (!bareNow(memoFor(a).bare) && cnSayRef.current?.attemptId === a && cnSayRef.current.text === CREDIT_TEXT.sending) sayOffer(a, 'registeredOnly', { find: true, cont });
+      return false;
+    }
+    return true;
+  }
+
+  /** A register answer (§3.1, first send): true when the attempt is registered by it and the chain may look further. */
+  async function cnRegisterAnswer(h: HeldCreditNote, csrf: string, d: CreditNoteDecision, r: CreditNoteCommandResult, session: string): Promise<boolean> {
+    const a = h.attemptId;
+    const g = h.generation;
+    const end = (text: string, alert = true): false => { cnHolds.change(uid, a, g, { state: 'ended' }); say(a, text, { alert }); return false; };
+    if (d === 'stale' || d === 'same') { if (session === 'denied') cnNoAccess(); return false; } // its session handling still applies (§3.6)
+    if (d === 'different') { unsure(a, g); say(a, CREDIT_TEXT.internalError, { alert: true, find: true }); return false; } // two stored answers differ (§2.6 item 4)
+    if (d === 'first' && r.kind === 'registered') return cnHolds.change(uid, a, g, { state: 'registered', registrationId: r.registrationId });
+    if (d === 'first' && r.kind === 'refused') {
+      // Sealed: the slot rule (an unfinished attempt here: the lookup shows it), a voided invoice, an existing note.
+      if (r.error === 'write_conflict') { end(CREDIT_TEXT.unfinished); void readCreditLookup(h.storeId, h.invoiceId, 'start'); return false; }
+      if (r.error === 'invalid_state') {
+        // A fresh attempt id cannot be a released one: voided, said only once the invoice's own read says so.
+        const now = await cnInvoiceStatus(h.storeId, h.invoiceId, csrf);
+        const still = cnHolds.get(uid);
+        if (still?.attemptId !== a || still.generation !== g || still.csrf !== csrf) return false; // detached or replaced meanwhile: the lookup explains
+        rereadAmounts();
+        return end(now === 'voided' ? CREDIT_TEXT.voided : CREDIT_TEXT.invalidStateUnknown);
+      }
+      if (r.error === 'already_issued') { say(a, CREDIT_TEXT.alreadyIssued, { alert: true, find: true }); return false; }
+      // A sealed word §3.1 does not list at the register: fail closed, the hold kept — never "nothing was issued".
+      unsure(a, g);
+      say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+      return false;
+    }
+    if (d === 'unstored' && r.kind === 'refused') {
+      // Decided before the key, no Check again sent: nothing ran (§2.6 item 4).
+      if (r.status === 401) return end(CREDIT_TEXT.ended);
+      if (r.status === 403 && r.error === 'step_up_required') { signedAt.current = null; return end(CREDIT_TEXT.signInNeeded); }
+      if (r.status === 403 && session === 'denied') return end(CREDIT_TEXT.notAllowed);
+      if (r.status === 403) { unsure(a, g); say(a, CREDIT_TEXT.regUnknown, { alert: true, find: true }); return false; }
+      if (r.status === 429) { const s = r.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS; startWait(s); return end(CREDIT_TEXT.rateLimited(s)); }
+      return end(CREDIT_TEXT.notAccepted);
+    }
+    unsure(a, g);
+    const unknown = (o: CreditSayOptions = {}): false => { say(a, CREDIT_TEXT.regUnknown, { alert: true, find: true, ...o }); return false; };
+    if (d === 'fail-closed') { say(a, CREDIT_TEXT.internalError, { alert: true, find: true }); return false; } // nothing under a new key
+    if (r.kind !== 'refused') return unknown({ check: 'register' }); // 503-like, no answer: Check again (window) or Look up
+    if (r.status === 409 && !r.sealed && r.error === 'request_in_progress') { say(a, CREDIT_TEXT.inProgress, { find: true, check: 'register' }); return false; }
+    // A Check again was sent under the key (§3.1's Check-again column): every answer here is regUnknown on evidence (b) —
+    // replay unavailable (422, a step-up, a sign-out), a confirmed denial (no buttons), or a wait.
+    if (r.status === 422 || r.status === 401 || (r.status === 403 && r.error === 'step_up_required')) { shut(a, 'register'); return unknown(); }
+    if (r.status === 403 && session === 'denied') { say(a, CREDIT_TEXT.regUnknown, { alert: true, also: CREDIT_TEXT.noAccessShort, bare: true }); return false; }
+    if (r.status === 403) return unknown(session === 'gone' ? {} : { check: 'register' });
+    if (r.status === 429) return unknown({ also: CREDIT_TEXT.rateLimitedWait(r.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS), check: 'register' });
+    return unknown({ check: 'register' }); // 400, 404, an unsealed 409: the hold is kept
+  }
+
+  /** A proof answer that does not let the chain go on (§3.1): never a claim about an issue. */
+  function cnProofAnswer(a: string, d: CreditNoteDecision, r: CreditNoteProofResult, session: string): void {
+    const registered = (o: CreditSayOptions = {}): void => sayOffer(a, 'registeredOnly', { find: true, cont: 'continue', ...o });
+    if (d === 'stale') return void (session === 'denied' && cnNoAccess());
+    if (d === 'open') return registered(); // open now: it only makes Continue issuing available (E5 needs that press's own proof)
+    if (d === 'neutral') { shut(a, 'proof'); return say(a, CREDIT_TEXT.cantContinue, { alert: true, find: true }); }
+    if (d === 'fail-closed') return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+    if (r.kind === 'refused' && r.status === 403 && session === 'denied') return say(a, CREDIT_TEXT.registeredOnly(false), { also: CREDIT_TEXT.noAccessShort, bare: true });
+    if (session === 'gone') return say(a, CREDIT_TEXT.continueAfterSignIn, { alert: true, also: CREDIT_TEXT.registeredOnly(false), find: true });
+    if (r.kind === 'refused' && r.status === 401) return say(a, CREDIT_TEXT.registeredOnly(false), { find: true }); // the section signs out next: detached
+    registered({ check: 'proof' }); // 503, no answer: Check again (a read), Continue issuing or Look up attempt
+  }
+
+  /** An issue answer (§3.1): a stored one in either column; the first send's others while no Check again was sent under its key. */
+  async function cnIssueAnswer(h: HeldCreditNote, csrf: string, d: CreditNoteDecision, r: CreditNoteCommandResult, session: string): Promise<void> {
+    const a = h.attemptId;
+    const g = h.generation;
+    const find = (text: string, also = ''): void => say(a, text, { alert: true, also, find: true });
+    if (d === 'stale' || d === 'same') return void (session === 'denied' && cnNoAccess());
+    if (d === 'different') { unsure(a, g); return find(CREDIT_TEXT.internalError); } // two stored answers that differ (§2.6 item 4)
+    const known = cnHolds.get(uid);
+    if (r.kind !== 'issued' && known?.attemptId === a && known.generation === g && (known.state === 'issued' || cnEnded(known))) {
+      // Forward only (§3.6, P2-28 case 11): issued is already known (a lookup row) — a late refusal claims nothing; only a
+      // confirmed same-token denial takes the buttons away.
+      if (session === 'denied') say(a, CREDIT_TEXT.noAccess, { alert: true, bare: true });
+      return;
+    }
+    if (d === 'first' && r.kind === 'issued') {
+      if (!cnHolds.change(uid, a, g, { state: 'issued', creditNoteId: r.creditNoteId })) {
+        // Forward only (§2.6 item 4): a settled attempt whose note this is stays settled; anything else does not fit.
+        const k = cnHolds.get(uid);
+        if (k?.attemptId === a && k.generation === g && k.state === 'confirmed' && k.creditNoteId === r.creditNoteId) return;
+        unsure(a, g);
+        return find(CREDIT_TEXT.internalError);
+      }
+      say(a, CREDIT_TEXT.issued(formatCents(h.grossCents), INVOICE_CREDIT_NOTE_REASONS[h.reason]));
+      rereadAmounts();
+      void readCreditList(h.storeId, h.invoiceId, 'first', r.creditNoteId); // followed until its row (its number) loads
+      activityAfterOwnWrite(h.storeId); // doc 18 CA-44: this tab's own 201 re-reads a loaded activity view's page one
+      return;
+    }
+    if (d === 'first' && r.kind === 'refused') {
+      if (r.error === 'amount_exceeds_remaining') { rereadAmounts(); return find(CREDIT_TEXT.overRemaining); }
+      if (r.error === 'already_issued') return find(CREDIT_TEXT.alreadyIssued);
+      if (r.error === 'invalid_state') {
+        // Two causes (M38:1289, :1303): the invoice says which — voided, else released; no answer: either.
+        const now = await cnInvoiceStatus(h.storeId, h.invoiceId, csrf);
+        const still = cnHolds.get(uid);
+        if (still?.attemptId !== a || still.generation !== g || still.csrf !== csrf) return; // detached or replaced meanwhile: the lookup explains
+        rereadAmounts();
+        if (now === 'voided') return find(CREDIT_TEXT.voided);
+        if (now === 'issued') { cnHolds.change(uid, a, g, { state: 'released' }); return say(a, CREDIT_TEXT.attemptReleased, { alert: true }); }
+        return find(CREDIT_TEXT.invalidStateUnknown);
+      }
+      if (r.error === 'write_conflict') return find(CREDIT_TEXT.notAccepted);
+      unsure(a, g); // a sealed word §3.1 does not list at the issue: fail closed — never "No credit note was issued"
+      return find(CREDIT_TEXT.internalError);
+    }
+    if (d === 'unstored' && r.kind === 'refused') {
+      if (r.status === 401) return say(a, CREDIT_TEXT.ended, { alert: true }); // decided before the key; detached: Look up after a sign-in
+      // A first-send refusal that offers no Check again closes the stage (D-P2-10 A: Void and Reverse come back).
+      if (r.status === 403 && r.error === 'step_up_required') { signedAt.current = null; shut(a, 'issue'); return find(CREDIT_TEXT.issueStale); }
+      if (r.status === 403 && session === 'denied') return say(a, CREDIT_TEXT.notAllowed, { alert: true, also: CREDIT_TEXT.noAccessShort, bare: true });
+      // A new token or a sign-out (§3.6 rule 1): decided before the key, the hold detached — as after a 401 (§3.1, line 383).
+      // 'gone' with this section's token unchanged (it unmounted, or the hold went another way) keeps replayGone.
+      if (r.status === 403 && session === 'gone') return alive.current && gen.current.csrf !== csrf ? say(a, CREDIT_TEXT.ended, { alert: true }) : find(CREDIT_TEXT.replayGone);
+      if (r.status === 404) { shut(a, 'issue'); return find(CREDIT_TEXT.cantContinue); }
+      // Nothing ran under the key (APP:871): after Retry-After, Check again sends the held issue as its first execution (§3.1).
+      if (r.status === 429) return say(a, CREDIT_TEXT.rateLimitedWait(r.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS), { alert: true, find: true, check: 'issue' });
+      if (r.status !== 403) { shut(a, 'issue'); return find(CREDIT_TEXT.notAccepted); }
+    }
+    unsure(a, g);
+    if (d === 'fail-closed') return find(CREDIT_TEXT.internalError);
+    const unknown = (o: CreditSayOptions = {}): void => sayOffer(a, 'unresolved', { alert: true, find: true, ...o });
+    if (r.kind !== 'refused') return unknown({ check: 'issue' }); // 503-like, no answer: Check again (window) or Look up
+    if (r.status === 409 && !r.sealed && r.error === 'request_in_progress') return say(a, CREDIT_TEXT.inProgress, { find: true, check: 'issue' });
+    // A Check again was sent under the key (§3.1's Check-again column, P2-31): none of these ends the outcome or claims what ran.
+    if (r.status === 422 || (r.status === 403 && r.error === 'step_up_required')) { shut(a, 'issue'); return find(CREDIT_TEXT.replayGone); }
+    if (r.status === 401) { shut(a, 'issue'); return find(CREDIT_TEXT.endedUnknown); } // the section signs out next: detached
+    if (r.status === 403) return session === 'denied' ? say(a, CREDIT_TEXT.noAccess, { alert: true, bare: true }) : unknown(session === 'gone' ? {} : { check: 'issue' });
+    if (r.status === 404) { shut(a, 'issue'); return find(CREDIT_TEXT.cantContinue); }
+    if (r.status === 429) return unknown({ also: CREDIT_TEXT.rateLimitedWait(r.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS), check: 'issue' });
+    unknown({ check: 'issue' });
+  }
+
+  /** A settlement (Confirm or Release) under its held key and bytes, and its answer (§3.1, Confirm / Release rows). */
+  async function runSettle(h: HeldCreditNote, csrf: string, version: 1 | 2, me: number, replay = false): Promise<void> {
+    const a = h.attemptId;
+    const g = h.generation;
+    const st = await cnSend(a, g, 'settle', csrf, (t) => issuing.settleCreditNote(h.storeId, h.invoiceId, t.key, t.body, csrf),
+      () => { giveCnBusy(me); sayOffer(a, 'settleUnknown', { alert: true, find: true, check: 'settle' }); }, replay); // the request runs on; Look up attempt is back
+    if (st === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true }); // the hold refused the send
+    const { d, r } = st;
+    const session = await cnDenial(r, csrf, a);
+    try { await cnSettleAnswer(a, g, h, d, r, session, version); } finally { cnSignedOut(r, csrf); }
+  }
+  async function cnSettleAnswer(a: string, g: number, h: HeldCreditNote, d: CreditNoteDecision, r: CreditNoteCommandResult, session: string, version: 1 | 2): Promise<void> {
+    const find = (text: string): void => say(a, text, { alert: true, find: true });
+    if (d === 'stale' || d === 'same') return void (session === 'denied' && cnNoAccess());
+    if (d === 'first' && r.kind === 'settled') {
+      if (!cnHolds.change(uid, a, g, { state: r.state })) return find(CREDIT_TEXT.internalError); // a state it cannot move to: fail closed
+      say(a, r.state === 'released' ? CREDIT_TEXT.released : CREDIT_TEXT.confirmed);
+      rereadAmounts();
+      void readCreditList(h.storeId, h.invoiceId, 'first', null);
+      void readCreditLookup(h.storeId, h.invoiceId, 'start'); // its row's new state (the gate and the blockers follow it)
+      if (r.state === 'confirmed') activityAfterOwnWrite(h.storeId); // doc 18 CA-44: this tab's own Confirm (200)
+      return;
+    }
+    if (d === 'first' && r.kind === 'refused' && r.error === 'write_conflict') {
+      // The row is not in the state this version fits: the lookup shows its state and actions.
+      await readCreditLookup(h.storeId, h.invoiceId, 'start');
+      return cnFromLookup(a);
+    }
+    if (d === 'first') return find(CREDIT_TEXT.settleNotDone);
+    const issueSent = version === 2 || (cnHolds.get(uid) ?? h).sends.some((x) => x.stage === 'issue');
+    if (r.kind === 'refused' && r.status === 403 && session === 'denied') return say(a, issueSent ? CREDIT_TEXT.noAccess : CREDIT_TEXT.noAccessShort, { alert: true, bare: true });
+    if (d === 'fail-closed' || d === 'different') return find(CREDIT_TEXT.internalError);
+    const unknown = (o: CreditSayOptions = {}): void => sayOffer(a, 'settleUnknown', { alert: true, find: true, ...o });
+    if (r.kind !== 'refused') return unknown({ check: 'settle' }); // 503-like, no answer: Check again (under 23 h) or Look up
+    // The settlement's rows read the same in both columns (§3.1): a tenant mismatch is settleNotDone; a wait cools.
+    if (r.status === 400 || (r.status === 409 && !r.sealed && r.error === 'write_conflict')) return find(CREDIT_TEXT.settleNotDone);
+    if (r.status === 409 && !r.sealed && r.error === 'request_in_progress') return say(a, CREDIT_TEXT.inProgress, { find: true, check: 'settle' });
+    if (r.status === 429) return say(a, CREDIT_TEXT.rateLimitedWait(r.retryAfterSeconds ?? DEFAULT_WAIT_SECONDS), { alert: true, find: true, check: 'settle' });
+    // A 404 (D-P2-6: Look up or Hide), a sign-out, a refused replay: settleUnknown without Check again.
+    if (r.status === 404 || r.status === 401 || r.status === 422) { shut(a, 'settle'); return unknown(); }
+    if (r.status === 403) return unknown(session === 'gone' ? {} : { check: 'settle' });
+    unknown({ check: 'settle' });
+  }
+
+  /** A settlement of `h` sent and not decided, its bytes still held: no second key may follow (§2.6 item 2). */
+  const settleOut = (h: HeldCreditNote): boolean => h.settle !== null && h.settle.completion === null && h.settle.body !== '' && h.sends.some((x) => x.stage === 'settle' && x.key === h.settle?.key);
+  /** "Confirm credit note" after the attempt's own issue 201 (D-P2-16): version 2 under a new key, held before it leaves. */
+  async function confirmCredit(): Promise<void> {
+    const h = cnHolds.get(uid);
+    if (h === undefined || h.state !== 'issued' || h.issue?.completion?.kind !== 'issued' || h.csrf === null || settleOut(h) || cnSending.current || waitRef.current) return;
+    if (bareNow(memoFor(h.attemptId).bare)) return; // rule 4: no Confirm credit note
+    const me = takeCnBusy();
+    cnPress.current += 1;
+    try {
+      const n = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar();
+      const csrf = await payConnect(stands);
+      if (csrf === null) return cnUnavailable(stands);
+      if (adopt(csrf)) return; // another token detached it: the lookup decides
+      if (bareNow(memoFor(h.attemptId).bare)) return; // rule 4 under the token just read
+      const body = settleBodyOf(h.tenantId, h.attemptId, 2);
+      if (body === null || !cnHolds.holdSettlement(uid, h.attemptId, h.generation, 2, nextKey(), body)) return say(h.attemptId, CREDIT_TEXT.internalError, { alert: true, find: true });
+      await runSettle(h, csrf, 2, me);
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+
+  /**
+   * "Release attempt" on an open row, "Confirm credit note" on an issued one (lookup-first, D-P2-16): only a row this
+   * section's lookup shows now, under this generation and token; a new key, held before it leaves — on the held attempt
+   * when the row is its own, else as a new hold of that row (a reload, a detached card).
+   */
+  async function settleCreditRow(store: StoreEntry, invoiceId: string, row: CreditLookupRow, version: 1 | 2): Promise<void> {
+    const s = creditRef.current;
+    if (cnSending.current || waitRef.current || s === null || !creditCurrent(s) || s.storeId !== store.id || s.invoiceId !== invoiceId || s.lookup?.rows.includes(row) !== true) return;
+    const me = takeCnBusy();
+    cnPress.current += 1;
+    try {
+      const n = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar() && creditRef.current === s;
+      const csrf = await payConnect(stands);
+      if (csrf === null) return cnUnavailable(stands);
+      if (adopt(csrf) || creditRef.current?.lookup?.rows.includes(row) !== true) return;
+      if (bareNow(memoFor(row.attemptId).bare)) return; // rule 4: no Release or Confirm for this attempt under this token
+      const body = settleBodyOf(store.tenantId, row.attemptId, version);
+      if (body === null) return sayAside(CREDIT_TEXT.internalError); // nothing held, nothing sent
+      const key = nextKey();
+      const h = cnHolds.get(uid);
+      if (h !== undefined && h.attemptId === row.attemptId && h.csrf !== null) {
+        if (settleOut(h)) return; // its own settlement is sent and undecided: Check again, then the lookup after its limit (§3.2)
+        if (row.state === 'issued' && row.creditNote !== null) cnHolds.change(uid, h.attemptId, h.generation, { state: 'issued', creditNoteId: row.creditNote.id });
+        if (row.state === 'open' && h.state === 'registering') cnHolds.change(uid, h.attemptId, h.generation, { state: 'registered' });
+        if (h.settle !== null) cnHolds.retire(uid, h.attemptId, h.generation, 'settle');
+        if (!cnHolds.holdSettlement(uid, h.attemptId, h.generation, version, key, body)) return say(h.attemptId, CREDIT_TEXT.internalError, { alert: true, find: true });
+      } else {
+        if (h !== undefined && cnEnded(h)) cnHolds.remove(uid, h.attemptId);
+        const put = cnHolds.put(uid, {
+          start: 'settle', version, creditNoteId: row.creditNote?.id ?? null, attemptId: row.attemptId, storeId: store.id, tenantId: store.tenantId, invoiceId,
+          invoiceNumber: row.invoiceNumber, grossCents: row.grossCents, reason: row.reason, csrf, key, body,
+        });
+        if (put.kind !== 'held') return sayAside(put.kind === 'busy' ? CREDIT_TEXT.blockedOwn : CREDIT_TEXT.internalError); // nothing held, nothing sent
+      }
+      await runSettle(cnHolds.get(uid) as HeldCreditNote, csrf, version, me);
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+
+  /** "Look up attempt": the lookup from page one (a new lookup generation), then what it says about the held attempt. */
+  async function findCredit(): Promise<void> {
+    const h = cnHolds.get(uid);
+    if (h === undefined || waitRef.current || cnSending.current) return;
+    const mine = ++cnPress.current;
+    const me = takeCnBusy();
+    try {
+      await readCreditLookup(h.storeId, h.invoiceId, 'start');
+      if (cnPress.current === mine) cnFromLookup(h.attemptId); // a later press (Continue issuing, Check again) speaks for itself
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+  /**
+   * What the current lookup says about the held attempt, forward only (§3.3): a settled row ends it; an issued or open row
+   * moves its known state (its actions are the row's); read to the end without it: notListed once an issue was sent, else
+   * regUnknown — never "not issued". A failed or denied lookup decides nothing (its own text says so).
+   */
+  function cnFromLookup(attemptId: string): void {
+    const h = cnHolds.get(uid);
+    const s = creditRef.current;
+    if (h === undefined || h.attemptId !== attemptId || s === null || s.storeId !== h.storeId || s.invoiceId !== h.invoiceId || !creditCurrent(s)) return;
+    const l = s.lookup;
+    if (l === null || (l.phase !== 'exhausted' && l.phase !== 'incomplete')) return;
+    const row = l.rows.find((x) => x.attemptId === attemptId);
+    if (row === undefined) {
+      // Evidence (b) only from this hold itself: it registered, never claimed an issue key, and is below issuing; else notListed.
+      const noIssue = h.register !== null && h.issue === null && (h.state === 'registering' || h.state === 'registered');
+      if (l.phase === 'exhausted') say(attemptId, noIssue ? CREDIT_TEXT.regUnknown : CREDIT_TEXT.notListed, { alert: true, find: true });
+      return;
+    }
+    if (row.state === 'released' || row.state === 'confirmed') {
+      if (!cnHolds.change(uid, attemptId, h.generation, { state: row.state })) return say(attemptId, CREDIT_TEXT.internalError, { alert: true, find: true });
+      say(attemptId, row.state === 'released' ? CREDIT_TEXT.released : CREDIT_TEXT.confirmed);
+      rereadAmounts();
+      return;
+    }
+    if (row.state === 'issued' && row.creditNote !== null) {
+      // Issued: its row's Confirm finishes it — no Check again or continuation of an earlier stage any more (forward only).
+      if (!cnHolds.change(uid, attemptId, h.generation, { state: 'issued', creditNoteId: row.creditNote.id })) return say(attemptId, CREDIT_TEXT.internalError, { alert: true, find: true });
+      if (h.state !== 'issued') say(attemptId, CREDIT_TEXT.alreadyIssued, { alert: true, find: true });
+    } else if (row.state === 'open' && h.state === 'registering') cnHolds.change(uid, attemptId, h.generation, { state: 'registered' });
+  }
+
+  // ---- recovering a credit-note attempt (CN-P2 recovery side, doc 17 §3.1-§3.3, §3.6) ----
+
+  /** The review's reads after a Check again found the attempt registered (§3.2): amounts, the lookup and the list to its end (display only). */
+  function cnReview(h: HeldCreditNote): void {
+    rereadAmounts();
+    void readCreditLookup(h.storeId, h.invoiceId, 'start');
+    void readCreditList(h.storeId, h.invoiceId, 'first', null, true);
+  }
+  /**
+   * A Check again past its window or limit (§3.2 item 6, judged at the press and when the window passes): the hold's own
+   * gate refuses it and scrubs the passed bytes; the card says what is left — replayGone (issue), regUnknown (register),
+   * settleUnknown without Check again (settlement) — through the alert region.
+   */
+  function cnExpire(h: HeldCreditNote, stage: CreditNoteStage): void {
+    if (stage === 'proof' || !isLiveCreditNote(h) || h[stage] === null || h[stage]?.completion !== null) return;
+    const block = sendBlockOf(h, stage, true, clock(), wall());
+    // Refused at its window, a send records nothing and scrubs the passed bytes; bytes already gone passed it too.
+    if (block === 'window' && cnHolds.get(uid) === h) cnHolds.send(uid, h.attemptId, h.generation, stage, { replay: true, csrf: h.csrf ?? '', sessionEnds: sessionEndsSoFar() });
+    else if (block !== 'no-bytes') return; // in flight, cooling or never sent: not its window
+    shut(h.attemptId, stage);
+    if (stage === 'settle') return sayOffer(h.attemptId, 'settleUnknown', { alert: true, find: true });
+    say(h.attemptId, stage === 'issue' ? CREDIT_TEXT.replayGone : CREDIT_TEXT.regUnknown, { alert: true, find: true });
+  }
+
+  /**
+   * "Check again" (doc 17 §3.2): the card's stage once more under its held key and exact bytes (the proof: one more read),
+   * on a press only, only while the hold lets it leave — the window or limit judged here, at the press, whatever the timers
+   * did — and with the session read again first (another token detaches the hold, rule 1). A success never runs on into the
+   * next stage: a register 201 or a proof 200 stops at registeredOnly; the issue is "Continue issuing", a press of its own.
+   */
+  async function checkCredit(): Promise<void> {
+    const h = cnHolds.get(uid);
+    const s = cnSayRef.current?.attemptId === h?.attemptId ? cnSayRef.current : cnSayOf(h); // a remount's card says what its stage allows
+    if (h === undefined || s === null || s.attemptId !== h.attemptId || s.check === null || bareNow(s) || cnSending.current || waitRef.current) return;
+    const stage = s.check;
+    const a = h.attemptId;
+    const g = h.generation;
+    if (!checkLeaves(h, stage, clock(), wall())) return cnExpire(h, stage); // in flight or cooling: nothing (the button was not offered)
+    const me = takeCnBusy();
+    cnPress.current += 1; // a chain still out never runs on past this press (§2.6 item 3)
+    try {
+      const n = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar();
+      const csrf = await payConnect(stands);
+      if (csrf === null) return cnUnavailable(stands);
+      if (adopt(csrf) || csrf !== h.csrf) return; // another token detached it (rule 3): the card says what is left
+      if (bareNow(memoFor(a).bare)) return; // rule 4 under the token just read: nothing leaves
+      const now = cnHolds.get(uid);
+      if (now === undefined || now.attemptId !== a || now.generation !== g) return;
+      if (!checkLeaves(now, stage, clock(), wall())) return cnExpire(now, stage);
+      const back = (): void => giveCnBusy(me); // 30 s without an answer: the card says so again; the request runs on
+      if (stage === 'register') {
+        const reg = await cnSend(a, g, 'register', csrf, (t) => issuing.registerCreditNote(h.storeId, h.invoiceId, t.key, t.body, csrf),
+          () => { back(); say(a, CREDIT_TEXT.regUnknown, { alert: true, find: true, check: 'register' }); }, true);
+        if (reg === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true }); // the hold refused the send
+        const registered = await cnRegisterAnswer(h, csrf, reg.d, reg.r, await cnDenial(reg.r, csrf, a));
+        cnSignedOut(reg.r, csrf);
+        if (registered) { sayOffer(a, 'registeredOnly', { find: true, cont: 'continue' }); cnReview(h); }
+        return;
+      }
+      if (stage === 'proof') {
+        const proof = await cnSend(a, g, 'proof', csrf, (t) => issuing.creditNoteProof(h.storeId, h.invoiceId, t.body, a, csrf),
+          () => { back(); sayOffer(a, 'registeredOnly', { find: true, cont: 'continue', check: 'proof' }); }, true);
+        if (proof === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+        cnProofAnswer(a, proof.d, proof.r, await cnDenial(proof.r, csrf, a));
+        cnSignedOut(proof.r, csrf);
+        if (proof.d === 'open') cnReview(h);
+        return;
+      }
+      if (stage === 'issue') {
+        const issue = await cnSend(a, g, 'issue', csrf, (t) => issuing.issueCreditNote(h.storeId, h.invoiceId, t.key, t.body, csrf),
+          () => { back(); sayOffer(a, 'unresolved', { alert: true, find: true, check: 'issue' }); }, true);
+        if (issue === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+        await cnIssueAnswer(h, csrf, issue.d, issue.r, await cnDenial(issue.r, csrf, a));
+        cnSignedOut(issue.r, csrf);
+        return;
+      }
+      // The held settlement's own version: never a default (Confirm is version 2).
+      if (now.settle === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+      await runSettle(now, csrf, now.settle.version, me, true);
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+
+  /** D-P2-15 stated on the card: the notes outside the baseline (or every note read, when it can't compare), and "Issue another credit note". */
+  function cnAnother(a: string, g: number, v: { readonly ids: readonly string[]; readonly found: boolean; readonly complete: boolean }): void {
+    cnHolds.change(uid, a, g, { shown: { ids: v.ids, complete: v.complete } });
+    say(a, v.found ? CREDIT_TEXT.anotherNoteFound : CREDIT_TEXT.anotherNoteUnknown, {
+      alert: true, also: v.found && !v.complete ? CREDIT_TEXT.anotherNoteUnknown : '', find: true, cont: 'another', focusFind: true,
+    });
+  }
+  /**
+   * "Continue issuing" — or "Issue another credit note" once D-P2-15 stated other notes or an uncertainty (doc 17 §3.2):
+   * this press's review reads first (the session, the invoice, its payments, the lookup, the list to its end), then E1-E7
+   * in order; the first that fails says why, and nothing is registered, issued or settled (the reads may have gone out).
+   * Only a proof 200 answered in this press counts (E5); the sign-in window is judged again just before the send (E6); the
+   * ONE issue key is claimed by compare-and-set (E7). It never registers.
+   */
+  async function continueCredit(another: boolean): Promise<void> {
+    const h0 = cnHolds.get(uid);
+    const s0 = cnSayRef.current?.attemptId === h0?.attemptId ? cnSayRef.current : cnSayOf(h0);
+    if (h0 === undefined || s0 === null || s0.attemptId !== h0.attemptId || bareNow(s0) || s0.cont !== (another ? 'another' : 'continue') || cnSending.current || waitRef.current) return;
+    const a = h0.attemptId;
+    const g = h0.generation;
+    const { storeId: sid, invoiceId: iid } = h0;
+    const cont = another ? 'another' : 'continue';
+    const afterSignIn = (): void => say(a, CREDIT_TEXT.continueAfterSignIn, { alert: true, also: CREDIT_TEXT.registeredOnly(false), find: true });
+    const me = takeCnBusy();
+    const mine = ++cnPress.current;
+    try {
+      const n = gen.current.n;
+      const since = sessionEndsSoFar();
+      const stands = (): boolean => alive.current && n === gen.current.n && since === sessionEndsSoFar();
+      const csrf = await payConnect(stands);
+      if (csrf === null) return cnUnavailable(stands);
+      if (adopt(csrf) || csrf !== h0.csrf) return afterSignIn(); // E2: another token detached the hold
+      if (bareNow(memoFor(a).bare)) return; // rule 4 under the token just read: nothing leaves
+      // E3's reads, one at a time; the list read to its end into the current set (never the baseline).
+      const detail = await issuing.getIssued(sid, iid, csrf, new AbortController().signal);
+      const paid = await issuing.getPayments(sid, iid, null, csrf, new AbortController().signal);
+      await readCreditLookup(sid, iid, 'start');
+      await readCreditList(sid, iid, 'first', null, true);
+      rereadAmounts();
+      if (!alive.current || cnPress.current !== mine || bareNow(cnSayRef.current)) return; // a confirmed denial took the buttons (rule 4)
+      for (const read of [detail, paid]) {
+        if (read.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return afterSignIn(); }
+        if (read.kind === 'denied') {
+          const verdict = await creditDenial(csrf, () => false);
+          if (verdict === 'denied') return creditDenied('other', true, sid);
+          // Not checked (the session read failed): the access question stays open, so does the registration (SF-4).
+          return verdict === 'gone' ? afterSignIn() : sayOffer(a, 'registeredOnly', { find: true, cont });
+        }
+      }
+      const h = cnHolds.get(uid);
+      if (h === undefined || h.attemptId !== a) return;
+      if (h.csrf === null || gen.current.csrf !== h.csrf) return afterSignIn(); // E2 again: a token change while the reads were out
+      if (h.generation !== g) return;
+      const s = creditRef.current;
+      const here = s !== null && s.storeId === sid && s.invoiceId === iid && creditCurrent(s) ? s : null;
+      const lookup = here?.lookup ?? null;
+      const row = lookup?.rows.find((x) => x.attemptId === a);
+      // E1: this tab's registered attempt with no issue key; its own row open or not listed (issued, released, confirmed: that state).
+      if (row !== undefined && row.state !== 'open') return cnFromLookup(a);
+      if (h.state !== 'registered' || h.registrationId === null || h.issue !== null) { shut(a, 'proof'); return say(a, CREDIT_TEXT.cantContinue, { alert: true, find: true }); }
+      // E3: an issued invoice, the held amount within the remaining just read, the lookup to its end, no other unfinished row here.
+      if ((detail.kind === 'ok' && detail.invoice.status === 'voided') || (paid.kind === 'ok' && paid.page.invoice.status === 'voided')) return say(a, CREDIT_TEXT.voided, { alert: true, find: true });
+      if (detail.kind !== 'ok' || paid.kind !== 'ok') return sayOffer(a, 'registeredOnly', { find: true, cont }); // not read: decides nothing
+      if (h.grossCents > paid.page.amounts.remainingCents) return say(a, CREDIT_TEXT.overRemaining, { alert: true, find: true });
+      if (lookup === null || lookup.phase !== 'exhausted') return say(a, lookup?.phase === 'incomplete' ? CREDIT_TEXT.lookupIncomplete : CREDIT_TEXT.lookupFailed, { alert: true, find: true, cont });
+      if (lookup.rows.some((x) => x.attemptId !== a && (x.state === 'open' || x.state === 'issued'))) return say(a, CREDIT_TEXT.unfinished, { alert: true, find: true });
+      // E4 (D-P2-15): the list read now against the baseline frozen at the register's first send.
+      const list = here?.list ?? null;
+      const ids = list?.notes.map((x) => x.id) ?? [];
+      const base = h.baseline ?? { ids: [], complete: false };
+      const outside = ids.filter((id) => !base.ids.includes(id));
+      const covered = list !== null && list.phase === 'ready' && list.complete && base.ids.every((id) => ids.includes(id));
+      const verdict = base.complete && covered && outside.length === 0 ? null
+        : base.complete && outside.length > 0 ? { ids: outside, found: true, complete: covered } : { ids, found: false, complete: false };
+      // "Issue another credit note" accepts what the card stated: it stops only on an id it never showed, or on an uncertainty it never stated.
+      const shownIds = h.shown?.ids ?? [];
+      if (!another && verdict !== null) return cnAnother(a, g, verdict);
+      if (another && verdict !== null && (outside.some((id) => !shownIds.includes(id)) || (h.shown?.complete === true && !verdict.complete))) {
+        // What it stated, plus what it now sees: the notes it listed stay listed, the uncertainty is stated.
+        const ids = [...new Set([...shownIds, ...verdict.ids])];
+        return cnAnother(a, g, { ids, found: verdict.found || (base.complete && ids.length > 0), complete: verdict.complete });
+      }
+      // E5: a valid proof 200 answered in this press — the session read again just before it (§3.6 rule 1).
+      if (!(await cnSession(a, csrf, cont)) || !alive.current || cnPress.current !== mine) return;
+      const proof = await cnSend(a, g, 'proof', csrf, (t) => issuing.creditNoteProof(sid, iid, t.body, a, csrf),
+        () => { giveCnBusy(me); sayOffer(a, 'registeredOnly', { find: true, cont, check: 'proof' }); });
+      if (proof === null) return sayOffer(a, 'registeredOnly', { find: true, cont });
+      // An unmounted section has no current press (§2.6 item 3): the proof is recorded, the issue is never sent from here.
+      if (proof.d !== 'open' || proof.r.kind !== 'proof' || !proof.inTime || cnPress.current !== mine || !alive.current) {
+        cnProofAnswer(a, proof.d, proof.r, await cnDenial(proof.r, csrf, a));
+        return cnSignedOut(proof.r, csrf);
+      }
+      if (!(await cnSession(a, csrf, cont)) || !alive.current || cnPress.current !== mine) return; // and just before the issue
+      const ready = cnHolds.get(uid);
+      if (ready === undefined || ready.attemptId !== a || ready.generation !== g || ready.csrf !== csrf) return;
+      // E6: the sign-in window, judged again just before the send; a new sign-in cannot use this registration.
+      const lapsed = (): void => { shut(a, 'proof'); say(a, CREDIT_TEXT.continueLapsed, { alert: true, also: CREDIT_TEXT.registeredOnly(false), find: true }); };
+      if (!signInFresh(ready.signIn, clock(), wall())) return lapsed();
+      // E7: the ONE issue key, by compare-and-set, held with its exact bytes before the first send.
+      const body = creditNoteIssueBodyOf({ expectedTenant: ready.tenantId, registrationId: ready.registrationId as string, attemptId: a, grossCents: ready.grossCents, reason: ready.reason, registrationProof: proof.r.proof });
+      const claim = body === null ? 'gone' : cnHolds.claimIssueKey(uid, a, g, nextKey(), body);
+      if (claim === 'lapsed') return lapsed();
+      if (claim === 'taken') return; // another contender holds the one key: nothing is sent here (§2.6 item 2)
+      if (claim !== 'claimed') return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+      say(a, CREDIT_TEXT.sending);
+      const issue = await cnSend(a, g, 'issue', csrf, (t) => issuing.issueCreditNote(sid, iid, t.key, t.body, csrf),
+        () => { unsure(a, g); giveCnBusy(me); sayOffer(a, 'unresolved', { alert: true, find: true, check: 'issue' }); });
+      if (issue === null) return say(a, CREDIT_TEXT.internalError, { alert: true, find: true });
+      await cnIssueAnswer(ready, csrf, issue.d, issue.r, await cnDenial(issue.r, csrf, a));
+      cnSignedOut(issue.r, csrf);
+    } finally {
+      giveCnBusy(me);
+    }
+  }
+
+  /** The card's "Try again" for its number (§4.1): the follow again, from the failed page's cursor when the chain holds one. */
+  function retryNumber(): void {
+    const h = cnHolds.get(uid);
+    if (h === undefined || h.creditNoteId === null || waitRef.current || cnSending.current || bareNow(memoFor(h.attemptId).bare)) return; // a press still out holds it back
+    const s = creditRef.current;
+    const l = s !== null && s.storeId === h.storeId && s.invoiceId === h.invoiceId && creditCurrent(s) ? s.list : null;
+    const resume = l !== null && l.next !== null && l.target === h.creditNoteId && (l.phase === 'failed' || l.phase === 'ready');
+    void readCreditList(h.storeId, h.invoiceId, resume ? 'next' : 'first', h.creditNoteId).catch(cnThrew(h.attemptId));
+  }
+  /** "Hide this attempt" (D-P2-6 A): the card only — the hold, its generation and its blockers stay; its answers still count. */
+  function hideCredit(): void {
+    const h = cnHolds.get(uid);
+    if (h !== undefined) cnHolds.hide(uid, h.attemptId);
+  }
+  /**
+   * Rule 4 on the card: a confirmed same-token denial in the section — the attempt keeps its last known state, its listed
+   * notes go, and it offers nothing (noAccess; noAccessShort while no issue was ever sent).
+   */
+  function cnNoAccess(storeId?: string): void {
+    const h = cnHolds.get(uid);
+    // Every card of this user at the store whose denial was confirmed — attached, hidden or detached (P2-03; SEC-4).
+    if (!isOpenCreditNote(h) || (storeId !== undefined && h.storeId !== storeId) || bareNow(memoFor(h.attemptId).bare)) return;
+    const s = cnSayRef.current?.attemptId === h.attemptId ? cnSayRef.current : cnSayOf(h);
+    if (h.shown !== null) cnHolds.change(uid, h.attemptId, h.generation, { shown: null });
+    const was = s === null || s.attemptId !== h.attemptId ? '' : s.kind !== null ? CREDIT_TEXT[s.kind](false) : s.text; // its words without the buttons
+    say(h.attemptId, h.sends.some((x) => x.stage === 'issue') ? CREDIT_TEXT.noAccess : CREDIT_TEXT.noAccessShort, { alert: true, also: was, bare: true });
+  }
+
   /** A new generation: everything read under the previous token goes, and the stores are read again. */
   function begin(csrf: string): void {
     gen.current = { n: gen.current.n + 1, csrf };
+    cnDeniedAt.current = null; // a later denial records the token it is confirmed under (rule 4)
     judgeVoid(csrf);
     abortReads();
     clearWait();
     dropPanel();
     closeView();
     putList(LIST_IDLE);
+    dropActivity(); // doc 18 §4.5 rule 5: before any new request; read again once a store is chosen (begin clears it)
+    forgetListed(); // a new generation: its directory read lists afresh
     storeRef.current = '';
     setStoreIdState('');
     setChanged(true);
@@ -1247,7 +2648,7 @@ function IssuedSection({
   /** Take a confirmed token: the first fixes the generation, the same changes nothing, another starts a new one (true). */
   function adopt(csrf: string): boolean {
     if (gen.current.csrf === csrf) return false;
-    if (gen.current.csrf === null) { gen.current.csrf = csrf; judgeVoid(csrf); return false; }
+    if (gen.current.csrf === null) { gen.current.csrf = csrf; cnDeniedAt.current = null; judgeVoid(csrf); dropCredit(); dropActivity(); forgetListed(); return false; } // same number, another token (rule 2)
     begin(csrf);
     return true;
   }
@@ -1259,12 +2660,16 @@ function IssuedSection({
    */
   function renew(csrf: string): void {
     if (gen.current.csrf === csrf) return;
+    const listedUnder = `${gen.current.n}:${gen.current.csrf}`;
     gen.current = { n: gen.current.n + 1, csrf };
+    carryListed(listedUnder); // doc 18 §8.4: the picker stays and is not re-read, so what it listed stays "listed before"
+    cnDeniedAt.current = null; // a later denial records the token it is confirmed under (rule 4)
     judgeVoid(csrf);
     abortReads();
     // What was read under the old token goes (DESIGN §2): the open invoice, and the list's pages and cursor — the store stays
     // chosen and the list says so, with Try again (page one under this token). Nothing is read on its own.
     closeView();
+    activityContextChanged(); // doc 18 §4.5 rule 5: renew moves the generation without begin
     const l = listRef.current;
     if (l.storeId !== '') putList({ ...listOf(gen.current.n, l.storeId), phase: 'unavailable', text: LIST_TEXT.renewed });
   }
@@ -1275,16 +2680,25 @@ function IssuedSection({
    */
   function renewKeepingView(csrf: string): void {
     if (gen.current.csrf === csrf) return;
+    const listedUnder = `${gen.current.n}:${gen.current.csrf}`;
     gen.current = { n: gen.current.n + 1, csrf };
+    carryListed(listedUnder); // doc 18 §8.4: the picker stays and is not re-read, so what it listed stays "listed before"
+    cnDeniedAt.current = null; // a later denial records the token it is confirmed under (rule 4)
     judgeVoid(csrf);
     abortReads();
+    // The kept dialog's credit notes and lookup were read under the old token: dropped, then read again from page one (rule 3).
+    const v = viewRef.current;
+    const was = creditRef.current;
+    dropCredit();
+    if (v !== null && was !== null && was.storeId === v.storeId && was.invoiceId === v.invoiceId) startCredit(v.storeId, v.invoiceId);
+    activityContextChanged(); // doc 18 §4.5 rule 5, as renew
     const l = listRef.current;
     if (l.storeId !== '') putList({ ...listOf(gen.current.n, l.storeId), phase: 'unavailable', text: LIST_TEXT.renewed });
   }
 
   /** A refusal of the session clears every view (Reconnect then). */
   function failSession(failure: Failure): void {
-    if (failure.kind === 'signed-out') { holds.detach(uid); detachPay(); detachRev(); } // design R12: a sent void can never be checked again under a later session
+    if (failure.kind === 'signed-out') { holds.detach(uid); detachPay(); detachRev(); cnHolds.detach(uid); } // design R12: a sent void can never be checked again under a later session
     abortReads();
     setChanged(false);
     putStores({ phase: failure.kind, text: failure.text, stores: [] });
@@ -1292,8 +2706,10 @@ function IssuedSection({
     setStoreIdState('');
     closeView();
     putList(LIST_IDLE);
+    dropActivity(); // doc 18 (B0): every row of the activity goes with the store choice
+    forgetListed();
     dropPanel();
-    if (failure.kind === 'signed-out') gen.current = { n: gen.current.n, csrf: null }; // the Reconnect's token is a FIRST token
+    if (failure.kind === 'signed-out') { gen.current = { n: gen.current.n, csrf: null }; cnDeniedAt.current = null; } // the Reconnect's token is a FIRST token
   }
 
   /** After a read refused 403: ONE fresh check tells "another session" (a new generation) from a refusal that stands. */
@@ -1305,7 +2721,16 @@ function IssuedSection({
     return null;
   }
   /** A 403's verdict after that one check: 'denied' only when it confirmed the same session; null when the caller's context is gone. */
-  async function denialOf(stale: () => boolean): Promise<'denied' | Failure | null> {
+  function denialOf(stale: () => boolean): Promise<'denied' | Failure | null> {
+    const token = gen.current.csrf;
+    const store = storeRef.current; // the refused read's store, taken when it is refused (N2), not when the check ends
+    return cnChecking(token, denialOfRun(stale).then((v) => {
+      // Rule 4 for the cards, once (cnNoAccess is idempotent; a caller's own creditDenied then changes no card again).
+      if (v === 'denied' && token !== null && token === gen.current.csrf) { cnDeniedAt.current = token; cnDenials.current += 1; cnNoAccess(store === '' ? undefined : store); }
+      return v;
+    }));
+  }
+  async function denialOfRun(stale: () => boolean): Promise<'denied' | Failure | null> {
     const n = gen.current.n;
     const since = sessionEndsSoFar();
     const again = await recheck();
@@ -1354,7 +2779,10 @@ function IssuedSection({
       if (adopt(s.csrf)) return; // a new generation has started its own read
       const answer = await drafts.listStores(s.csrf, controller.signal);
       if (stale()) return;
-      if (answer.kind === 'ok') return putStores({ phase: 'ready', text: answer.stores.length === 0 ? ISSUED_TEXT.noStores : '', stores: answer.stores });
+      if (answer.kind === 'ok') {
+        noteListed(answer.stores);
+        return putStores({ phase: 'ready', text: answer.stores.length === 0 ? ISSUED_TEXT.noStores : '', stores: answer.stores });
+      }
       if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
       if (answer.kind === 'denied') {
         const verdict = await denialOf(stale);
@@ -1383,6 +2811,7 @@ function IssuedSection({
     // A store switch disables a payment attempt's replay for good, even back to its own store (owner decision, spec §7).
     if (payHolds.get(uid)?.storeId !== id) detachPay();
     if (revHolds.get(uid)?.storeId !== id) detachRev(); // the same rule for a reversal attempt (P2C)
+    if (cnHolds.get(uid)?.storeId !== id) cnHolds.detach(uid); // and a credit-note attempt (doc 17 §3.6)
     closeView();
     // The previous store's pages go (a read still out for it is cancelled; its late page finds another store).
     ctl.current.list?.abort();
@@ -1392,12 +2821,179 @@ function IssuedSection({
     storeRef.current = id;
     setStoreIdState(id);
     putList(listOf(gen.current.n, id));
+    dropActivity(); // the previous store's activity goes (a late page finds another store)
     if (id === '') return;
     setChanged(false);
     // Choosing the store is the explicit action that reads its first page; during a wait nothing is read: the wait is said,
     // with Try again (given back once it has passed).
-    if (waitRef.current) return putList({ ...listOf(gen.current.n, id), phase: 'rate-limited', text: pickerWaitText(waitLeft()) });
-    void readList('first');
+    if (waitRef.current) putList({ ...listOf(gen.current.n, id), phase: 'rate-limited', text: pickerWaitText(waitLeft()) });
+    else void readList('first');
+    void readActivity('first'); // doc 18 §4.1: its own read, sequence and wait (a wait sends nothing and says so)
+  }
+
+  // ---- the store-wide credit activity (doc 18 §4, §8.4) ----
+
+  const putActivity = (next: ActivityState | null): void => { activityRef.current = next; setActivityState(next); };
+  /** A fresh state of `storeId` under this generation and token. */
+  const activityOf = (storeId: string, phase: ActivityState['phase'], o: Partial<Pick<ActivityState, 'via' | 'reloaded' | 'tenantId'>> = {}): ActivityState =>
+    Object.freeze({
+      n: gen.current.n, csrf: gen.current.csrf, storeId, phase, rows: [], next: null, complete: false, more: false, said: '', via: o.via ?? null, reloaded: o.reloaded ?? false,
+      tenantId: o.tenantId ?? null,
+    });
+  /** The chosen store's tenant as the section's directory lists it now (null: not listed). */
+  const tenantNow = (storeId: string): string | null => storesRef.current.stores.find((s) => s.id === storeId)?.tenantId ?? null;
+  /** Whether a state still belongs to the generation AND the token this section holds now (§4.5 rule 4). */
+  const activityCurrent = (a: ActivityState): boolean => a.n === gen.current.n && a.csrf === gen.current.csrf;
+  /** Every activity row and cursor goes now, and every request of this sub-section out is stale (§4.5 rule 5). */
+  function dropActivity(): void {
+    activityCtl.current?.abort();
+    activitySeq.current += 1;
+    if (activityRef.current !== null) putActivity(null);
+  }
+  /** (A) and (U): this view's rows, cursor, names and request chain go and the sub-section is hidden; nothing else changes. */
+  function hideActivity(storeId: string): void {
+    // Focus inside the sub-section goes to the section's heading before the sub-section goes (doc 18 §4.1: hidden, no text).
+    if (document.querySelector('[data-testid="issued-credit-activity"]')?.contains(document.activeElement) === true) heading.current?.focus();
+    dropActivity();
+    putActivity(activityOf(storeId, 'hidden'));
+  }
+  /** The stores this tab's directory listed under this generation and token (§8.4 "previously listed"). */
+  function forgetListed(): void { listed.current = { key: '', stores: new Map() }; }
+  /** `renew` / `renewKeepingView`: the listing made under the generation and token just replaced carries over to the new one. */
+  function carryListed(was: string): void {
+    if (listed.current.key === was) listed.current = { key: `${gen.current.n}:${gen.current.csrf}`, stores: listed.current.stores };
+  }
+  function noteListed(stores: readonly StoreEntry[]): void {
+    const key = `${gen.current.n}:${gen.current.csrf}`;
+    if (listed.current.key !== key) listed.current = { key, stores: new Map() };
+    for (const s of stores) listed.current.stores.set(s.id, s.tenantId);
+  }
+  /**
+   * `renew` / `renewKeepingView` (and a page of an older generation): every row dropped, then page one once, whatever the
+   * view showed — a view an (A) or (U) 403 hid included, since the generation moved (§4.1, §4.3 "Context change"); a
+   * read-only store still sends nothing and a running wait is honoured first (readActivity). A second mismatch while a
+   * reload is still out shows the error (D17:571).
+   */
+  function activityContextChanged(): void {
+    const a = activityRef.current;
+    const target = storeRef.current;
+    dropActivity();
+    if (target === '') return;
+    if (a !== null && a.storeId === target && a.reloaded) return putActivity(activityOf(target, 'failed'));
+    void readActivity('first', { reloaded: true });
+  }
+  /** CA-44: this tab's own issue (201) or Confirm (200) at `storeId` re-reads page one of a loaded view there, once. */
+  function activityAfterOwnWrite(storeId: string): void {
+    const a = activityRef.current;
+    if (a !== null && a.storeId === storeId && storeRef.current === storeId && activityCurrent(a) && (a.phase === 'ready' || a.phase === 'loading')) void readActivity('first');
+  }
+
+  /**
+   * One page of the chosen store's credit activity on the readList skeleton (§4.5): `connect()` first, the generation and
+   * token captured before the send, this sub-section's own sequence and abort; an answer applies only while the generation,
+   * token, sequence, store and sign-out count all stand. 'first' starts a new traversal at page one that REPLACES the
+   * loaded chain (store choice, Refresh, Try again, a context change, an own write); 'more' appends the page after the
+   * chain's cursor, as served (§6.3). Nothing is sent during a wait, for a store the directory marks read-only, or for a
+   * view a 403 hid under this generation. Any failure shows the error with no rows; a 403 is classified (§8.4).
+   */
+  async function readActivity(mode: 'first' | 'more', o: { readonly via?: 'refresh' | 'retry'; readonly reloaded?: boolean } = {}): Promise<void> {
+    if (!creditActivity) return;
+    const target = storeRef.current;
+    const was = activityRef.current;
+    const entry = storesRef.current.stores.find((s) => s.id === target);
+    if (target === '' || entry === undefined || entry.readOnly) return dropActivity(); // §4.1: no request certain to be refused
+    if (was !== null && was.storeId === target && was.phase === 'hidden' && activityCurrent(was)) return; // after (A): never again here
+    if (mode === 'more') {
+      if (was === null || was.storeId !== target || was.phase !== 'ready' || was.next === null || was.more) return;
+      if (!activityCurrent(was)) return activityContextChanged(); // never a cursor across a context change
+      if (was.tenantId === null || was.tenantId !== entry.tenantId) { // §4.4: another tenant's page never joins this traversal
+        dropActivity();
+        return putActivity({ ...activityOf(target, 'failed'), reloaded: was.reloaded });
+      }
+    }
+    if (waitRef.current) {
+      if (mode === 'first') { dropActivity(); putActivity(activityOf(target, 'rate-limited', o)); } // a Show more still out lands nowhere
+      return; // nothing of this sub-section is sent during a wait
+    }
+    const mine = { n: gen.current.n, csrf: gen.current.csrf };
+    const k = ++activitySeq.current;
+    activityCtl.current?.abort();
+    const controller = new AbortController();
+    activityCtl.current = controller;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || controller.signal.aborted || k !== activitySeq.current || mine.n !== gen.current.n
+      || mine.csrf !== gen.current.csrf || target !== storeRef.current || since !== sessionEndsSoFar();
+    const base: ActivityState = mode === 'more' && was !== null ? { ...was, more: true, said: '' } : activityOf(target, 'loading', { ...o, tenantId: entry.tenantId });
+    putActivity(base);
+    const fail = (phase: 'failed' | 'rate-limited' = 'failed'): void => { if (!stale()) putActivity({ ...activityOf(target, phase), reloaded: base.reloaded }); };
+    const s = await connect();
+    if (stale()) return;
+    if (s.kind !== 'ok') {
+      const failure = sessionFailure(s);
+      if (failure.kind === 'signed-out') return failSession(failure);
+      if (failure.seconds !== undefined) { startWait(failure.seconds); return fail('rate-limited'); }
+      return fail();
+    }
+    if (adopt(s.csrf) || stale()) return; // another token: a new generation dropped this view
+    const answer = await issuing.storeCreditActivity(target, mode === 'more' ? base.next : null, s.csrf, controller.signal);
+    if (stale()) return;
+    if (answer.kind === 'ok') {
+      const page = answer.page;
+      // Across pages (§4.4): ids new and numbers strictly descending; the page's cursor is its own last id, so a repeated
+      // cursor fails here too. User, token and store are the traversal's by `stale`; the tenant bound at page one must
+      // still be the store's in the directory.
+      if (tenantNow(target) !== base.tenantId) return fail();
+      if (mode === 'more' && !storeCreditActivityFollows(base.rows, page)) return fail();
+      const rows = mode === 'more' ? [...base.rows, ...page.creditNotes] : page.creditNotes;
+      return putActivity({
+        ...base, phase: 'ready', rows, next: page.nextCursor, complete: page.nextCursor === null, more: false, reloaded: false, // one load ends here (D17:571)
+        said: mode === 'more' ? CREDIT_TEXT.moreLoaded(page.creditNotes.length) : '',
+      });
+    }
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); // (B0)
+    // A pending fresh check, as every same-token 403 check of the section: a credit-note press under this token waits for it.
+    if (answer.kind === 'denied') return cnChecking(s.csrf, classifyActivityDenial(target, s.csrf, mine.n, since));
+    if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return fail('rate-limited'); }
+    return fail(); // 404 (the route absent: never Empty, no retry), a cursor 400, malformed, an outage
+  }
+
+  /**
+   * §8.4: a 403 of this read is classified by NEW code — never `denialOf` or `readStores`, which apply D17 rule 4 to the
+   * cards and empty the picker. `recheck()` first: signed out → (B0) `failSession`; another token → (B1) its adopt/`begin`
+   * already dropped this view and the chosen store (the answer dropped silently); a failed check → (U). The same token →
+   * `drafts.listStores` read directly under this sub-section's next request number (the picker is not changed): a store
+   * listed before under this generation and token and now gone, or under another tenant → (B2) D17 rule 4's second bullet
+   * exactly as a shipped read's confirmed denial applies it, plus this view; never listed, or still listed under the same
+   * tenant → (A) this view only. A failed directory read → (U); its 401 → (B0).
+   */
+  async function classifyActivityDenial(target: string, carried: string, n: number, since: number): Promise<void> {
+    const k = activitySeq.current; // the refused read's number
+    const again = await recheck();
+    if (!alive.current || since !== sessionEndsSoFar()) return; // a sign-out began meanwhile: its own path cleared the views
+    if (again?.kind === 'signed-out') return failSession(again); // (B0)
+    if (n !== gen.current.n || carried !== gen.current.csrf) return; // (B1): begin cleared this view and the chosen store
+    if (again !== null && again.seconds !== undefined) startWait(again.seconds); // (U)'s wait applies whoever still asks
+    if (k !== activitySeq.current || target !== storeRef.current) return; // a newer request of this sub-section, or another store
+    if (again !== null || waitRef.current) return hideActivity(target); // (U): unverified, no cascade
+    const d = ++activitySeq.current;
+    activityCtl.current?.abort();
+    const controller = new AbortController();
+    activityCtl.current = controller;
+    const stale = (): boolean => !alive.current || controller.signal.aborted || d !== activitySeq.current || n !== gen.current.n
+      || carried !== gen.current.csrf || target !== storeRef.current || since !== sessionEndsSoFar();
+    const answer = await drafts.listStores(carried, controller.signal);
+    if (stale()) return;
+    if (answer.kind === 'signed-out') return failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); // (B0)
+    if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+    if (answer.kind !== 'ok') return hideActivity(target); // (U): 403, 429, outage, unreadable
+    const before = listed.current.key === `${n}:${carried}` ? listed.current.stores.get(target) : undefined;
+    const now = answer.stores.find((s) => s.id === target);
+    hideActivity(target); // every outcome below hides this view; nothing more is asked for this store in this generation
+    if (before === undefined || (now !== undefined && now.tenantId === before)) return; // (A): cause not established
+    // (B2) verified store loss with the same token: the section's rule-4 clearing for that store, as a shipped read's
+    // confirmed same-token denial applies it (denialOf's bookkeeping, then creditDenied) — no token adoption.
+    cnDenials.current += 1; // creditDenied records cnDeniedAt from the token it is given
+    creditDenied('other', true, target, carried);
   }
 
   // ---- the issued list ----
@@ -1477,6 +3073,7 @@ function IssuedSection({
         putList({ ...listOf(mine, target), phase: 'loading', text: LIST_TEXT.loading });
         const verdict = await denialOf(stale);
         if (verdict === null) return;
+        if (verdict === 'denied') creditDenied('other', true, target, gen.current.csrf); // a confirmed same-token denial: owner-only names and lookup rows go (doc 17 §3.6 rule 4)
         if (verdict === 'denied') return putList({ ...listOf(mine, target), phase: 'denied', text: LIST_TEXT.denied });
         return fail(verdict.kind === 'rate-limited' ? 'rate-limited' : 'unavailable', verdict.kind === 'rate-limited' ? verdict.text : LIST_TEXT.unavailable);
       }
@@ -1525,6 +3122,7 @@ function IssuedSection({
     if (answer.kind === 'denied') {
       const verdict = await viewDenialOf(viewId, stale);
       if (verdict === null) return null;
+      if (verdict === 'denied') creditDenied('other', true, storeId, gen.current.csrf); // doc 17 §3.6 rule 4
       return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
     }
     if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
@@ -1557,6 +3155,7 @@ function IssuedSection({
     if (answer.kind === 'denied') {
       const verdict = await viewDenialOf(viewId, stale);
       if (verdict === null) return null;
+      if (verdict === 'denied') creditDenied('other', true, storeId, gen.current.csrf); // doc 17 §3.6 rule 4
       return verdict === 'denied' ? { kind: 'denied' } : verdict.kind === 'rate-limited' ? { kind: 'rate-limited', text: verdict.text } : { kind: 'unavailable' };
     }
     if (answer.kind === 'rate-limited') return { kind: 'rate-limited', text: pickerWaitText(startWait(answer.retryAfterSeconds)) };
@@ -1679,6 +3278,7 @@ function IssuedSection({
     // The check's verdict counts whether or not the dialog is still there (a closed confirmation's card says it, iam 3).
     if (first && answer.kind === 'denied' && same()) verdict = await denialOf(() => false);
     if (verdict === 'denied' && alive.current) setVoidDenied(key);
+    if (verdict === 'denied' && same()) creditDenied('other', true, before?.storeId, sent.csrf); // rule 4, only under the token the void carried (rule 1)
     settleVoid(holds, uid, key, answer, first, { csrf: sent.csrf, since: sent.since }, view?.open() ?? false);
     const h = holds.get(uid);
     if (answer.kind === 'rate-limited' && same()) startWait(answer.retryAfterSeconds);
@@ -1809,6 +3409,7 @@ function IssuedSection({
       if (answer.kind === 'denied') {
         const verdict = await denialOf(stale);
         if (verdict === null) return;
+        if (verdict === 'denied') creditDenied('other', true, h.storeId, gen.current.csrf); // rule 4: a confirmed same-token denial in the section
         return say(verdict === 'denied' ? VOID_TEXT.checkDenied : verdict.kind === 'rate-limited' ? verdict.text : VOID_TEXT.checkFailed);
       }
       if (answer.kind === 'rate-limited') return say(pickerWaitText(startWait(answer.retryAfterSeconds)));
@@ -1864,6 +3465,7 @@ function IssuedSection({
       return releaseSignIn(t, { kind: 'failed', text: failure.seconds !== undefined ? `Not signed in: ${pickerWaitText(startWait(failure.seconds))}` : VOID_TEXT.reauthUnconfirmed });
     }
     renewKeepingView(renewed.csrf);
+    stampSignIn(renewed.csrf);
     releaseSignIn(t, { kind: 'renewed', gen: gen.current.n });
   }
   /** End the wait for `t` with its one answer — only while `t` owns it: a released or older attempt never touches a newer one's. */
@@ -2159,6 +3761,7 @@ function IssuedSection({
     if (answer.kind === 'denied') {
       const verdict = await denialOf(stale);
       if (verdict === null) return recover();
+      if (verdict === 'denied') creditDenied('other', true, target, gen.current.csrf); // rule 4
       return verdict === 'denied' ? fail('denied', SETTINGS_TEXT.denied) : fail(verdict.kind === 'rate-limited' ? 'rate-limited' : 'unavailable', verdict.text);
     }
     if (answer.kind === 'not-found') return fail('not-found', SETTINGS_TEXT.notFound);
@@ -2301,6 +3904,7 @@ function IssuedSection({
       // The reads' one fresh check first: another token is a new generation (the panel's drop says the save stands).
       const verdict = await denialOf(stale);
       if (verdict === null) return;
+      if (verdict === 'denied') creditDenied('other', true, target, gen.current.csrf); // rule 4
     }
     if (answer.kind !== 'ok') return unread();
     const read = answer.settings;
@@ -2385,6 +3989,7 @@ function IssuedSection({
         return retry(failure.seconds !== undefined ? SETTINGS_TEXT.rateLimited(pickerWaitText(startWait(failure.seconds))) : SETTINGS_TEXT.reauthUnconfirmed);
       }
       renew(renewed.csrf);
+      stampSignIn(renewed.csrf);
       // Save waits until the settings are read under the renewed session (a failed read keeps it waiting).
       patchPanel(id, { stepUp: null, needsRead: true, status: { tone: 'info', text: SETTINGS_TEXT.renewing } });
       saveButton.current?.focus(); // the sign-in group goes; Save is what the user presses next
@@ -2485,9 +4090,29 @@ function IssuedSection({
       if (voidCoolTimer.current !== null) clearTimeout(voidCoolTimer.current);
       if (payCoolTimer.current !== null) clearTimeout(payCoolTimer.current);
       lookupCtl.current?.abort();
+      creditCtl.current.list?.abort();
+      creditCtl.current.lookup?.abort();
+      activityCtl.current?.abort();
+      for (const timer of cnTimers.current) clearTimeout(timer);
       dropSignIn(null); // its deadline goes; a late answer finds no owner (and `alive` already false: no state is set)
     };
     // A section serves one UID (see ServerIssuedInvoices); the clients are fixed for its life.
+  }, []);
+  // The credit-note reads as the issue side calls them, over this render's functions (they read refs and fixed clients only).
+  const creditLatest = useRef({ readCreditList, readCreditLookup, dropCredit });
+  creditLatest.current = { readCreditList, readCreditLookup, dropCredit };
+  useEffect(() => {
+    if (creditReads === undefined) return undefined;
+    creditReads(Object.freeze({
+      refresh: (storeId: string, invoiceId: string, target: string | null) => { void creditLatest.current.readCreditList(storeId, invoiceId, 'first', target); },
+      lookup: (storeId: string, invoiceId: string) => { void creditLatest.current.readCreditLookup(storeId, invoiceId, 'start'); },
+      numberOf: (storeId: string, invoiceId: string, id: string) => {
+        const s = creditRef.current;
+        return s !== null && s.storeId === storeId && s.invoiceId === invoiceId && creditCurrent(s) ? s.list?.notes.find((note) => note.id === id)?.number ?? null : null;
+      },
+      drop: () => creditLatest.current.dropCredit(),
+    }));
+    return () => creditReads(null);
   }, []);
 
   const waiting = wait !== null;
@@ -2545,7 +4170,178 @@ function IssuedSection({
     signIn: (secret) => signInForVoid(v.id, secret),
     stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
   });
+  /** The Issued section's credit-note reads for the dialog it opened: only this invoice's slice, under this generation and token. */
+  const creditingOf = (v: ViewOpen): IssuedCreditCapability => {
+    const s = credit !== null && credit.storeId === v.storeId && credit.invoiceId === v.invoiceId && creditCurrent(credit) ? credit : null;
+    const ownRow = s?.lookup?.rows.some((x) => x.state === 'open' || x.state === 'issued') === true; // a nonterminal row of this owner here
+    return {
+      list: s?.list ?? null, lookup: s?.lookup ?? null, owner: s?.lookup?.owner === true, gateOpen: s?.lookup?.phase === 'exhausted',
+      start: () => startCredit(v.storeId, v.invoiceId),
+      showMore: () => { if (!waitRef.current) void readCreditList(v.storeId, v.invoiceId, 'next', null); },
+      retryList: () => {
+        const l = creditRef.current?.list;
+        if (!waitRef.current) void readCreditList(v.storeId, v.invoiceId, l?.phase === 'failed' && l.next !== null ? 'next' : 'first', null); // a transient failure resumes from its page
+      },
+      retryLookup: () => { if (!waitRef.current) void readCreditLookup(v.storeId, v.invoiceId, 'start'); },
+      continueChecking: () => { if (!waitRef.current) void readCreditLookup(v.storeId, v.invoiceId, 'continue'); },
+      held: cnHereOf(v) ? cnHeld : undefined,
+      say: cnHereOf(v) ? cnSayOf(cnHeld) : null,
+      card: cnHereOf(v) && cnHeld !== undefined && cnSayOf(cnHeld) !== null ? cnCardOf(cnHeld, cnSayOf(cnHeld) as CreditSay) : null,
+      focusFind: cnFocusFind,
+      check: () => { void checkCredit().catch(cnThrew(pressed())); },
+      proceed: (another) => { void continueCredit(another).catch(cnThrew(pressed())); },
+      hide: hideCredit,
+      retryNumber,
+      // While a view dialog is open the section is inert: its pair says every credit-note write, whatever invoice the hold is on.
+      live: cnLive,
+      hidesHere: ownRow || (cnHereOf(v) && isOpenCreditNote(cnHeld)),
+      hidesSignIns: cnHoldsSignIns,
+      blocked: ownRow || isOpenCreditNote(cnHeld) ? 'own' : siblingOpen(v) ? 'sibling' : null,
+      busy: cnBusy,
+      openAttempt: isOpenCreditNote(cnHeld) ? cnHeld.attemptId : null,
+      // Only the pair of the hold's own invoice speaks its writes (another invoice's dialog shows none of them).
+      spoken: (region, n) => { spokenInline.current = { ...spokenInline.current, [region]: Math.max(spokenInline.current[region], n) }; },
+      number: cnHereOf(v) && cnHeld?.creditNoteId != null ? s?.list?.notes.find((x) => x.id === cnHeld.creditNoteId)?.number ?? null : null,
+      rereads: cnHereOf(v) ? cnRereads : 0,
+      generation: () => gen.current.n,
+      reauthMethod: () => identity.reauthMethod(uid),
+      lastSignIn,
+      freshSignIn,
+      lookupNow: async () => {
+        await readCreditLookup(v.storeId, v.invoiceId, 'start');
+        const x = creditRef.current;
+        return x !== null && x.storeId === v.storeId && x.invoiceId === v.invoiceId && creditCurrent(x) ? x.lookup : null;
+      },
+      listNow: () => { void readCreditList(v.storeId, v.invoiceId, 'first', null, true); }, // the D-P2-15 baseline: to nextCursor null
+      ...(v.store === null ? {} : { issue: (press: CreditPress) => issueCredit(v.id, v.store as StoreEntry, press) }),
+      confirm: () => { void confirmCredit().catch(cnThrew(pressed())); },
+      find: () => { void findCredit().catch(cnThrew(pressed())); },
+      settleRow: (row, version) => { if (v.store !== null) void settleCreditRow(v.store, v.invoiceId, row, version).catch(cnThrew(row.attemptId)); },
+      closedInFlight: () => { if (alive.current) setCnLive({ status: CREDIT_TEXT.closedInFlight, alert: '' }); },
+      signIn: (secret) => signInForVoid(v.id, secret),
+      stopSignIn: () => dropSignIn(null, v.id),
+    };
+  };
+  /** A payment, reversal or void attempt that holds "Issue credit note" back (§2.3): unresolved on this invoice, or attached anywhere. */
+  const siblingOpen = (v: ViewOpen): boolean => {
+    const here = (x: { readonly storeId: string; readonly invoiceId: string; readonly csrf: string | null }): boolean => x.csrf !== null || (x.storeId === v.storeId && x.invoiceId === v.invoiceId);
+    const out = (state: string): boolean => state === 'sending' || state === 'checking' || state === 'unresolved';
+    return (payHeld !== undefined && isOpenPayment(payHeld) && here(payHeld)) || (revHeld !== undefined && out(revHeld.state) && here(revHeld))
+      || (voidHeld !== undefined && out(voidHeld.state) && here(voidHeld));
+  };
+  const cnHereOf = (v: { readonly storeId: string; readonly invoiceId: string }): boolean => cnHeld !== undefined && cnHeld.storeId === v.storeId && cnHeld.invoiceId === v.invoiceId;
+  /**
+   * What the card says for `h`: its last line, or — for an open attempt this section has said nothing about yet (a remount, the
+   * same user back) — its known state's line with Look up attempt only.
+   */
+  const cnSayOf = (h: HeldCreditNote | undefined): CreditSay | null => {
+    if (h === undefined) return null;
+    if (cnSay !== null && cnSay.attemptId === h.attemptId) return cnSay;
+    const memo = memoFor(h.attemptId); // said before this section mounted (or while it was away)
+    if (bareNow(memo.bare)) return memo.bare; // rule 4 still holds under that token
+    if (!isOpenCreditNote(h)) return null;
+    // Its last line only when that line backs an offer (a stated refusal with Look up, a Check again, a continuation); a line
+    // said while a stage was out ("sending") offers nothing, so the state's own line is derived instead (§2.6 item 5).
+    const last = memo.last;
+    if (last !== null && (last.find || last.check !== null || last.cont !== null)) return last;
+    const kind = h.state === 'registered' ? 'registeredOnly' : h.state === 'issuing' ? 'unresolved' : h.state === 'issued' && h.settle !== null ? 'settleUnknown' : null;
+    const text = h.state === 'registering' ? CREDIT_TEXT.regUnknown : h.state === 'issued' ? CREDIT_TEXT.issued(formatCents(h.grossCents), INVOICE_CREDIT_NOTE_REASONS[h.reason]) : '';
+    // Back after the section was away (the hold kept its bytes): what the stage still allows — cnCardOf judges it now.
+    const check = h.state === 'registering' ? 'register' : h.state === 'issuing' ? 'issue' : kind === 'settleUnknown' ? 'settle' : null;
+    const own = h.state === 'issued' && kind === null && h.issue?.completion?.kind === 'issued'; // its own 201: Confirm (§2.6 item 6)
+    return { attemptId: h.attemptId, text, alert: false, also: '', find: !own, bare: false, bareAt: null, check, cont: h.state === 'registered' ? 'continue' : null, kind };
+  };
+  /** What the held attempt's card shows and offers now (doc 17 §3.1-§3.3; §3.2 for Check again and continuation; §3.6 rules 3-4). */
+  function cnCardOf(h: HeldCreditNote, s: CreditSay): CreditCardView {
+    const mono = clock();
+    const now = wall();
+    const attached = h.csrf !== null;
+    const bare = bareNow(s); // rule 4, until a later known session change (then a detached card offers Look up and Hide)
+    const open = isOpenCreditNote(h);
+    const ownIssue = h.issue?.completion?.kind === 'issued' && h.creditNoteId !== null;
+    const settling = h.settle !== null && h.settle.completion === null && h.settle.body !== '';
+    const confirm = !bare && !s.find && attached && ownIssue && h.state === 'issued' && !settling; // a line that sends to Look up (internalError) backs no Confirm
+    const check = !bare && attached && s.check !== null && !shutHas(h.attemptId, s.check) && checkLeaves(h, s.check, mono, now) ? s.check : null;
+    const cont = !bare && attached && s.cont !== null && !shutHas(h.attemptId, 'proof') && continueLeaves(h, mono, now) ? s.cont : null;
+    // Look up attempt only in the attempt's own store and tenant, signed in — a detached card's too (§3.2).
+    const fits = !signedOut && storeId === h.storeId && stores.stores.some((x) => x.id === h.storeId && x.tenantId === h.tenantId);
+    const find = !bare && open && fits && (!attached || (s.find && !confirm));
+    // Another session cannot continue a registration (§3.2): a detached registered card says so.
+    const lapsed = !bare && !attached && open && h.state === 'registered';
+    const text = lapsed ? CREDIT_TEXT.continueAfterSignIn
+      : s.kind === 'registeredOnly' ? CREDIT_TEXT.registeredOnly(cont === 'continue') : s.kind === 'unresolved' ? CREDIT_TEXT.unresolved(check !== null)
+        : s.kind === 'settleUnknown' ? CREDIT_TEXT.settleUnknown(check !== null) : s.text;
+    const deadline = check === 'settle' ? (h.settle?.firstWall ?? now) + CREDIT_NOTE_SETTLE_REPLAY_MS : (h.signIn?.wall ?? now) + CREDIT_NOTE_REPLAY_MS;
+    // Left unresolved (D-P2-6): its register or issue neither stored nor refused before the key, a settlement sent and not
+    // stored, or a registration a lost reply left behind.
+    const undecided = (b: HeldCreditNote['register']): boolean => b !== null && b.completion === null && !b.unstored;
+    const settleOut = h.settle !== null && h.settle.completion === null && h.sends.some((x) => x.stage === 'settle' && x.key === h.settle?.key);
+    const unresolved = (h.state === 'registering' && undecided(h.register)) || (h.state === 'issuing' && undecided(h.issue)) || settleOut || (h.state === 'registered' && h.unresolved);
+    const list = credit !== null && cnHereOf(credit) && creditCurrent(credit) ? credit.list : null;
+    // §4.1: issued + numberPending + "Try again" when the follow failed or did not reach the row (never while it reads, while
+    // another invoice's dialog holds the list, or on a detached card: Look up and Hide only, rule 4).
+    const reached = list?.notes.some((x) => x.id === h.creditNoteId) === true;
+    const retry = !bare && attached && h.creditNoteId !== null && (h.state === 'issued' || h.state === 'confirmed') && !reached && (view === null || cnHereOf(view))
+      && (list === null || list.phase === 'failed' || (list.phase === 'ready' && !list.more));
+    const shown = attached && !bare ? h.shown : null; // a detached or no-access card lists no notes and no names (rules 3-4)
+    return {
+      text, alert: s.alert || lapsed, also: lapsed ? CREDIT_TEXT.registeredOnly(false) : s.also, confirm, find, check, cont,
+      until: check === null || check === 'proof' ? '' : CREDIT_TEXT.checkUntil(clockText(deadline)),
+      hide: !bare && open && (!attached || (unresolved && s.find)), // not while the chain is still sending
+      notes: shown === null || list === null ? [] : list.notes.filter((x) => shown.ids.includes(x.id)),
+      retry,
+    };
+  }
+  const cnHoldsSignIns = creditNoteHoldsSignIns(cnHeld, clock(), wall(), (['register', 'proof', 'issue', 'settle'] as const).filter((x) => shutIn(cnHeld, x)), bareNow(cnSayOf(cnHeld)));
+  // What a card offers changes with time alone (a cool-down, a stage's 30 s, the 8- and 9-minute and 23-hour windows): one
+  // timer to the next such moment re-renders it; and a Check again whose window passed says so. Neither ever sends (§3.4).
+  useEffect(() => {
+    if (!isLiveCreditNote(cnHeld)) return undefined;
+    const next = cnNextChange(cnHeld, clock(), wall());
+    if (next === null) return undefined;
+    const timer = setTimeout(() => { if (alive.current) setCnTick((x) => x + 1); }, next);
+    return () => clearTimeout(timer);
+  });
+  useEffect(() => {
+    if (!isLiveCreditNote(cnHeld) || cnSay === null || cnSay.attemptId !== cnHeld.attemptId || cnSay.check === null || cnSay.check === 'proof') return;
+    if (!replayWindowOpen(cnHeld, cnSay.check, clock(), wall())) cnExpire(cnHeld, cnSay.check);
+  });
   const cardHeld = voidHeld?.state === 'refused' && voidHeld.refusal === 'signed-out' && signedOut ? undefined : voidHeld;
+  // The credit-note card at section level: no dialog shows its invoice (the dialog shows it inline otherwise), not hidden.
+  const cnInline = view !== null && cnHereOf(view);
+  // One pair speaks at a time (§2.6): what the dialog's pair already had (`spoken`) is not said again here when it closes.
+  const spokenInline = useRef({ s: 0, a: 0 });
+  const sectionLive = cnInline ? CN_QUIET
+    : { ...cnLive, status: cnLive.sn > spokenInline.current.s ? cnLive.status : '', alert: cnLive.an > spokenInline.current.a ? cnLive.alert : '' };
+  const cnSectionHeld = !cnInline && cnHeld !== undefined && !cnHeld.hidden && cnSayOf(cnHeld) !== null ? cnHeld : undefined;
+  const cnSectionView = cnSectionHeld === undefined ? null : cnCardOf(cnSectionHeld, cnSayOf(cnSectionHeld) as CreditSay);
+  // §2.6 puts checkUntil and numberPending (once the follow stopped short) in the status region: said once per change.
+  const cnShownView = cnHeld === undefined || cnHeld.hidden || cnSayOf(cnHeld) === null ? null : cnSectionView ?? cnCardOf(cnHeld, cnSayOf(cnHeld) as CreditSay);
+  const cnExtra = cnShownView === null ? '' : [cnShownView.until, cnShownView.retry ? CREDIT_TEXT.numberPending : ''].filter((x) => x !== '').join('\n');
+  // null until the first commit: a mount is no transition, so what a card shows then is not announced.
+  // What this attempt's card already said of these (A1, fix list 7 F3): a list re-read ending short again, or a deadline
+  // coming back after Check again, is no new transition. null until the first commit: a mount announces nothing.
+  const cnExtraSaid = useRef<{ readonly attemptId: string; readonly parts: Set<string> } | null>(null);
+  useEffect(() => {
+    const a = cnHeld?.attemptId ?? '';
+    const parts = cnExtra.split('\n').filter((x) => x !== '');
+    const was = cnExtraSaid.current;
+    if (was === null || was.attemptId !== a) {
+      cnExtraSaid.current = { attemptId: a, parts: new Set(was === null ? parts : []) };
+      if (was === null) return;
+    }
+    const said = (cnExtraSaid.current as { readonly parts: Set<string> }).parts;
+    const fresh = parts.filter((x) => !said.has(x));
+    for (const x of fresh) said.add(x);
+    if (fresh.length > 0) setCnStatus(fresh.join(' '));
+  }, [cnExtra, cnHeld?.attemptId]); // another attempt with the same words is its own line (CX7-02)
+  // Look up attempt shows the attempt's rows and their actions with the card (§3.3), in its own store and tenant only.
+  const cnSectionStore = cnSectionHeld === undefined || signedOut || storeId !== cnSectionHeld.storeId ? undefined
+    : stores.stores.find((x) => x.id === cnSectionHeld.storeId && x.tenantId === cnSectionHeld.tenantId);
+  const cnSectionLookup = cnSectionStore !== undefined && credit !== null && cnHereOf(credit) && creditCurrent(credit) ? credit.lookup : null;
+  const cnSectionNumber = cnSectionHeld?.creditNoteId != null && credit !== null && cnHereOf(credit) && creditCurrent(credit)
+    ? credit.list?.notes.find((x) => x.id === cnSectionHeld.creditNoteId)?.number ?? null : null;
+  const cnSectionHeading = useRef<HTMLHeadingElement | null>(null);
   // F4: with no dialog open, this user's LIVE reversal attempt in the store chosen now (the dialog shows it otherwise).
   const revSectionHeld = view === null && !signedOut && isLiveReversal(revHeld) && revHeld.storeId === storeId ? revHeld : undefined;
   const revSectionKey = revSectionHeld?.key ?? null;
@@ -2577,6 +4373,24 @@ function IssuedSection({
           <p role="status" className="text-sm font-bold text-amber-900">{SETTINGS_TEXT.detached}</p>
           <button type="button" data-testid="issued-detached-dismiss" onClick={() => { heading.current?.focus(); setDetached(false); }} className={quiet}>Dismiss</button>
         </div>
+      )}
+      {/* The credit-note pair (doc 17 §2.6): always mounted, empty before any write; quiet while the open dialog says it inline. */}
+      <p data-testid="issued-credit-status" role="status" className="sr-only"><span key={sectionLive.sn}>{sectionLive.status}</span></p>
+      <p data-testid="issued-credit-alert" role="alert" className="sr-only"><span key={sectionLive.an}>{sectionLive.alert}</span></p>
+      {cnSectionHeld !== undefined && cnSectionView !== null && (
+        <CreditCard
+          prefix="issued-credit-card" held={cnSectionHeld} view={cnSectionView} number={cnSectionNumber} busy={cnBusy} waiting={waiting} headingRef={cnSectionHeading} focusFind={cnFocusFind}
+          onConfirm={() => { cnSectionHeading.current?.focus(); void confirmCredit().catch(cnThrew(pressed())); }} onFind={() => { cnSectionHeading.current?.focus(); void findCredit().catch(cnThrew(pressed())); }}
+          onCheck={() => { cnSectionHeading.current?.focus(); void checkCredit().catch(cnThrew(pressed())); }} onContinue={(another) => { cnSectionHeading.current?.focus(); void continueCredit(another).catch(cnThrew(pressed())); }}
+          onHide={() => { heading.current?.focus(); hideCredit(); }} onRetry={retryNumber}
+        >
+          {cnSectionStore !== undefined && (
+            <CreditRows
+              lookup={cnSectionLookup} busy={cnBusy} waiting={waiting} canSettle openOther={isOpenCreditNote(cnHeld) ? cnHeld.attemptId : null} headingRef={cnSectionHeading}
+              onSettle={(row, version) => { void settleCreditRow(cnSectionStore, cnSectionHeld.invoiceId, row, version).catch(cnThrew(row.attemptId)); }}
+            />
+          )}
+        </CreditCard>
       )}
       <VoidCard
         // R22: a first send refused because the session had ended is said once Reconnect has begun a session again, never
@@ -2696,6 +4510,14 @@ function IssuedSection({
             </div>
           )}
 
+          {chosen !== null && activity !== null && activity.storeId === chosen.id && activity.phase !== 'hidden' && (
+            // doc 18 §4.1: after the issued list, before the issuing settings; hidden (nothing rendered) after a classified 403.
+            <CreditActivitySection
+              a={activity} waiting={waiting}
+              onMore={() => { void readActivity('more'); }} onRefresh={() => { void readActivity('first', { via: 'refresh' }); }} onRetry={() => { void readActivity('first', { via: 'retry' }); }}
+            />
+          )}
+
           {chosen !== null && (
             <div data-testid="issued-store-area" className="space-y-4">
               <div className="space-y-3">
@@ -2744,6 +4566,7 @@ function IssuedSection({
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
           voiding={view.store === null ? undefined : voidingOf(view, view.store)}
           reversing={view.store === null ? undefined : reversingOf(view, view.store)}
+          crediting={creditingOf(view)}
           payments={{
             read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal),
             ...(view.store === null ? {} : {
@@ -2789,6 +4612,120 @@ export interface PaymentLookup {
   /** Only this invoice's attempts in state open or recorded, in the server's order. */
   readonly rows: readonly PaymentAttempt[];
 }
+/**
+ * One invoice's credit-note list as one chain read it (doc 17 §4.1): its notes oldest first, its view (`named`: the owner's
+ * names present; null before an item), the cursor Show more sends (ready) or Try again resumes from (a transient failure),
+ * whether it was read to the end (only then the empty texts), a Show more or follow out (`more`), the note a refresh
+ * follows to (`target`, an issue's creditNote.id), "{n} more loaded." (`said`) and the chain's one view reload and one
+ * cursor restart.
+ */
+export interface CreditNotesList {
+  readonly phase: 'loading' | 'ready' | 'failed' | 'denied';
+  readonly notes: readonly InvoiceCreditNote[];
+  readonly named: boolean | null;
+  readonly next: string | null;
+  readonly complete: boolean;
+  readonly more: boolean;
+  readonly target: string | null;
+  readonly said: string;
+  readonly reloaded: boolean;
+  readonly restarted: boolean;
+}
+/** A lookup row of this invoice, with the wall-clock time its page answered ("… when checked at {time}"). */
+export type CreditLookupRow = CreditNoteAttempt & { readonly checkedAt: number };
+/**
+ * This owner's attempts lookup for one invoice (doc 17 §3.3): `exhausted` (the gate, D-P2-3), `incomplete` (a cap or a
+ * transport stop: rows kept, Continue checking resumes from `cursor`), `failed` (Try again from page one), `denied` (hidden,
+ * not asked again under this generation and token). `rows` are this invoice's; `seen` every row the scan loaded, store-wide
+ * (a page repeating one fails it); `owner`: a page answered 200 here.
+ */
+export interface CreditNotesLookup {
+  readonly phase: 'loading' | 'exhausted' | 'incomplete' | 'failed' | 'denied';
+  readonly rows: readonly CreditLookupRow[];
+  readonly cursor: string | null;
+  readonly seen: readonly CreditNoteAttempt[];
+  readonly restarted: boolean;
+  readonly owner: boolean;
+}
+const CREDIT_LIST_START: CreditNotesList = Object.freeze({
+  phase: 'loading', notes: [], named: null, next: null, complete: false, more: false, target: null, said: '', reloaded: false, restarted: false,
+});
+const LOOKUP_DENIED: CreditNotesLookup = Object.freeze({ phase: 'denied', rows: [], cursor: null, seen: [], restarted: false, owner: false });
+const LOOKUP_FAILED: CreditNotesLookup = Object.freeze({ ...LOOKUP_DENIED, phase: 'failed' });
+/** The Issued section's credit-note reads for the one dialog it opened (doc 17 §2.1); the drafts card's View invoice has none. */
+export interface IssuedCreditCapability {
+  /** This invoice's list under the section's generation and token, or null before its first read. */
+  readonly list: CreditNotesList | null;
+  /** This owner's lookup for this invoice under the same, or null before it starts. */
+  readonly lookup: CreditNotesLookup | null;
+  /** The store owner (a lookup page answered 200 here): the empty list says "None have been issued yet." too. */
+  readonly owner: boolean;
+  /** The issue action's gate (D-P2-3): the lookup read to exhaustion under this generation and token. */
+  readonly gateOpen: boolean;
+  /** Once per open, after the detail answered an invoice (issued or voided, D-P2-12): the list and the lookup from page one. */
+  readonly start: () => void;
+  readonly showMore: () => void;
+  readonly retryList: () => void;
+  readonly retryLookup: () => void;
+  readonly continueChecking: () => void;
+  // ---- the issue side (doc 17 §2-§3) ----
+  /** This user's credit-note attempt when it is this invoice's (hidden or not), and what its card says. */
+  readonly held: HeldCreditNote | undefined;
+  readonly say: CreditSay | null;
+  /** What its card shows and offers now (null: no card here). */
+  readonly card: CreditCardView | null;
+  /** Bumped when Look up attempt should take focus (D-P2-15 stated other notes or an uncertainty). */
+  readonly focusFind: number;
+  /** "Check again" of the card's stage (§3.2). */
+  readonly check: () => void;
+  /** "Continue issuing" (false) or "Issue another credit note" (true), under E1-E7. */
+  readonly proceed: (another: boolean) => void;
+  /** "Hide this attempt" (D-P2-6 A): the card only. */
+  readonly hide: () => void;
+  /** The section's live pair while this dialog shows the attempt's invoice (the section's own pair is empty meanwhile). */
+  readonly live: CreditLive;
+  /** This user's open credit-note hold's attempt (any invoice): another attempt's lookup row waits for it (blockedOwn). */
+  readonly openAttempt: string | null;
+  /** The card's "Try again" for its credit note's number (§4.1). */
+  readonly retryNumber: () => void;
+  /** The dialog's pair had its chance to say writes up to `n`: the section pair does not repeat them. */
+  readonly spoken: (region: 's' | 'a', n: number) => void;
+  /** D-P2-10 A: Record payment, Reverse and Void hidden on this invoice (a nonterminal row or an open hold here). */
+  readonly hidesHere: boolean;
+  /** D-P2-10 A: Void and Reverse hidden everywhere (a hold that can still Check again or Continue issuing). */
+  readonly hidesSignIns: boolean;
+  /** Why "Issue credit note" is aria-disabled, beyond Remaining 0 (§2.3): an own nonterminal row or hold, or a sibling attempt. */
+  readonly blocked: 'own' | 'sibling' | null;
+  /** A credit-note press is out. */
+  readonly busy: boolean;
+  /** The issued note's number once its row loaded under this generation and token (else numberPending). */
+  readonly number: number | null;
+  /** Bumped when an outcome needs this invoice's detail and amounts read again. */
+  readonly rereads: number;
+  readonly generation: () => number;
+  readonly reauthMethod: () => 'password' | 'google' | null;
+  readonly lastSignIn: () => CreditNoteSignIn | null;
+  readonly freshSignIn: () => CreditNoteSignIn | null;
+  /** The review's lookup: from page one, resolved with what it read (null: its context went). */
+  readonly lookupNow: () => Promise<CreditNotesLookup | null>;
+  /** The review's list read from page one (the D-P2-15 baseline): not waited for. */
+  readonly listNow: () => void;
+  /** Absent for a dialog without its store entry (nothing can be issued there). */
+  readonly issue?: (press: CreditPress) => Promise<CreditIssueOutcome>;
+  readonly confirm: () => void;
+  readonly find: () => void;
+  readonly settleRow: (row: CreditLookupRow, version: 1 | 2) => void;
+  readonly closedInFlight: () => void;
+  readonly signIn: (secret: string | null) => Promise<VoidSignIn | null>;
+  readonly stopSignIn: () => void;
+}
+/** One "Issue credit note" press in the confirmation: what the form and its review fixed. */
+export interface CreditPress { readonly invoiceId: string; readonly number: number; readonly grossCents: number; readonly reason: InvoiceCreditNoteReason }
+/** What the confirmation hears back: a sign-in first (signInNeeded, or signInExpired with the old time), nothing sent, its context gone, or the chain shown on the card. */
+export type CreditIssueOutcome =
+  | { readonly kind: 'sign-in'; readonly expired: CreditNoteSignIn | null }
+  | { readonly kind: 'not-sent'; readonly text: string }
+  | { readonly kind: 'stale' | 'shown' };
 /** One Record press: what the form validated. */
 export interface PaymentPress { readonly invoiceId: string; readonly number: number; readonly amountCents: number; readonly method: InvoicePaymentMethod }
 export interface PaymentRecording {
@@ -2954,6 +4891,8 @@ export interface IssuedInvoiceDialogProps {
   readonly payments?: IssuedPaymentsCapability;
   /** The reversal action (M7B-PAYMENTS-P2C): only the Issued section gives one, with `payments`. */
   readonly reversing?: IssuedReversalCapability;
+  /** The credit-note list and lookup (M7B-CREDITNOTES-CN-P2): only the Issued section gives them, with `payments`. */
+  readonly crediting?: IssuedCreditCapability;
 }
 
 type ViewState =
@@ -3051,14 +4990,14 @@ const DETAIL_KINDS: ReadonlySet<VoidReadKind> = new Set(['review', 'after', 'loa
  * retries only that GET). A late answer of any of these reads changes nothing once its open, its kind's latest read or
  * its context is gone.
  */
-export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments, reversing }: IssuedInvoiceDialogProps) {
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments, reversing, crediting }: IssuedInvoiceDialogProps) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<ViewState>(VIEW_OPENING);
   const alive = useRef(false);
   const seq = useRef(0);
   const ctl = useRef<AbortController | null>(null);
-  const owner = useRef({ read, current, voiding, payments, reversing });
-  useLayoutEffect(() => { owner.current = { read, current, voiding, payments, reversing }; });
+  const owner = useRef({ read, current, voiding, payments, reversing, crediting });
+  useLayoutEffect(() => { owner.current = { read, current, voiding, payments, reversing, crediting }; });
   // The void action (idle, and nothing of it rendered, without `voiding`).
   // The eligibility answer AND the section generation it was read under (review B1 R3-1b): only an 'allowed' read under
   // the generation that stands now permits the action; an older one counts as not yet known.
@@ -3137,6 +5076,33 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const [revFocusRow, setRevFocusRow] = useState<{ readonly id: string } | null>(null);
   const revCardHeading = useRef<HTMLHeadingElement | null>(null);
   const revLiveSeen = useRef(new Set<string>());
+  // Issuing a credit note (CN-P2): the confirmation (its values, its sign-in), Continue's review being out, what the review
+  // said, and focus requests (the card's heading, the sign-in, "Don't issue"); a ref holds a second press back.
+  const [cnConfirm, setCnConfirmState] = useState<CreditConfirm | null>(null);
+  const cnConfirmRef = useRef<CreditConfirm | null>(null);
+  // P2-46b: read when the confirmation has closed — the action, else the Payments heading (DialogFrame keeps one target object).
+  const cnReturn = useRef<RefObject<HTMLElement | null>>({ get current() { return cnAction.current?.isConnected === true ? cnAction.current : payHeading.current; } }).current;
+  const putCnConfirm = (next: CreditConfirm | null): void => { cnConfirmRef.current = next; setCnConfirmState(next); };
+  const patchCnConfirm = (id: number, next: Partial<CreditConfirm>): boolean => {
+    const c = cnConfirmRef.current;
+    if (c === null || c.id !== id) return false;
+    putCnConfirm({ ...c, ...next });
+    return true;
+  };
+  const [cnReviewing, setCnReviewing] = useState(false);
+  const cnReviewingRef = useRef(false);
+  // `at`: the credit-note write count when the review said it — a newer write takes the pair back (fix list 5, A1).
+  const [cnNote, setCnNoteState] = useState<{ readonly alert: boolean; readonly text: string; readonly at: number } | null>(null);
+  const setCnNote = (x: { readonly alert: boolean; readonly text: string } | null): void => setCnNoteState(x === null ? null : { ...x, at: owner.current.crediting?.live.n ?? 0 });
+  // The write count when this dialog opened: what is said while its detail still loads is the issuer's to say (A2).
+  const cnOpenedAt = useRef(crediting?.live.n ?? 0);
+  const [cnReset, setCnReset] = useState(0);
+  const [cnFocusCard, setCnFocusCard] = useState(0);
+  const [cnFocusSignIn, setCnFocusSignIn] = useState(0);
+  const [cnFocusKeep, setCnFocusKeep] = useState(0);
+  const cnPressing = useRef(false);
+  const cnCardHeading = useRef<HTMLHeadingElement | null>(null);
+  const cnAction = useRef<HTMLButtonElement | null>(null);
   const putPay = (next: PaymentsView): void => {
     // Load more (its last page, a change) or Try again (a read starts) going while focused: focus moves to the section's
     // heading, never to the body.
@@ -3259,16 +5225,19 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     void loadPayments(null);
     // The recording eligibility: ONE per open, only for an issued invoice (a voided one sends none), after the detail answered.
     const ask = owner.current.payments?.eligibility;
-    if (state.invoice.status !== 'issued' || ask === undefined) return;
-    const controller = new AbortController();
-    payEligCtl.current = controller;
-    void ask(controller.signal).catch(() => 'not' as const).then((answer) => { if (alive.current && answer !== null && owner.current.current()) setPayElig(answer); });
-    // The reversal eligibility (R1): ONE per open, issued invoices only, under the generation it was asked in.
-    const r = owner.current.reversing;
-    if (r !== undefined) {
-      const opened = r.generation();
-      void voidRead('revElig', (signal) => r.eligibility(signal)).then((answer) => { if (answer !== null) setRevElig(answer, opened); });
+    if (state.invoice.status === 'issued' && ask !== undefined) {
+      const controller = new AbortController();
+      payEligCtl.current = controller;
+      void ask(controller.signal).catch(() => 'not' as const).then((answer) => { if (alive.current && answer !== null && owner.current.current()) setPayElig(answer); });
+      // The reversal eligibility (R1): ONE per open, issued invoices only, under the generation it was asked in.
+      const r = owner.current.reversing;
+      if (r !== undefined) {
+        const opened = r.generation();
+        void voidRead('revElig', (signal) => r.eligibility(signal)).then((answer) => { if (answer !== null) setRevElig(answer, opened); });
+      }
     }
+    // Credit notes (CN-P2): the list (a voided invoice's too, D-P2-12) and the owner's lookup, ONE start per open.
+    owner.current.crediting?.start();
   }, [state.invoice]);
 
   // R6/R8: this invoice's reversal attempt, seen live while this dialog was open, settling as reversed — by its own answer,
@@ -3284,6 +5253,22 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     if (payStarted.current) void loadPayments(null, true);
   }, [revDoneKey]);
   useEffect(() => { if (revFocusCard > 0) (revCardHeading.current ?? payHeading.current)?.focus(); }, [revFocusCard]);
+  // CN-P2: an outcome that changes this invoice's amounts or state reads its detail and payments again, once per bump.
+  const cnRereads = crediting?.rereads ?? 0;
+  const cnRereadsSeen = useRef(cnRereads);
+  useEffect(() => {
+    if (cnRereads === cnRereadsSeen.current) return;
+    cnRereadsSeen.current = cnRereads;
+    if (cnRereads === 0) return;
+    void reread('after');
+    if (payStarted.current) void loadPayments(null, true);
+  }, [cnRereads]);
+  // A timer queued after DialogFrame's own close-time return (the confirmation's), as the reversal's row focus is.
+  useEffect(() => {
+    if (cnFocusCard === 0) return undefined;
+    const timer = setTimeout(() => (cnCardHeading.current ?? payHeading.current)?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [cnFocusCard]);
   // R3 after a not-run close (fix2 item 2): the row's Reverse payment (re-rendered once the hold went), else the heading —
   // a timer queued after DialogFrame's own close-time return (its opener, the old row button, is gone).
   useEffect(() => {
@@ -3639,6 +5624,138 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     setRevFocusReasons((x) => x + 1);
   }
 
+  // ---- issuing a credit note (CN-P2, doc 17 §2.4-§2.6) ----
+
+  /**
+   * Continue's review (§2.4), and the same after a sign-in: the detail, the payments read and the lookup again, one at a
+   * time, and this invoice's list beside them (the D-P2-15 baseline, never waited for). 'open' only for an issued invoice,
+   * an amount within the remaining just read, and a lookup read to the end with no unfinished row of this owner here.
+   */
+  async function creditReview(cents: number, kind: VoidReadKind): Promise<{ readonly fit: 'open' | 'over' | 'closed'; readonly number: number; readonly remaining: number } | null> {
+    const cr = owner.current.crediting;
+    if (cr === undefined) return null;
+    setCnNote(null);
+    const closed = (text: string | null): { readonly fit: 'closed'; readonly number: number; readonly remaining: number } => {
+      if (text !== null) setCnNote({ alert: true, text });
+      return { fit: 'closed', number: 0, remaining: 0 };
+    };
+    const detail = await readDetail(kind);
+    if (detail === null) return null;
+    if (detail.kind !== 'ok') return closed(detail.kind === 'rate-limited' ? detail.text : VIEW_TEXT.unavailable);
+    setState({ phase: 'ready', text: '', invoice: detail.invoice });
+    if (detail.invoice.status !== 'issued') return closed(CREDIT_TEXT.reviewVoided);
+    cr.listNow();
+    await loadPayments(null, true);
+    if (!alive.current) return null;
+    const page = payRef.current.phase === 'ready' ? payRef.current.page : null;
+    if (page === null || page.invoice.status !== 'issued') return closed(page === null ? PAYMENTS_TEXT.unavailable : CREDIT_TEXT.reviewVoided);
+    const fact = { number: detail.invoice.number, remaining: page.amounts.remainingCents };
+    if (cents > page.amounts.remainingCents) return { fit: 'over', ...fact };
+    const lookup = await cr.lookupNow();
+    if (!alive.current || lookup === null) return null;
+    if (lookup.phase !== 'exhausted') return closed(null); // lookupFailed / lookupIncomplete: the lookup's own region says it
+    const live = owner.current.crediting?.held;
+    if (lookup.rows.some((x) => x.state === 'open' || x.state === 'issued') || isOpenCreditNote(live)) return closed(CREDIT_TEXT.unfinished);
+    return { fit: 'open', ...fact };
+  }
+  /** The form's Continue: the review, then the confirmation on what it read ('over': the amount is over the remaining just read). */
+  async function creditContinue(cents: number, reason: InvoiceCreditNoteReason): Promise<{ readonly kind: 'over'; readonly remaining: number } | { readonly kind: 'closed' | 'open' | 'none' }> {
+    const cr = owner.current.crediting;
+    if (cr === undefined || cnReviewingRef.current || cnConfirmRef.current !== null || waiting) return { kind: 'none' };
+    cnReviewingRef.current = true;
+    setCnReviewing(true);
+    const opened = cr.generation();
+    try {
+      const fit = await creditReview(cents, 'review');
+      if (fit === null || !alive.current) return { kind: 'none' };
+      if (fit.fit === 'over') return { kind: 'over', remaining: fit.remaining };
+      if (fit.fit === 'closed' || opened !== cr.generation()) return { kind: 'closed' };
+      putCnConfirm({
+        id: ++confirmSeq.current, grossCents: cents, reason, number: fit.number, remaining: fit.remaining, gen: opened, sending: false, stepUp: null, confirming: false, renewing: false, status: null,
+      });
+      return { kind: 'open' };
+    } finally {
+      cnReviewingRef.current = false;
+      if (alive.current) setCnReviewing(false);
+    }
+  }
+  /** No shop-observed sign-in fit for a first send (§2.5): the sign-in group, saying why; nothing is sent. */
+  function creditNeedsSignIn(id: number, expired: CreditNoteSignIn | null): void {
+    const method = owner.current.crediting?.reauthMethod() ?? null;
+    patchCnConfirm(id, { sending: false, stepUp: { method }, status: { alert: true, text: expired === null ? CREDIT_TEXT.signInNeeded : CREDIT_TEXT.signInExpired(clockText(expired.wall)) } });
+    setCnFocusSignIn((x) => x + 1);
+  }
+  /** The confirmation's "Issue credit note": ONE press (a ref holds a second back); the chain is the section's, by attempt. */
+  async function creditPress(): Promise<void> {
+    const cr = owner.current.crediting;
+    const c = cnConfirmRef.current;
+    if (cr?.issue === undefined || c === null || cnPressing.current || c.sending || c.stepUp !== null || c.renewing || c.confirming || waiting) return;
+    const { id } = c;
+    if (c.gen !== cr.generation()) return putCnConfirm(null); // reviewed under an earlier session: never sent (the reversal's staleReview)
+    if (cr.freshSignIn() === null) return creditNeedsSignIn(id, cr.lastSignIn());
+    cnPressing.current = true;
+    patchCnConfirm(id, { sending: true, status: null });
+    let out: CreditIssueOutcome;
+    try {
+      out = await cr.issue({ invoiceId, number: c.number, grossCents: c.grossCents, reason: c.reason });
+    } finally {
+      cnPressing.current = false;
+    }
+    if (!alive.current) return;
+    if (out.kind === 'sign-in') return creditNeedsSignIn(id, out.expired);
+    if (out.kind === 'not-sent') return void patchCnConfirm(id, { sending: false, status: { alert: true, text: out.text } });
+    if (out.kind === 'stale') return putCnConfirm(null);
+    // The chain answered (or a stage passed its 30 s): the confirmation closes and the card says it — focus to its heading
+    // only when the confirmation was still open (focus elsewhere is left where the user put it).
+    if (cnConfirmRef.current?.id === id) { putCnConfirm(null); setCnFocusCard((x) => x + 1); }
+    setCnReset((x) => x + 1);
+  }
+  /** The sign-in group's press (the void's sign-in, one owner, 30 s): success keeps the values (D-P2-8 A) and re-runs the review; a new press is needed. */
+  async function creditSignIn(): Promise<void> {
+    const cr = owner.current.crediting;
+    const c = cnConfirmRef.current;
+    if (cr === undefined || c === null || c.stepUp === null || c.stepUp.method === null || c.confirming || waiting) return;
+    const secret = c.stepUp.method === 'password' ? password : null;
+    if (secret === '') return;
+    const { id } = c;
+    const open = (): boolean => alive.current && cnConfirmRef.current?.id === id;
+    setPassword('');
+    patchCnConfirm(id, { confirming: true, status: null });
+    let out: VoidSignIn | null;
+    try { out = await cr.signIn(secret); } catch { out = { kind: 'failed', text: VOID_TEXT.reauthFailed }; }
+    if (!open()) return;
+    if (out === null) return void patchCnConfirm(id, { confirming: false }); // Stop waiting: nothing was sent, nothing to say
+    if (out.kind === 'failed') {
+      patchCnConfirm(id, { confirming: false, status: { alert: true, text: out.text === VOID_TEXT.signInTimedOut ? CREDIT_TEXT.signInTimeout : out.text } });
+      return setCnFocusSignIn((x) => x + 1);
+    }
+    const renewGen = out.gen;
+    if (renewGen !== cr.generation()) return putCnConfirm(null);
+    patchCnConfirm(id, { confirming: false, stepUp: null, renewing: true, status: null });
+    const fit = await creditReview(c.grossCents, 'renew');
+    if (!open()) return;
+    if (fit === null || fit.fit !== 'open' || renewGen !== cr.generation()) {
+      // Anything that no longer fits closes it, with its reason (§2.5).
+      if (fit?.fit === 'over') setCnNote({ alert: true, text: CREDIT_TEXT.errOver(formatCents(fit.remaining)) });
+      return putCnConfirm(null);
+    }
+    const at = cr.lastSignIn();
+    patchCnConfirm(id, {
+      renewing: false, number: fit.number, remaining: fit.remaining, gen: renewGen,
+      status: at === null ? null : { alert: false, text: CREDIT_TEXT.signedIn(clockText(at.wall), clockText(at.wall + CREDIT_NOTE_FIRST_SEND_MS)) },
+    });
+    setCnFocusKeep((x) => x + 1);
+  }
+  /** "Don't issue" / "Close" / Escape: closes, never aborts; in flight the section says closedInFlight; a sign-in wait ends. */
+  function closeCreditConfirm(): void {
+    const c = cnConfirmRef.current;
+    owner.current.crediting?.stopSignIn();
+    if (c?.sending === true) owner.current.crediting?.closedInFlight();
+    // Only the dialog closes (doc 17 §2.6 focus table): the form keeps its values; DialogFrame sends focus to `cnReturn`.
+    putCnConfirm(null);
+    setPassword('');
+  }
+
   function closeReverseConfirm(): void {
     owner.current.reversing?.stopSignIn(); // Keep payment or Escape while its sign-in is waited for: the wait ends here
     putRevConfirm(null);
@@ -3659,12 +5776,14 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   // R8: while this invoice has an unresolved reversal attempt, neither Void nor Record payment shows on it.
   const revLiveHere = revHere !== undefined && isLiveReversal(revHere);
   const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal && !revLiveHere
-    && revReviewing === null; // nor while a reversal review is out (review F3)
+    && revReviewing === null // nor while a reversal review is out (review F3)
+    && crediting?.hidesHere !== true && crediting?.hidesSignIns !== true; // nor beside a credit-note attempt here, or one a sign-in would detach (D-P2-10 A)
   // R1: Reverse shows only on an 'allowed' read under this generation, an issued invoice whose payments page says issued and
   // is not loading, no unresolved record, reversal or void attempt of this user anywhere, and a dialog that is not terminal.
   const canReverse = reversing !== undefined && revElig.value === 'allowed' && revElig.gen === reversing.generation() && !reversing.blocked
     && invoice !== null && invoice.status === 'issued' && pay.phase === 'ready' && pay.page?.invoice.status === 'issued' && !terminal
-    && !reviewing && confirm === null; // nor while a void review or confirmation is out (review F3)
+    && !reviewing && confirm === null // nor while a void review or confirmation is out (review F3)
+    && crediting?.hidesHere !== true && crediting?.hidesSignIns !== true; // D-P2-10 A, as for Void
   // Once this invoice is known voided (a 200 or a sealed already-void for an attempt of this user), no confirmation is
   // shown — but the one that pressed an already-void, which says so — and it goes in the commit that hides the trigger
   // (design R17): focus then goes to Close, never to a control that is gone.
@@ -3805,9 +5924,29 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             {/* Above the state line and the list (R2 R6): what a re-read changes never moves the recording controls. */}
             {payments.recording !== undefined && (
               <PaymentRecorder
-                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed' && !revLiveHere} reversing={revLiveHere}
+                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed' && !revLiveHere && crediting?.hidesHere !== true} reversing={revLiveHere}
                 waiting={waiting} recording={payments.recording} headingRef={payHeading}
               />
+            )}
+            {crediting !== undefined && (
+              <CreditIssuer
+                c={crediting} offered={crediting.issue !== undefined && crediting.gateOpen && invoice.status === 'issued' && pay.page !== null && pay.page.invoice.status === 'issued'}
+                remaining={pay.page !== null && pay.page.invoice.status === 'issued' ? pay.page.amounts.remainingCents : 0} waiting={waiting} reviewing={cnReviewing}
+                resetTag={cnReset} note={cnNote} since={cnOpenedAt.current} headingRef={payHeading} actionRef={cnAction} onContinue={creditContinue} confirmOpen={cnConfirm !== null || (voiding !== undefined && showConfirm && confirm !== null) || (reversing !== undefined && revConfirm !== null)}
+              />
+            )}
+            {crediting?.held !== undefined && !crediting.held.hidden && crediting.card !== null && (
+              <CreditCard
+                prefix="issued-payments-credit-card" held={crediting.held} view={crediting.card} number={crediting.number} busy={crediting.busy} waiting={waiting}
+                headingRef={cnCardHeading} focusFind={crediting.focusFind}
+                onConfirm={() => { cnCardHeading.current?.focus(); crediting.confirm(); }} onFind={() => { cnCardHeading.current?.focus(); crediting.find(); }}
+                onCheck={() => { cnCardHeading.current?.focus(); crediting.check(); }} onContinue={(another) => { cnCardHeading.current?.focus(); crediting.proceed(another); }}
+                onHide={() => { payHeading.current?.focus(); crediting.hide(); }} onRetry={crediting.retryNumber}
+              />
+            )}
+            {crediting !== undefined && <CreditLookupState lookup={crediting.lookup} waiting={waiting} headingRef={payHeading} onRetry={crediting.retryLookup} onContinue={crediting.continueChecking} />}
+            {crediting !== undefined && (
+              <CreditRows lookup={crediting.lookup} busy={crediting.busy} waiting={waiting} canSettle={crediting.issue !== undefined} openOther={crediting.openAttempt} headingRef={payHeading} onSettle={crediting.settleRow} />
             )}
             {reversing !== undefined && (
               // R8: the reversal's always-mounted status and alert regions, and this invoice's held attempt (its card).
@@ -3877,6 +6016,9 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             )}
             {pay.more && <span id="issued-payments-busy" className="sr-only">{PAYMENTS_TEXT.loading}</span>}
             {waiting && <span id="issued-payments-wait" className="sr-only">{PAYMENTS_TEXT.waiting}</span>}
+            {crediting !== undefined && (
+              <CreditNotesSection list={crediting.list} owner={crediting.owner} waiting={waiting} paymentsHeading={payHeading} onMore={crediting.showMore} onRetry={crediting.retryList} />
+            )}
           </section>
         )}
       </DialogFrame>
@@ -3890,6 +6032,13 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             if (c !== null && c.key === null && !c.saving && c.stepUp === null && !c.decided && !c.renewing) patchConfirm(c.id, { reason: code, invalid: false });
           }}
           onPress={() => { void press(); }} onClose={closeConfirm} onCheck={voiding.check} onFind={voiding.find} onSignIn={() => { void signIn(); }} onStopSignIn={voiding.stopSignIn} returnFocus={closeButton}
+        />
+      )}
+      {crediting !== undefined && cnConfirm !== null && (
+        <CreditConfirmDialog
+          c={cnConfirm} waiting={waiting} password={password} focusSignIn={cnFocusSignIn} focusKeep={cnFocusKeep} onPassword={setPassword}
+          onPress={() => { void creditPress(); }} onClose={closeCreditConfirm} onSignIn={() => { void creditSignIn(); }} onStopSignIn={crediting.stopSignIn}
+          returnFocus={cnReturn}
         />
       )}
       {reversing !== undefined && revConfirm !== null && (
@@ -3909,7 +6058,731 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   );
 }
 
+/**
+ * The attempts lookup's state where the issue action goes (doc 17 §2.2): failed → lookupFailed and Try again (a new lookup
+ * from page one); incomplete → lookupIncomplete and Continue checking (from the last good cursor). Its alert region is in
+ * place, empty, before its first text; a pressed button stays through its own read (aria-disabled), and one that goes while
+ * focused hands focus to the Payments heading.
+ */
+function CreditLookupState({ lookup, waiting, headingRef, onRetry, onContinue }: {
+  readonly lookup: CreditNotesLookup | null; readonly waiting: boolean; readonly headingRef: RefObject<HTMLHeadingElement | null>;
+  readonly onRetry: () => void; readonly onContinue: () => void;
+}) {
+  const [pressed, setPressed] = useState<'retry' | 'continue' | null>(null);
+  const focused = useRef<HTMLButtonElement | null>(null); // the button pressed while it had focus
+  const phase = lookup?.phase ?? null;
+  const loading = phase === 'loading';
+  useLayoutEffect(() => {
+    const was = focused.current;
+    if (loading) return;
+    if (pressed !== null) setPressed(null);
+    focused.current = null;
+    if (was !== null && !was.isConnected && (document.activeElement === null || document.activeElement === document.body)) headingRef.current?.focus();
+  });
+  const press = (which: 'retry' | 'continue', target: HTMLButtonElement): void => {
+    if (loading || waiting) return;
+    if (document.activeElement === target) focused.current = target;
+    setPressed(which);
+    (which === 'retry' ? onRetry : onContinue)();
+  };
+  const text = phase === 'failed' ? CREDIT_TEXT.lookupFailed : phase === 'incomplete' ? CREDIT_TEXT.lookupIncomplete : '';
+  const why = loading ? 'issued-payments-credit-lookup-busy' : waiting ? 'issued-payments-credit-lookup-wait' : undefined;
+  const describedBy = ['issued-payments-credit-lookup-alert', why].filter(Boolean).join(' ');
+  return (
+    // Its phase and this invoice's row count (never an attempt id) are on the area for the issue side's controls and the tests.
+    <div data-testid="issued-payments-credit-lookup" data-phase={phase ?? 'idle'} data-rows={lookup?.rows.length ?? 0} className="space-y-2">
+      <p id="issued-payments-credit-lookup-alert" data-testid="issued-payments-credit-lookup-alert" role="alert" className="text-sm font-bold text-rose-800">{text}</p>
+      {(phase === 'failed' || (loading && pressed === 'retry')) && (
+        <button
+          type="button" data-testid="issued-payments-credit-lookup-retry" aria-disabled={loading || waiting} aria-describedby={describedBy}
+          onClick={(e) => press('retry', e.currentTarget)} className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.tryAgain}
+        </button>
+      )}
+      {(phase === 'incomplete' || (loading && pressed === 'continue')) && (
+        <button
+          type="button" data-testid="issued-payments-credit-lookup-continue" aria-disabled={loading || waiting} aria-describedby={describedBy}
+          onClick={(e) => press('continue', e.currentTarget)} className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.continueChecking}
+        </button>
+      )}
+      {loading && pressed !== null && <span id="issued-payments-credit-lookup-busy" className="sr-only">{VIEW_TEXT.loading}</span>}
+      {waiting && !loading && <span id="issued-payments-credit-lookup-wait" className="sr-only">{LIST_TEXT.waiting}</span>}
+    </div>
+  );
+}
+
+/**
+ * The invoice's credit notes (doc 17 §4.1, D-P2-1; a voided invoice's too, D-P2-12): a "Credit notes" heading one level
+ * below Payments and a list oldest first, one item per note in the doc's order — "CN-<n>", "Active" or "Withdrawn" as
+ * words, the gross amount, the reason, "Issued {time}", a withdrawal's time and reason, and the names only when the page
+ * carried them (null: "Name not set"). Tax and net are never shown (D-P2-7). The empty texts only after a read to the end;
+ * a failed read never shows its rows as complete. Show more keeps focus and says "{n} more loaded."; if it goes, focus
+ * moves to the first new item (tabindex -1 until it blurs), else to the list's heading.
+ */
+function CreditNotesSection({ list, owner, waiting, paymentsHeading, onMore, onRetry }: {
+  readonly list: CreditNotesList | null; readonly owner: boolean; readonly waiting: boolean; readonly paymentsHeading: RefObject<HTMLHeadingElement | null>;
+  readonly onMore: () => void; readonly onRetry: () => void;
+}) {
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const more = useRef<HTMLButtonElement | null>(null);
+  const retry = useRef<HTMLButtonElement | null>(null);
+  const morePressed = useRef<number | null>(null); // the notes shown when Show more was pressed with focus on it
+  const retryPressed = useRef<HTMLButtonElement | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const phase = list?.phase ?? null;
+  const out = phase === 'loading' || list?.more === true;
+  useLayoutEffect(() => {
+    if (list === null || out) return;
+    if (retrying) setRetrying(false);
+    const was = retryPressed.current;
+    retryPressed.current = null;
+    if (was !== null && !was.isConnected && (document.activeElement === null || document.activeElement === document.body)) paymentsHeading.current?.focus();
+    const count = morePressed.current;
+    morePressed.current = null;
+    if (count === null || more.current !== null) return; // Show more still there: focus stays on it
+    const at = document.activeElement;
+    if (at !== null && at !== document.body) return;
+    if (retry.current !== null) return retry.current.focus();
+    const first = list.notes[count];
+    if (first === undefined) return heading.current?.focus();
+    setFocusId(first.id);
+  });
+  useLayoutEffect(() => {
+    if (focusId !== null) document.querySelector<HTMLElement>(`[data-testid="issued-payments-credit-item"][data-id="${focusId}"]`)?.focus();
+  }, [focusId]);
+  const failed = phase === 'failed' || phase === 'denied';
+  const text = list === null ? '' : phase === 'loading' ? CREDIT_TEXT.listLoading : failed ? CREDIT_TEXT.listFailed
+    : list.complete && list.notes.length === 0 ? (owner ? `${CREDIT_TEXT.listEmpty} ${CREDIT_TEXT.listEmptyOwner}` : CREDIT_TEXT.listEmpty) : list.said;
+  const moreWhy = list?.more === true ? 'issued-payments-credit-busy' : waiting ? 'issued-payments-credit-wait' : undefined;
+  return (
+    <div data-testid="issued-payments-credit-notes" className="space-y-2">
+      <h4 ref={heading} id="issued-payments-credit-title" data-testid="issued-payments-credit-title" tabIndex={-1} className={`text-sm font-black text-primary ${focusRing}`}>{CREDIT_TEXT.listTitle}</h4>
+      <p id="issued-payments-credit-state" data-testid="issued-payments-credit-state" data-phase={phase ?? 'idle'} role="status" className="text-sm font-bold text-slate-600">{text}</p>
+      {(failed || (retrying && out)) && (
+        <button
+          ref={retry} type="button" data-testid="issued-payments-credit-retry" aria-disabled={out || waiting}
+          aria-describedby={['issued-payments-credit-state', out ? 'issued-payments-credit-busy' : waiting ? 'issued-payments-credit-wait' : ''].filter(Boolean).join(' ')}
+          onClick={(e) => {
+            if (out || waiting) return;
+            if (document.activeElement === e.currentTarget) retryPressed.current = e.currentTarget;
+            setRetrying(true);
+            onRetry();
+          }}
+          className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.tryAgain}
+        </button>
+      )}
+      {list !== null && list.notes.length > 0 && (
+        <ul data-testid="issued-payments-credit-list" aria-labelledby="issued-payments-credit-title" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
+          {list.notes.map((note) => (
+            <li
+              key={note.id} data-testid="issued-payments-credit-item" data-id={note.id} tabIndex={focusId === note.id ? -1 : undefined}
+              onBlur={() => { if (focusId === note.id) setFocusId(null); }} className={`px-4 py-3 text-sm min-w-0 break-words ${focusRing}`}
+            >
+              <CreditNoteFacts note={note} prefix="issued-payments-credit" />
+            </li>
+          ))}
+        </ul>
+      )}
+      {list !== null && list.phase === 'ready' && list.next !== null && (
+        <button
+          ref={more} type="button" data-testid="issued-payments-credit-more" aria-disabled={list.more || waiting} aria-describedby={moreWhy}
+          onClick={(e) => {
+            if (list.more || waiting) return;
+            if (document.activeElement === e.currentTarget) morePressed.current = list.notes.length;
+            onMore();
+          }}
+          className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.showMore}
+        </button>
+      )}
+      {out && <span id="issued-payments-credit-busy" className="sr-only">{CREDIT_TEXT.listLoading}</span>}
+      {waiting && !out && <span id="issued-payments-credit-wait" className="sr-only">{LIST_TEXT.waiting}</span>}
+    </div>
+  );
+}
+
 /** R5 B: the lookup of this store's invoice lists an unsettled attempt, which holds the invoice's slot: no new Record until it is settled. */
+/** The credit-note confirmation (doc 17 §2.5): the values the review fixed, its sign-in, and what it says. */
+interface CreditConfirm {
+  readonly id: number;
+  readonly grossCents: number;
+  readonly reason: InvoiceCreditNoteReason;
+  readonly number: number;
+  /** The remaining amount the review read. */
+  readonly remaining: number;
+  readonly gen: number;
+  readonly sending: boolean;
+  readonly stepUp: { readonly method: 'password' | 'google' | null } | null;
+  readonly confirming: boolean;
+  readonly renewing: boolean;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+}
+const CREDIT_REASON_CODES = Object.keys(INVOICE_CREDIT_NOTE_REASONS) as readonly InvoiceCreditNoteReason[];
+
+/**
+ * "Issue credit note" and its form (doc 17 §2.1-§2.4) beside Record payment: shown only while the lookup gate is open on an
+ * issued invoice; aria-disabled with its reason otherwise (§2.3). The form validates on Continue (one alert summary, the
+ * first invalid control focused, nothing sent) and hands its values to the review; the section pair speaks inline here.
+ */
+function CreditIssuer({ c, offered, remaining, waiting, reviewing, resetTag, note: noteSaid, since, headingRef, actionRef, onContinue, confirmOpen }: {
+  readonly c: IssuedCreditCapability; readonly offered: boolean; readonly remaining: number; readonly waiting: boolean; readonly reviewing: boolean;
+  /** The confirmation is open (the page behind is inert): this pair waits, so what was said there mounts when it closes. */
+  readonly confirmOpen: boolean;
+  readonly resetTag: number; readonly note: { readonly alert: boolean; readonly text: string; readonly at: number } | null; readonly since: number;
+  readonly headingRef: RefObject<HTMLHeadingElement | null>; readonly actionRef: RefObject<HTMLButtonElement | null>;
+  readonly onContinue: (cents: number, reason: InvoiceCreditNoteReason) => Promise<{ readonly kind: 'over'; readonly remaining: number } | { readonly kind: 'closed' | 'open' | 'none' }>;
+}) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [amount, setAmount] = useState('');
+  const [reason, setReason] = useState<InvoiceCreditNoteReason | null>(null);
+  const [errors, setErrors] = useState<{ readonly amount: string; readonly reason: string }>({ amount: '', reason: '' });
+  const [focusFirst, setFocusFirst] = useState(0);
+  const [focusAction, setFocusAction] = useState(0);
+  const amountRef = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const firstReason = useRef<HTMLInputElement | null>(null);
+  const resetSeen = useRef(resetTag);
+  // Mounted empty (§2.6): only what is said after this pair mounted, never an earlier transition's text.
+  // The floor moves on as a confirmation opens: what was said before it is not mounted again when it closes (P2-53).
+  const floor = useRef(since);
+  const note = noteSaid !== null && noteSaid.at >= c.live.n ? noteSaid : null; // a later credit-note write takes the pair back
+  const wasOpen = useRef(confirmOpen);
+  if (confirmOpen && !wasOpen.current) floor.current = Math.max(floor.current, c.live.n);
+  wasOpen.current = confirmOpen;
+  const live = confirmOpen ? CN_QUIET : liveSince(c.live, floor.current);
+  // Spoken only what this pair rendered: not under a confirmation (inert), not while the review's note holds the region.
+  // Per region, only what this pair rendered: none under a confirmation (inert); a region the review's note holds, not.
+  useLayoutEffect(() => {
+    if (confirmOpen) return;
+    if (note === null || note.alert) c.spoken('s', live.sn);
+    if (note?.alert !== true) c.spoken('a', live.an);
+  });
+  useEffect(() => { if (formOpen) amountRef.current?.focus(); }, [formOpen]);
+  useEffect(() => { if (focusFirst > 0) (errors.amount !== '' ? amountRef.current : firstReason.current)?.focus(); }, [focusFirst]);
+  useEffect(() => { if (focusAction > 0) (actionRef.current ?? headingRef.current)?.focus(); }, [focusAction]);
+  useEffect(() => {
+    if (resetTag === resetSeen.current) return;
+    resetSeen.current = resetTag;
+    // A form control that goes with the reset while focused: the Payments heading (§2.6 "Vanishes while focused"), never body.
+    if (formRef.current?.contains(document.activeElement) === true) headingRef.current?.focus();
+    setFormOpen(false); setAmount(''); setReason(null); setErrors({ amount: '', reason: '' });
+  }, [resetTag]);
+  const remainingText = formatCents(remaining);
+  const blocked = c.blocked === 'own' ? CREDIT_TEXT.blockedOwn : c.blocked === 'sibling' ? CREDIT_TEXT.blockedSibling : remaining <= 0 ? CREDIT_TEXT.blockedRemaining : '';
+  const held = blocked !== '' || waiting || c.busy || reviewing;
+  // aria-disabled always says why (§2.3; the lookup's sr-only busy/wait pattern): the blocker, a wait, or a press still out.
+  const why = blocked !== '' ? 'issued-payments-credit-issue-why' : waiting ? 'issued-payments-wait' : c.busy || reviewing ? 'issued-payments-credit-busy-why' : undefined;
+  const contWhy = waiting ? 'issued-payments-wait' : reviewing ? 'issued-payments-credit-busy-why' : undefined;
+  const invalid = errors.amount !== '' || errors.reason !== '';
+
+  async function submit(): Promise<void> {
+    if (reviewing) return;
+    const checked = paymentAmountOf(amount, remaining);
+    const next = {
+      amount: checked.kind === 'ok' ? '' : checked.kind === 'format' ? CREDIT_TEXT.errFormat : checked.kind === 'decimals' ? CREDIT_TEXT.errDecimals
+        : checked.kind === 'zero' ? CREDIT_TEXT.errZero : CREDIT_TEXT.errOver(remainingText),
+      reason: reason === null ? CREDIT_TEXT.errReason : '',
+    };
+    setErrors(next);
+    if (checked.kind !== 'ok' || reason === null) return setFocusFirst((n) => n + 1); // nothing is sent
+    const out = await onContinue(checked.cents, reason);
+    if (out.kind === 'over') { setErrors({ amount: CREDIT_TEXT.errOver(formatCents(out.remaining)), reason: '' }); setFocusFirst((n) => n + 1); }
+    if (out.kind === 'closed') { headingRef.current?.focus(); setFormOpen(false); } // §2.6: a control that vanishes while focused → the Payments heading
+  }
+
+  const errorId = (field: 'amount' | 'reason'): string => `issued-payments-credit-form-${field}-error`;
+  return (
+    <div data-testid="issued-payments-credit-issuer" className="space-y-3 min-w-0">
+      {!waiting && (c.busy || reviewing) && <span id="issued-payments-credit-busy-why" className="sr-only">{VIEW_TEXT.loading}</span>}
+      {/* The section's live pair while this dialog shows the attempt's invoice, and what the review says: always mounted. */}
+      <p data-testid="issued-payments-credit-say" role="status" className={`text-sm font-bold text-slate-700 ${fitsRow}`}><span key={live.sn}>{note !== null && !note.alert ? note.text : live.status}</span></p>
+      <p data-testid="issued-payments-credit-alert" role="alert" className={`text-sm font-bold text-rose-800 ${fitsRow}`}><span key={live.an}>{note?.alert === true ? note.text : live.alert}</span></p>
+      {offered && !formOpen && (
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <button
+            ref={actionRef} type="button" data-testid="issued-payments-credit-issue" aria-disabled={held} aria-describedby={why}
+            onClick={() => { if (!held) { setErrors({ amount: '', reason: '' }); setFormOpen(true); } }} className={`${button} ${waitable} ${fitsRow} ${actionFit}`}
+          >
+            {CREDIT_TEXT.action}
+          </button>
+          {blocked !== '' && <p id="issued-payments-credit-issue-why" data-testid="issued-payments-credit-issue-why" className={`${hintClass} ${fitsRow}`}>{blocked}</p>}
+        </div>
+      )}
+      {offered && formOpen && (
+        <form ref={formRef} data-testid="issued-payments-credit-form" noValidate onSubmit={(e) => { e.preventDefault(); void submit(); }} className="space-y-3 min-w-0">
+          <fieldset className="space-y-3 min-w-0">
+            <legend className="text-sm font-black text-primary">{CREDIT_TEXT.legend}</legend>
+            <div className="space-y-1 min-w-0">
+              <label htmlFor="issued-payments-credit-form-amount" className={labelClass}>{CREDIT_TEXT.amountLabel}</label>
+              <input
+                ref={amountRef} id="issued-payments-credit-form-amount" data-testid="issued-payments-credit-form-amount" type="text" inputMode="decimal" autoComplete="off" value={amount}
+                aria-invalid={errors.amount !== ''} aria-describedby={`issued-payments-credit-form-amount-hint${errors.amount !== '' ? ` ${errorId('amount')}` : ''}`}
+                onChange={(e) => setAmount(e.target.value)} className={inputClass}
+              />
+              <p id="issued-payments-credit-form-amount-hint" data-testid="issued-payments-credit-form-amount-hint" className={`${hintClass} ${fitsRow}`}>{CREDIT_TEXT.amountHint(remainingText)}</p>
+              {errors.amount !== '' && <p id={errorId('amount')} data-testid={errorId('amount')} className={`text-sm font-bold text-rose-800 ${fitsRow}`}>{errors.amount}</p>}
+            </div>
+            <fieldset
+              data-testid="issued-payments-credit-form-reasons" role="radiogroup" aria-required="true" aria-invalid={errors.reason !== ''}
+              aria-describedby={errors.reason !== '' ? errorId('reason') : undefined} className="space-y-1 min-w-0"
+            >
+              <legend className={labelClass}>{CREDIT_TEXT.reasonLegend}</legend>
+              {CREDIT_REASON_CODES.map((code, i) => (
+                // The label is the hit area (≥ 24 px tall with the control, §2.6 targets).
+                <label key={code} className={`flex items-center gap-2 min-h-[24px] text-sm text-slate-700 ${fitsRow}`}>
+                  <input
+                    ref={i === 0 ? firstReason : undefined} type="radio" name="issued-payments-credit-form-reason" value={code} checked={reason === code}
+                    aria-invalid={errors.reason !== ''} aria-describedby={errors.reason !== '' ? errorId('reason') : undefined} data-testid={`issued-payments-credit-form-reason-${code}`} onChange={() => setReason(code)} className={focusRing}
+                  />
+                  {INVOICE_CREDIT_NOTE_REASONS[code]}
+                </label>
+              ))}
+              {errors.reason !== '' && <p id={errorId('reason')} data-testid={errorId('reason')} className={`text-sm font-bold text-rose-800 ${fitsRow}`}>{errors.reason}</p>}
+            </fieldset>
+          </fieldset>
+          {/* ONE alert for the whole form (its fields' texts are their descriptions), always in place. */}
+          <p data-testid="issued-payments-credit-form-errors" role="alert" className={`text-sm font-bold text-rose-800 ${fitsRow}`}>{invalid ? CREDIT_TEXT.errSummary : ''}</p>
+          <div className="flex flex-wrap gap-2">
+            <button type="submit" data-testid="issued-payments-credit-continue" aria-disabled={reviewing || waiting} aria-describedby={contWhy} className={`${button} ${waitable} ${actionFit}`}>{CREDIT_TEXT.continue}</button>
+            <button
+              type="button" data-testid="issued-payments-credit-cancel" className={`${quiet} ${actionFit}`}
+              onClick={() => { setFormOpen(false); setErrors({ amount: '', reason: '' }); setFocusAction((n) => n + 1); }}
+            >
+              {CREDIT_TEXT.cancel}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The held credit-note attempt's card (doc 17 §2.6 items 5-7, §3.1): inline in Payments while its invoice's dialog is open,
+ * at section level otherwise. Its line is what the section said (the live pair announced it); "Confirm credit note" only
+ * after the attempt's own issue 201 (D-P2-16); "Look up attempt" where the outcome table offers it; a confirmed no-access
+ * card has no buttons. The heading takes focus before a press can take the pressed control away.
+ */
+function CreditCard({ prefix, held, view, number, busy, waiting, headingRef, focusFind, onConfirm, onFind, onCheck, onContinue, onHide, onRetry, children }: {
+  readonly prefix: string; readonly held: HeldCreditNote; readonly view: CreditCardView; readonly number: number | null; readonly busy: boolean; readonly waiting: boolean;
+  readonly headingRef: RefObject<HTMLHeadingElement | null>; readonly focusFind: number; readonly onConfirm: () => void; readonly onFind: () => void;
+  readonly onCheck: () => void; readonly onContinue: (another: boolean) => void; readonly onHide: () => void; readonly onRetry: () => void; readonly children?: ReactNode;
+}) {
+  const findRef = useRef<HTMLButtonElement | null>(null);
+  const focused = useRef<HTMLElement | null>(null);
+  const findSeen = useRef(focusFind);
+  // A card control that went while it had focus (a window passing, its stage decided): focus to the card's heading, never the body.
+  useLayoutEffect(() => {
+    const was = focused.current;
+    if (was === null || was.isConnected) return;
+    focused.current = null;
+    const at = document.activeElement;
+    if (at === null || at === document.body) headingRef.current?.focus();
+  });
+  useEffect(() => {
+    if (focusFind === findSeen.current) return;
+    findSeen.current = focusFind;
+    findRef.current?.focus();
+  }, [focusFind]);
+  const ownIssue = held.issue?.completion?.kind === 'issued' && held.creditNoteId !== null;
+  const out = busy || waiting;
+  // Why a button is aria-disabled now (the lookup's sr-only busy/wait pattern), after its own hint.
+  const outWhy = waiting ? `${prefix}-wait` : busy ? `${prefix}-busy` : '';
+  const describe = (hint: string): string | undefined => [hint, outWhy].filter((x) => x !== '').join(' ') || undefined;
+  const track = (e: { readonly currentTarget: HTMLElement }): void => { focused.current = e.currentTarget; };
+  // Focus moved on by the user: forget it (a removed control still connected at blur was not taken by a change).
+  const untrack = (e: { readonly currentTarget: HTMLElement }): void => {
+    const el = e.currentTarget;
+    queueMicrotask(() => { if (el.isConnected && focused.current === el) focused.current = null; });
+  };
+  const press = (go: () => void) => (): void => { if (!out) go(); };
+  return (
+    <div data-testid={prefix} data-state={held.state} className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2 min-w-0">
+      <h4 ref={headingRef} tabIndex={-1} data-testid={`${prefix}-heading`} className={`text-sm font-black text-primary ${focusRing}`}>{CREDIT_TEXT.legend}</h4>
+      <p data-testid={`${prefix}-text`} className={`text-sm font-bold ${view.alert ? 'text-rose-800' : 'text-slate-700'} ${fitsRow}`}>{view.text}</p>
+      {view.also !== '' && <p data-testid={`${prefix}-also`} className={`text-sm font-bold text-slate-700 ${fitsRow}`}>{view.also}</p>}
+      {ownIssue && held.state === 'issued' && <p data-testid={`${prefix}-hint`} className={`${hintClass} ${fitsRow}`}>{CREDIT_TEXT.issuedHint}</p>}
+      {held.creditNoteId !== null && (held.state === 'issued' || held.state === 'confirmed') && (
+        <p data-testid={`${prefix}-number`} className={`text-sm font-bold text-slate-700 ${fitsRow}`}>{number === null ? CREDIT_TEXT.numberPending : CREDIT_TEXT.number(number)}</p>
+      )}
+      {view.retry && number === null && (
+        <button type="button" data-testid={`${prefix}-retry`} aria-disabled={out} aria-describedby={describe('')} onFocus={track} onBlur={untrack} onClick={press(onRetry)} className={`${quiet} ${waitable} ${actionFit}`}>
+          {CREDIT_TEXT.tryAgain}
+        </button>
+      )}
+      {view.notes.length > 0 && (
+        <ul data-testid={`${prefix}-notes`} className="divide-y divide-amber-100 border border-amber-100 rounded-2xl bg-white/60">
+          {view.notes.map((note) => (
+            <li key={note.id} data-testid={`${prefix}-note`} data-id={note.id} className="px-4 py-3 text-sm min-w-0 break-words"><CreditNoteFacts note={note} prefix={`${prefix}-note`} /></li>
+          ))}
+        </ul>
+      )}
+      {(view.confirm || view.check !== null || view.cont !== null || view.find) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {view.confirm && (
+            <>
+              <button
+                type="button" data-testid={`${prefix}-confirm`} aria-disabled={out} aria-describedby={describe(`${prefix}-confirm-hint`)} onFocus={track} onBlur={untrack}
+                onClick={press(onConfirm)} className={`${button} ${waitable} ${actionFit}`}
+              >
+                {CREDIT_TEXT.confirm}
+              </button>
+              <p id={`${prefix}-confirm-hint`} className={`w-full ${hintClass} ${fitsRow}`}>{CREDIT_TEXT.confirmHint}</p>
+            </>
+          )}
+          {view.check !== null && (
+            <>
+              <button
+                type="button" data-testid={`${prefix}-check`} aria-disabled={out} aria-describedby={describe(`${prefix}-check-hint`)} onFocus={track} onBlur={untrack}
+                onClick={press(onCheck)} className={`${button} ${waitable} ${actionFit}`}
+              >
+                {CREDIT_TEXT.checkAgain}
+              </button>
+              <p id={`${prefix}-check-hint`} className={`w-full ${hintClass} ${fitsRow}`}>{view.check === 'proof' ? CREDIT_TEXT.checkReadHint : CREDIT_TEXT.checkReplayHint}</p>
+              {view.until !== '' && <p data-testid={`${prefix}-until`} className={`w-full ${hintClass} ${fitsRow}`}>{view.until}</p>}
+            </>
+          )}
+          {view.cont !== null && (
+            <>
+              <button
+                type="button" data-testid={`${prefix}-${view.cont}`} aria-disabled={out} aria-describedby={describe(`${prefix}-${view.cont}-hint`)} onFocus={track} onBlur={untrack}
+                onClick={press(() => onContinue(view.cont === 'another'))} className={`${button} ${waitable} ${actionFit}`}
+              >
+                {view.cont === 'another' ? CREDIT_TEXT.issueAnother : CREDIT_TEXT.continueIssuing}
+              </button>
+              <p id={`${prefix}-${view.cont}-hint`} className={`w-full ${hintClass} ${fitsRow}`}>{view.cont === 'another' ? CREDIT_TEXT.anotherHint : CREDIT_TEXT.continueHint}</p>
+            </>
+          )}
+          {view.find && (
+            <button ref={findRef} type="button" data-testid={`${prefix}-find`} aria-disabled={out} aria-describedby={describe('')} onFocus={track} onBlur={untrack} onClick={press(onFind)} className={`${quiet} ${waitable} ${actionFit}`}>
+              {CREDIT_TEXT.find}
+            </button>
+          )}
+        </div>
+      )}
+      {waiting && <span id={`${prefix}-wait`} className="sr-only">{LIST_TEXT.waiting}</span>}
+      {busy && !waiting && <span id={`${prefix}-busy`} className="sr-only">{VIEW_TEXT.loading}</span>}
+      {children}
+      {view.hide && (
+        // Apart from Check again (§2.6 targets): its own row, its warning its description.
+        <div className="mt-3 pt-3 border-t border-amber-200 space-y-1">
+          <button type="button" data-testid={`${prefix}-hide`} aria-describedby={`${prefix}-hide-warning`} onFocus={track} onBlur={untrack} onClick={onHide} className={`${quiet} ${actionFit}`}>
+            {CREDIT_TEXT.hide}
+          </button>
+          <p id={`${prefix}-hide-warning`} className={`${hintClass} ${fitsRow}`}>{CREDIT_TEXT.hideWarning}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+/** One credit note's facts as the list shows them (§4.1): number, status, amount, reason, times, withdrawal and, for the owner, names. */
+function CreditNoteFacts({ note, prefix }: { readonly note: InvoiceCreditNote; readonly prefix: string }) {
+  return (
+    <>
+      <p className="font-bold text-slate-700">
+        <span data-testid={`${prefix}-number`}>{CREDIT_TEXT.number(note.number)}</span>
+        {' · '}<span data-testid={`${prefix}-status`}>{note.withdrawal === null ? CREDIT_TEXT.active : CREDIT_TEXT.withdrawn}</span>
+        {' · '}<span data-testid={`${prefix}-amount`} className="whitespace-nowrap">{formatCents(note.grossCents)}</span>
+        {' · '}<span data-testid={`${prefix}-reason`}>{INVOICE_CREDIT_NOTE_REASONS[note.reason]}</span>
+      </p>
+      <p className={hintClass}>{CREDIT_TEXT.issuedAt} <time data-testid={`${prefix}-issued-at`} dateTime={note.issuedAt}>{utcText(note.issuedAt)}</time></p>
+      {note.withdrawal !== null && (
+        <p className={hintClass}>
+          {CREDIT_TEXT.withdrawnAt} <time data-testid={`${prefix}-withdrawn-at`} dateTime={note.withdrawal.withdrawnAt}>{utcText(note.withdrawal.withdrawnAt)}</time>
+          {' · '}<span data-testid={`${prefix}-withdrawal-reason`}>{INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS[note.withdrawal.reason]}</span>
+        </p>
+      )}
+      {note.issuedByName !== undefined && (
+        <p data-testid={`${prefix}-issued-by`} className={`${hintClass} [overflow-wrap:anywhere]`}>{CREDIT_TEXT.issuedBy} <bdi>{note.issuedByName ?? CREDIT_TEXT.nameNotSet}</bdi></p>
+      )}
+      {note.withdrawal !== null && note.withdrawal.withdrawnByName !== undefined && (
+        <p data-testid={`${prefix}-withdrawn-by`} className={`${hintClass} [overflow-wrap:anywhere]`}>{CREDIT_TEXT.withdrawnBy} <bdi>{note.withdrawal.withdrawnByName ?? CREDIT_TEXT.nameNotSet}</bdi></p>
+      )}
+    </>
+  );
+}
+
+/**
+ * The chosen store's "Credit activity" (doc 18 §4.1-§4.3): heading one level below the section's, the intro line, one live
+ * state line (Loading, Empty only after a read to the end, the error, the wait, "{n} more loaded."), Refresh while ready,
+ * Try again after a failure, the rows as served, then Show more while a cursor stands. Refresh, Try again and Show more stay
+ * rendered (aria-disabled) through their own read, so focus stays on them; a Show more that loaded the last page hands
+ * focus to the heading. No action on any row.
+ */
+function CreditActivitySection({ a, waiting, onMore, onRefresh, onRetry }: {
+  readonly a: ActivityState; readonly waiting: boolean; readonly onMore: () => void; readonly onRefresh: () => void; readonly onRetry: () => void;
+}) {
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const more = useRef<HTMLButtonElement | null>(null);
+  const refresh = useRef<HTMLButtonElement | null>(null);
+  const retry = useRef<HTMLButtonElement | null>(null);
+  // The control pressed with focus on it, until its read ends: if it is then gone, focus goes to the control now shown in
+  // its place — Try again after a failure, Refresh after a Try again that loaded — else (Show more's last page) the heading.
+  const pressed = useRef<'more' | 'refresh' | 'retry' | null>(null);
+  useLayoutEffect(() => {
+    const was = pressed.current;
+    if (was === null || a.more || a.phase === 'loading') return;
+    pressed.current = null;
+    if ((was === 'more' ? more : was === 'refresh' ? refresh : retry).current?.isConnected === true) return; // still there: focus stays on it
+    const at = document.activeElement;
+    if (at !== null && at !== document.body) return;
+    (retry.current ?? (was === 'more' ? null : refresh.current) ?? heading.current)?.focus();
+  });
+  const press = (which: 'more' | 'refresh' | 'retry', e: { readonly currentTarget: Element }): void => { pressed.current = document.activeElement === e.currentTarget ? which : null; };
+  const loading = a.phase === 'loading';
+  const failed = a.phase === 'failed' || a.phase === 'rate-limited';
+  const text = loading ? ACTIVITY_TEXT.loading : a.phase === 'failed' ? ACTIVITY_TEXT.failed : a.phase === 'rate-limited' ? LIST_TEXT.waiting
+    : a.complete && a.rows.length === 0 ? ACTIVITY_TEXT.empty : a.said;
+  const why = waiting ? 'issued-credit-activity-wait' : loading || a.more ? 'issued-credit-activity-busy' : undefined;
+  return (
+    // data-cursor: whether a cursor is held for Show more (a failed page drops it with the rows; tests read it).
+    <div data-testid="issued-credit-activity" data-cursor={a.next === null ? 'none' : 'held'} className="space-y-2">
+      <h4 ref={heading} id="issued-credit-activity-title" data-testid="issued-credit-activity-title" tabIndex={-1} className={`text-base font-black text-primary ${focusRing}`}>{ACTIVITY_TEXT.title}</h4>
+      <p data-testid="issued-credit-activity-intro" className={hintClass}>{ACTIVITY_TEXT.intro}</p>
+      <p data-testid="issued-credit-activity-state" data-phase={a.phase} role="status" className="text-sm font-bold text-slate-600">{text}</p>
+      {(a.phase === 'ready' || (loading && a.via === 'refresh')) && (
+        <button
+          ref={refresh} type="button" data-testid="issued-credit-activity-refresh" aria-disabled={loading || a.more || waiting} aria-describedby={why}
+          onClick={(e) => { if (loading || a.more || waiting) return; press('refresh', e); onRefresh(); }} className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {ACTIVITY_TEXT.refresh}
+        </button>
+      )}
+      {(failed || (loading && a.via === 'retry')) && (
+        <button
+          ref={retry} type="button" data-testid="issued-credit-activity-retry" aria-disabled={loading || waiting} aria-describedby={why}
+          onClick={(e) => { if (loading || waiting) return; press('retry', e); onRetry(); }} className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.tryAgain}
+        </button>
+      )}
+      {a.phase === 'ready' && a.rows.length > 0 && (
+        <ul data-testid="issued-credit-activity-list" aria-labelledby="issued-credit-activity-title" className="divide-y divide-slate-100 border border-slate-100 rounded-2xl">
+          {a.rows.map((note) => (
+            <li key={note.id} data-testid="issued-credit-activity-item" data-id={note.id} className="px-4 py-3 text-sm min-w-0 break-words">
+              <ActivityFacts note={note} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {a.phase === 'ready' && a.next !== null && (
+        <button
+          ref={more} type="button" data-testid="issued-credit-activity-more" aria-disabled={a.more || waiting} aria-describedby={why}
+          onClick={(e) => {
+            if (a.more || waiting) return;
+            press('more', e);
+            onMore();
+          }}
+          className={`${quiet} ${waitable} ${fitsRow}`}
+        >
+          {CREDIT_TEXT.showMore}
+        </button>
+      )}
+      {(loading || a.more) && <span id="issued-credit-activity-busy" className="sr-only">{ACTIVITY_TEXT.loading}</span>}
+      {waiting && <span id="issued-credit-activity-wait" className="sr-only">{LIST_TEXT.waiting}</span>}
+    </div>
+  );
+}
+
+/** One activity row in doc 18 §4.2's order: number, invoice, status as text, gross, reason; issued time and by; the withdrawal. */
+function ActivityFacts({ note }: { readonly note: StoreCreditNote }) {
+  const p = 'issued-credit-activity';
+  return (
+    <>
+      <p className="font-bold text-slate-700">
+        <span data-testid={`${p}-number`}>{CREDIT_TEXT.number(note.number)}</span>
+        {' · '}<span data-testid={`${p}-invoice`}>{ACTIVITY_TEXT.invoice(note.invoiceNumber)}</span>
+        {' · '}<span data-testid={`${p}-status`}>{note.withdrawal === null ? CREDIT_TEXT.active : CREDIT_TEXT.withdrawn}</span>
+        {' · '}<span data-testid={`${p}-amount`} className="whitespace-nowrap">{formatCents(note.grossCents)}</span>
+        {' · '}<span data-testid={`${p}-reason`}>{INVOICE_CREDIT_NOTE_REASONS[note.reason]}</span>
+      </p>
+      <p className={hintClass}>{CREDIT_TEXT.issuedAt} <time data-testid={`${p}-issued-at`} dateTime={note.issuedAt}>{utcText(note.issuedAt)}</time></p>
+      <p data-testid={`${p}-issued-by`} className={`${hintClass} [overflow-wrap:anywhere]`}>{CREDIT_TEXT.issuedBy} <bdi>{note.issuedByName ?? CREDIT_TEXT.nameNotSet}</bdi></p>
+      {note.withdrawal !== null && (
+        <>
+          <p className={hintClass}>
+            {CREDIT_TEXT.withdrawnAt} <time data-testid={`${p}-withdrawn-at`} dateTime={note.withdrawal.withdrawnAt}>{utcText(note.withdrawal.withdrawnAt)}</time>
+            {' · '}<span data-testid={`${p}-withdrawal-reason`}>{INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS[note.withdrawal.reason]}</span>
+          </p>
+          <p data-testid={`${p}-withdrawn-by`} className={`${hintClass} [overflow-wrap:anywhere]`}>{CREDIT_TEXT.withdrawnBy} <bdi>{note.withdrawal.withdrawnByName ?? CREDIT_TEXT.nameNotSet}</bdi></p>
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * This invoice's rows of the owner's lookup (doc 17 §3.3), read under this generation and token: open → "Registered, not
+ * issued when checked at {time}" and "Release attempt" (releaseHint); issued → "Issued, not confirmed" and "Confirm credit
+ * note" (confirmHint); released or confirmed → the word only. Release and Confirm exist only here (lookup-first, D-P2-16).
+ * No attempt id reaches a DOM attribute: the hints are keyed by position.
+ */
+function CreditRows({ lookup, busy, waiting, canSettle, openOther, headingRef, onSettle }: {
+  readonly lookup: CreditNotesLookup | null; readonly busy: boolean; readonly waiting: boolean; readonly canSettle: boolean;
+  /** This user's open hold's attempt: another attempt's row cannot be held meanwhile (one live attempt, §2.6 item 1) — blockedOwn. */
+  readonly openOther: string | null;
+  readonly headingRef: RefObject<HTMLHeadingElement | null>; readonly onSettle: (row: CreditLookupRow, version: 1 | 2) => void;
+}) {
+  const pressed = useRef<HTMLElement | null>(null);
+  // A pressed row button that went (its row settled) while focused: focus to the Payments heading, never the body.
+  useLayoutEffect(() => {
+    const was = pressed.current;
+    if (was === null || was.isConnected) return;
+    pressed.current = null;
+    const at = document.activeElement;
+    if (at === null || at === document.body) headingRef.current?.focus();
+  });
+  const rows = lookup !== null && (lookup.phase === 'exhausted' || lookup.phase === 'incomplete') ? lookup.rows : [];
+  if (rows.length === 0) return null;
+  const out = busy || waiting;
+  const blockedBy = (row: CreditLookupRow): boolean => openOther !== null && openOther !== row.attemptId;
+  const press = (e: { readonly currentTarget: HTMLElement }, row: CreditLookupRow, version: 1 | 2): void => {
+    if (out || blockedBy(row)) return;
+    pressed.current = e.currentTarget;
+    onSettle(row, version);
+  };
+  return (
+    <>
+    {canSettle && openOther !== null && rows.some(blockedBy) && <p id="issued-payments-credit-rows-own" data-testid="issued-payments-credit-rows-own" className={`${hintClass} ${fitsRow}`}>{CREDIT_TEXT.blockedOwn}</p>}
+    {waiting && <span id="issued-payments-credit-rows-wait" className="sr-only">{LIST_TEXT.waiting}</span>}
+    {busy && !waiting && <span id="issued-payments-credit-rows-busy" className="sr-only">{VIEW_TEXT.loading}</span>}
+    <ul data-testid="issued-payments-credit-rows" className="space-y-2 min-w-0">
+      {rows.map((row, i) => (
+        <li key={`${row.invoiceId}.${row.attemptId}`} data-testid="issued-payments-credit-row" data-state={row.state} className="p-3 rounded-xl border border-slate-200 space-y-1 min-w-0">
+          <p data-testid="issued-payments-credit-row-state" className={`text-sm font-bold text-slate-700 ${fitsRow}`}>
+            {row.state === 'open' ? CREDIT_TEXT.rowOpen(clockText(row.checkedAt)) : row.state === 'issued' ? CREDIT_TEXT.rowIssued : row.state === 'released' ? CREDIT_TEXT.rowReleased : CREDIT_TEXT.rowConfirmed}
+          </p>
+          <p className={`${hintClass} ${fitsRow}`}>
+            <span data-testid="issued-payments-credit-row-amount" className="whitespace-nowrap">{formatCents(row.grossCents)}</span>{' · '}{INVOICE_CREDIT_NOTE_REASONS[row.reason]}
+          </p>
+          {canSettle && (row.state === 'open' || row.state === 'issued') && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button" data-testid={row.state === 'open' ? 'issued-payments-credit-row-release' : 'issued-payments-credit-row-confirm'}
+                aria-disabled={out || blockedBy(row)}
+                aria-describedby={[`issued-payments-credit-row-hint-${i}`, blockedBy(row) ? 'issued-payments-credit-rows-own' : waiting ? 'issued-payments-credit-rows-wait' : busy ? 'issued-payments-credit-rows-busy' : ''].filter((x) => x !== '').join(' ')} onClick={(e) => press(e, row, row.state === 'open' ? 1 : 2)}
+                className={`${quiet} ${waitable} ${actionFit}`}
+              >
+                {row.state === 'open' ? CREDIT_TEXT.release : CREDIT_TEXT.confirm}
+              </button>
+              <p id={`issued-payments-credit-row-hint-${i}`} className={`w-full ${hintClass} ${fitsRow}`}>{row.state === 'open' ? CREDIT_TEXT.releaseHint : CREDIT_TEXT.confirmHint}</p>
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+    </>
+  );
+}
+
+/**
+ * The credit-note confirmation (doc 17 §2.5): an alertdialog beside the issued dialog, "Don't issue" first (initial focus),
+ * the facts the review read and the consequence; the sign-in group when no fit shop-observed sign-in exists; its own live
+ * pair (the page behind is inert). While sending, "Don't issue" is "Close" with closeWarning; closing never aborts.
+ */
+function CreditConfirmDialog({ c, waiting, password, focusSignIn, focusKeep, onPassword, onPress, onClose, onSignIn, onStopSignIn, returnFocus }: {
+  readonly c: CreditConfirm; readonly waiting: boolean; readonly password: string; readonly focusSignIn: number; readonly focusKeep: number;
+  readonly onPassword: (value: string) => void; readonly onPress: () => void; readonly onClose: () => void; readonly onSignIn: () => void; readonly onStopSignIn: () => void;
+  readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const passwordRef = useRef<HTMLInputElement | null>(null);
+  const signInButton = useRef<HTMLButtonElement | null>(null);
+  const signInSeen = useRef(focusSignIn);
+  const keepSeen = useRef(focusKeep);
+  const method = c.stepUp?.method;
+  useEffect(() => {
+    if (focusSignIn === signInSeen.current) return;
+    signInSeen.current = focusSignIn;
+    (method === 'password' ? passwordRef.current : signInButton.current)?.focus();
+  }, [focusSignIn, method]);
+  useEffect(() => {
+    if (focusKeep === keepSeen.current) return;
+    keepSeen.current = focusKeep;
+    keep.current?.focus();
+  }, [focusKeep]);
+  const why = c.sending ? CREDIT_TEXT.sending : c.renewing ? VOID_TEXT.renewing : waiting ? VOID_TEXT.waiting : '';
+  const signInBlocked = c.confirming || waiting || (method === 'password' && password.length === 0);
+  const amount = formatCents(c.grossCents);
+  // P2-46b: on close, straight to `returnFocus` (the action, else the Payments heading) — never the form's Continue first.
+  return (
+    <DialogFrame
+      role="alertdialog" labelledBy="issued-credit-title" describedBy="issued-credit-description" testId="issued-credit-confirm" anchor="top"
+      busy={false} onClose={onClose} initialFocus={keep} returnFocus={returnFocus} preferReturnFocus
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h2 id="issued-credit-title" data-testid="issued-credit-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">{CREDIT_TEXT.title}</h2>
+        <button ref={keep} type="button" data-testid="issued-credit-keep" aria-describedby={c.sending ? 'issued-credit-close-warning' : undefined} onClick={onClose} className={`${quiet} ${actionFit}`}>
+          {c.sending ? CREDIT_TEXT.close : CREDIT_TEXT.keep}
+        </button>
+      </div>
+      <div className="space-y-2 text-sm font-medium text-slate-700">
+        <p data-testid="issued-credit-facts" className="break-words">
+          Invoice <span data-testid="issued-credit-number">{c.number}</span>:{' '}
+          <span data-testid="issued-credit-amount" className="whitespace-nowrap font-black text-primary">{amount}</span>
+          {' · '}<span data-testid="issued-credit-reason">{INVOICE_CREDIT_NOTE_REASONS[c.reason]}</span>
+          {' · '}Remaining <span data-testid="issued-credit-remaining" className="whitespace-nowrap">{formatCents(c.remaining)}</span>
+        </p>
+        <p id="issued-credit-description" data-testid="issued-credit-description">{CREDIT_TEXT.consequence(amount)}</p>
+      </div>
+      {c.sending && <p id="issued-credit-close-warning" data-testid="issued-credit-close-warning" className={hintClass}>{CREDIT_TEXT.closeWarning}</p>}
+      {c.stepUp !== null && (
+        // The void's sign-in pattern (one owner, 30 s, Stop waiting), its own ids; paste and password managers allowed.
+        // Named by the confirmation's alert: why a sign-in is asked for (signInNeeded, signInExpired) or how the last one went —
+        // and by its own explanation, so it keeps a name while the alert is empty.
+        <div role="group" aria-labelledby="issued-credit-confirm-alert issued-credit-reauth-explain" data-testid="issued-credit-reauth-group" className="flex flex-wrap items-end gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100">
+          <p id="issued-credit-reauth-explain" data-testid="issued-credit-reauth-explain" className="w-full text-[11px] font-medium text-amber-800">{method === null ? VOID_TEXT.reauthNone : VOID_TEXT.reauthExplain}</p>
+          {method === 'password' && (
+            <div className="flex flex-col gap-1 min-w-0 max-w-full">
+              <label htmlFor="issued-credit-reauth-password" className={labelClass}>Your password</label>
+              <input
+                ref={passwordRef} id="issued-credit-reauth-password" data-testid="issued-credit-reauth-password" type="password" autoComplete="current-password"
+                value={password} readOnly={c.confirming} onChange={(e) => onPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!signInBlocked) onSignIn(); } }}
+                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white min-w-0 max-w-full ${focusRing}`}
+              />
+            </div>
+          )}
+          {method !== null && method !== undefined && (
+            <>
+              <button
+                ref={signInButton} type="button" data-testid="issued-credit-reauth-confirm" aria-disabled={signInBlocked}
+                onClick={() => { if (!signInBlocked) onSignIn(); }}
+                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing} ${fitsRow}`}
+              >
+                {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
+              </button>
+              {c.confirming && <button type="button" data-testid="issued-credit-reauth-stop" onClick={onStopSignIn} className={`${quiet} ${fitsRow}`}>{VOID_TEXT.stopWaiting}</button>}
+              {c.confirming && <p data-testid="issued-credit-reauth-stop-hint" className="w-full text-[11px] font-medium text-amber-800">{VOID_TEXT.stopWaitingHint}</p>}
+            </>
+          )}
+        </div>
+      )}
+      {/* Its own pair while open (the page behind is inert): always mounted. */}
+      <p data-testid="issued-credit-confirm-status" role="status" className="text-sm font-bold text-amber-900">{c.sending ? CREDIT_TEXT.sending : c.status !== null && !c.status.alert ? c.status.text : ''}</p>
+      <p id="issued-credit-confirm-alert" data-testid="issued-credit-confirm-alert" role="alert" className="text-sm font-bold text-rose-800">{c.status?.alert === true ? c.status.text : ''}</p>
+      {c.stepUp === null && (
+        <div className="flex flex-wrap justify-end items-center gap-3">
+          {why !== '' && <span id="issued-credit-send-why" data-testid="issued-credit-send-why" className="sr-only">{why}</span>}
+          <button
+            type="button" data-testid="issued-credit-send" aria-disabled={why !== ''} aria-describedby={why !== '' ? 'issued-credit-send-why' : undefined}
+            onClick={onPress} className={`${button} ${waitable} ${actionFit}`}
+          >
+            {CREDIT_TEXT.action}
+          </button>
+        </div>
+      )}
+    </DialogFrame>
+  );
+}
+
 export function lookupListsUnsettled(lookup: PaymentLookup | null, storeId: string, invoiceId: string): boolean {
   return lookup !== null && lookup.storeId === storeId && lookup.invoiceId === invoiceId && lookup.rows.some((r) => r.state === 'open' || r.state === 'recorded');
 }

@@ -332,7 +332,7 @@ async function teardown() {
             'tmpos_invoice_void.issued_invoice_void'::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         voids: 0, void_audits: 0, settings: 0, counters: 0, invoices: 0, issued_lines: 0, issued_drafts: 0, issue_audits: 0, subjects: 0, drafts: 0,
-        customers: 0, anchors: 0, latest: '038',
+        customers: 0, anchors: 0, latest: '039',
         triggers: ['trg_invoice_draft_immutable:A', 'trg_invoice_draft_line_terminal:A', 'trg_invoice_draft_terminal:A', 'trg_issued_invoice_commit_check:A',
           'trg_issued_invoice_guard:A', 'trg_issued_invoice_line_guard:A', 'trg_issued_invoice_line_truncate:A', 'trg_issued_invoice_truncate:A',
           'trg_issued_invoice_void_guard:A', 'trg_issued_invoice_void_truncate:A', 'trg_issued_invoice_void_credit_note_barrier:A', // 038's ALWAYS barrier
@@ -2210,9 +2210,9 @@ test('IVH-13 (VOID-13 server half, R-SEC-04): no log line of any entry carries a
     assert.deepEqual(reasonSentences.filter((v) => reasonScan.includes(v)), [], 'nor a void audit sentence');
     assert.equal(KEYED_REASON.test(reasonScan), false, 'nor a keyed void reason');
   }
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 47, 'exactly the 47 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four, M7B-CREDITNOTES-P1 seven)');
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 48, 'exactly the 48 shipping routes (M7B-PAYMENTS-P1 adds five, M7B-PAYMENTS-P2 four, M7B-CREDITNOTES-P1 seven, doc 18 one)');
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path}`);
-  assert.equal(new Set(served).size, 47, 'no route twice');
+  assert.equal(new Set(served).size, 48, 'no route twice');
   const detail = served.indexOf('GET /api/v1/stores/{storeId}/invoices/{id}');
   assert.ok(detail >= 0, 'the issued detail is served');
   assert.deepEqual(served.slice(detail + 1, detail + 3), ['GET /api/v1/stores/{storeId}/invoices/{id}/void-eligibility', 'POST /api/v1/stores/{storeId}/invoices/{id}/void'],

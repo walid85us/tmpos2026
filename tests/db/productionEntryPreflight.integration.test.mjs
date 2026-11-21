@@ -507,12 +507,12 @@ const LEDGER_ENTRY_CASES = [
   // (M7B-INVOICES-P1-R3) 031, and with the Customers authority of the guarded draft save (M7B-INVOICES-P1-R4) it was 032; with the
   // draft discard (M7B-INVOICES-DISCARD-P1) it was 033; with invoice issuing (M7B-INVOICES-ISSUE-P1) it was 034; with invoice void
   // (M7B-INVOICES-VOID-P1) it was 035; with payment recording (M7B-PAYMENTS-P1) it was 036; with the payment registration
-  // (M7B-PAYMENTS-P2) it was 037; with the credit notes (M7B-CREDITNOTES-P1) it is 038 (its row is restored from the snapshot afterwards), and the fake next row is '039'.
-  { label: '17', name: 'missing 038', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '038'` },
+  // (M7B-PAYMENTS-P2) it was 037; with the credit notes (M7B-CREDITNOTES-P1) it was 038; with the store credit activity (M7B-CREDITACTIVITY) it is 039 (its row is restored from the snapshot afterwards), and the fake next row is '040'.
+  { label: '17', name: 'missing 039', code: 'migration_missing', mutate: () => owner`delete from public.schema_migrations where version = '039'` },
   { label: '18', name: 'a gap (010 removed)', code: 'migration_not_contiguous', mutate: () => owner`delete from public.schema_migrations where version = '010'` },
   { label: '19', name: 'dirty 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set dirty = true where version = '013'` },
   { label: '20', name: 'finished_at null on 013', code: 'migration_dirty', mutate: () => owner`update public.schema_migrations set finished_at = null where version = '013'` },
-  { label: '21', name: "an extra '039' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('039', ${'0'.repeat(64)}, false, now(), now())` },
+  { label: '21', name: "an extra '040' row", code: 'migration_unknown', mutate: () => owner`insert into public.schema_migrations (version, checksum, dirty, started_at, finished_at) values ('040', ${'0'.repeat(64)}, false, now(), now())` },
   { label: '22', name: 'a changed checksum on 015', code: 'migration_checksum_mismatch', mutate: () => owner`update public.schema_migrations set checksum = ${'f'.repeat(64)} where version = '015'` },
 ];
 for (const { label, name, code, mutate } of LEDGER_ENTRY_CASES) {
