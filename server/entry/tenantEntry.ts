@@ -8,8 +8,9 @@
 //       SESSION_TENANT_ORIGINS, exactly one canonical https origin on a host distinct from SESSION_ADMIN_ORIGINS's (which is
 //       required here for that comparison); TENANT_SESSION_ISSUER_KEY, the minting secret (transactionKernel.ts
 //       parseTenantIssuerKey: present, canonical, never RATE_LIMIT_KEY, not weak); and IDEMPOTENCY_KEY, this process's own
-//       command secret (M7A-CUSTOMERS-P3): present, canonical, never RATE_LIMIT_KEY or the issuer key. A refusal names each
-//       field and a bounded code, never a value;
+//       command secret (M7A-CUSTOMERS-P3): present, canonical, never RATE_LIMIT_KEY or the issuer key; and (doc 18 §6.6,
+//       D-CA-14 A) TMPOS_CREDIT_NOTE_WRITES, exactly `on` or `off`, logged with this process's random instance id on the
+//       `startup_ready` line. A refusal names each field and a bounded code, never a value;
 //    2. the database client — the tenant transaction root composes the kernel over the classified APP_DATABASE_URL through
 //       the construction's constructor, with every port over it, inert: nothing connects yet;
 //    3. connect;
@@ -35,6 +36,7 @@
 //       issuing reads — M7B-INVOICES-ISSUE-P1, 034's settings read and preview and, since M7B-INVOICES-VOID-P1, 035's v2 page and
 //       get — then the payments read — M7B-PAYMENTS-P1, 036's — each refusing an absent key), and the idempotency store and
 //       the command port answer theirs (006's probe);
+//  10b. the database clock — one read-only sample for the startup line (doc 18 §6.6); unanswered or malformed refuses;
 //   11. listen — only now. Readiness turns ready once the listener is bound.
 // Any refusal logs one or more `startup_refused` lines of bounded codes, ends the kernel and exits nonzero; no listener was
 // ever opened. There is no degraded mode, no in-memory fallback, no automatic migration and no key installation.
@@ -108,7 +110,8 @@
 // SHUTDOWN, and THE CONSTRUCTION BOUNDARY, exactly as the administrative entry's (productionEntry.ts): the lifecycle is
 // installed first, and PRODUCTION_CONSTRUCTION is the only construction the executable passes. No testkit or fake is
 // reachable from this file.
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { CREDIT_NOTE_WRITES_VAR } from '../platform-identity/config.js';
 import { createApp, createBoundedServer, createReadinessState } from '../runtime/app.js';
 import { loadConfig } from '../runtime/config.js';
 import { createLifecycle } from '../runtime/lifecycle.js';
@@ -211,6 +214,10 @@ export function validateTenantEntryConfig(env: Readonly<Record<string, string | 
   else if ((limiterKey !== null && sameKeyMaterial(idempotencyKey, limiterKey)) || (typeof issuerKey !== 'string' && sameKeyMaterial(idempotencyKey, issuerKey))) {
     errors.push({ field: 'IDEMPOTENCY_KEY', code: 'idempotency_key_shared' });
   }
+  // Doc 18 §6.6 (D-CA-14 A): the credit-note write setting, exactly `on` or `off` — anything else, or absence, refuses startup.
+  const writes = env[CREDIT_NOTE_WRITES_VAR];
+  if (!present(writes)) errors.push({ field: CREDIT_NOTE_WRITES_VAR, code: 'credit_note_writes_missing' });
+  else if (writes !== 'on' && writes !== 'off') errors.push({ field: CREDIT_NOTE_WRITES_VAR, code: 'credit_note_writes_invalid' });
   return errors;
 }
 
@@ -229,6 +236,9 @@ export const servesExactlyTenantRoutes = (routes: readonly ServedRoute[]): boole
  */
 export async function startTenantEntry(options: EntryOptions): Promise<EntryResult> {
   const { env, construction, proc, exit, log } = options;
+  // Doc 18 §6.6: a random id per process start — never a hostname, an environment value or a secret — carried by the startup
+  // line and every credit_note_write line, so an operator can tell which instance ran with which write setting.
+  const instanceId = randomUUID();
   const readiness = createReadinessState();
   // Aborted by the lifecycle's first hook: a signal during startup abandons the step in flight and binds nothing.
   const startup = new AbortController();
@@ -353,6 +363,9 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
         sessions: sessions.sessions,
         hsts: true,
         hosts: [tenantHost],
+        // Doc 18 §6.6: step 1 proved the value exactly `on` or `off`.
+        creditNoteWrites: env[CREDIT_NOTE_WRITES_VAR] as 'on' | 'off',
+        instanceId,
         dependencyChecks: [
           async (signal) => (await tx.issuerKey(signal)) === 'match',
           (signal) => tx.readsProbe(signal),
@@ -421,6 +434,17 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
     await probe('command_transactions', (signal) => tx.transactions?.port.probe(signal));
     if (unready.length > 0) return await refuse('dependency_unready', unready);
 
+    // 10b. Doc 18 §6.6 / §9.3.2 ("times"): one read-only sample of the DATABASE clock through the startup preflight, for the
+    //      startup line — after every check above, before the listener and readiness. It fails closed (the owner's rule,
+    //      doc 18 §6.6 and §14, 2026-11-19): no sample, or a malformed one, refuses database_unavailable with the fixed
+    //      code startup_clock_unanswered — never the database's text.
+    let databaseClock: string;
+    try {
+      databaseClock = await bounded(startup.signal, (signal) => preflight.databaseClock(signal));
+    } catch {
+      return await refuse('database_unavailable', ['startup_clock_unanswered']);
+    }
+
     // 11. Listen — only now, and bounded like every step. A socket that binds after startup gave up on this step (a signal
     // or the deadline) is closed the moment it binds, so nothing listens once startup has stopped.
     if (startup.signal.aborted) return interrupted();
@@ -456,7 +480,9 @@ export async function startTenantEntry(options: EntryOptions): Promise<EntryResu
       return interrupted();
     }
     readiness.setReady();
-    emitLog('info', { event: 'startup_ready' }, log);
+    // Doc 18 §6.6 / §9.3.2 step 3: the per-instance evidence — this instance's id and its write setting, at the line's time.
+    // The instance clock is the line's own timestamp; databaseClock is the database's, sampled at step 10b.
+    emitLog('info', { event: 'startup_ready', instanceId, creditNoteWrites: env[CREDIT_NOTE_WRITES_VAR], databaseClock }, log);
     return Object.freeze({ outcome: 'listening', failure: null, reasons: Object.freeze([]), address, routes });
   } catch {
     // A defect, never a verdict: its text is not logged, since it may carry what the refusals above never do.

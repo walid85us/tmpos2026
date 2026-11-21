@@ -245,6 +245,8 @@ async function bringUp(gen) {
     SESSION_TENANT_ORIGINS: publicOrigin,
     TENANT_SESSION_ISSUER_KEY: issuerKey.toString('base64url'),
     IDEMPOTENCY_KEY: idempotencyKey.toString('base64url'),
+    // Doc 18 §6.6 (D-CA-14 A): the tenant entry refuses to start without its credit-note write setting.
+    TMPOS_CREDIT_NOTE_WRITES: 'on',
     FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: JSON.stringify({
       type: 'service_account', project_id: projectId, client_email: `qa-runtime@${projectId}.iam.gserviceaccount.com`, private_key: privateKey,
     }),

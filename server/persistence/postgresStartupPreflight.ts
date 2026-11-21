@@ -483,7 +483,16 @@ export interface StartupPreflight {
   migrationLedger(signal: AbortSignal): Promise<LedgerViolation[]>;
   /** [] when the login's sessions would log no bound parameter; otherwise every setting that would. */
   parameterLogging(signal: AbortSignal): Promise<ParameterLoggingViolation[]>;
+  /**
+   * Doc 18 §6.6 / §9.3.2 ("times"): one read-only sample of the DATABASE clock (`pg_catalog.clock_timestamp()`, the wall clock
+   * inside the statement, never the transaction's start), in UTC with microseconds (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), for the
+   * tenant entry's startup line. A malformed answer throws the fixed preflight_answer_invalid. No write, no new privilege.
+   */
+  databaseClock(signal: AbortSignal): Promise<string>;
 }
+
+/** The database clock sample's one shape: UTC, microseconds, `Z`. */
+export const DATABASE_CLOCK_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
 
 type Row = Readonly<Record<string, unknown>>;
 /** A fixed word: nothing of the database's answer is carried in it. */
@@ -685,6 +694,16 @@ export function createPostgresStartupPreflight(deps: { readonly client: Supervis
     },
     async parameterLogging(signal: AbortSignal): Promise<ParameterLoggingViolation[]> {
       return evaluateParameterLogging(await client.transaction(signal, PREFLIGHT_BOUNDS, readParameterLogging));
+    },
+    async databaseClock(signal: AbortSignal): Promise<string> {
+      const rows = rowsOf(await client.transaction(signal, PREFLIGHT_BOUNDS, (sql) => sql`select pg_catalog.to_char(
+          pg_catalog.clock_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as database_clock`));
+      if (rows.length !== 1) throw invalidAnswer(); // exactly one row, or no sample
+      const sample = text(rows[0].database_clock);
+      // The shape alone admits 2001-13-45T29:99:99: the sample must also name a real UTC instant that survives a round trip.
+      const at = new Date(`${sample.slice(0, 19)}Z`);
+      if (!DATABASE_CLOCK_RE.test(sample) || Number.isNaN(at.getTime()) || at.toISOString().slice(0, 19) !== sample.slice(0, 19)) throw invalidAnswer();
+      return sample;
     },
   });
 }

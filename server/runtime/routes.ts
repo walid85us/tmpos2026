@@ -337,6 +337,11 @@ interface RouteDefinitionBase {
   readonly recentAuth: RecentAuthPolicy;
   /** Optional: an undeclared binding is 'none'. */
   readonly sessionBinding?: SessionBindingPolicy;
+  /**
+   * Doc 18 §6.6 (D-CA-14 A): the write setting this route is refused under when it is `off` — declared by exactly the closed
+   * CREDIT_NOTE_WRITE_GATED set and by no other route; app.ts judges it right after authorization, before the body and the key.
+   */
+  readonly writeGate?: 'credit_note_write';
 }
 
 export type RouteDefinition =
@@ -384,6 +389,9 @@ export type EnforcementSetupCode =
   | 'route_trusted_context_invalid'
   | 'route_recent_auth_invalid'
   | 'route_session_binding_invalid'
+  | 'route_write_gate_invalid'
+  | 'credit_note_writes_invalid'
+  | 'instance_id_invalid'
   | 'idempotency_required'
   | 'idempotency_invalid'
   | 'idempotency_key_invalid'
@@ -558,6 +566,16 @@ const SESSION_BOUND_STORE_COMMANDS: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/payments`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registrations`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
+]);
+/**
+ * The commands the credit-note write setting refuses while `off` (doc 18 §6.6, §9.3.1; D-CA-14 A): exactly the registration, the
+ * issue and the withdrawal. Each MUST declare `writeGate: 'credit_note_write'`, and no other route may — the settlement, the proof,
+ * the attempts lookup and every read stay available.
+ */
+const CREDIT_NOTE_WRITE_GATED: ReadonlySet<string> = new Set([
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-registrations`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
+  `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes${CREDIT_NOTE_ID_SEGMENT}/withdrawal`,
 ]);
 /** Every template's path before its `/{id}` (or, for a store template, its `/{storeId}`): no literal path may sit anywhere below one. */
 const TEMPLATE_PREFIXES: ReadonlySet<string> = new Set([
@@ -773,7 +791,7 @@ function parseCommand(raw: unknown): CommandRoute {
 
 function parseDefinition(raw: unknown): RouteDefinition {
   if (!isPlainObject(raw) || !hasOnlyKeys(raw,
-    ['method', 'path', 'policy', 'body', 'idempotency', 'trustedContext', 'recentAuth', 'sessionBinding', 'handler', 'perform', 'command'])) {
+    ['method', 'path', 'policy', 'body', 'idempotency', 'trustedContext', 'recentAuth', 'sessionBinding', 'writeGate', 'handler', 'perform', 'command'])) {
     throw new EnforcementSetupError('route_definition_invalid');
   }
   const { method, path, handler, perform, command } = raw;
@@ -814,7 +832,15 @@ function parseDefinition(raw: unknown): RouteDefinition {
   const recentAuth = parseRecentAuth(raw.recentAuth, policy);
   const sessionBinding = parseSessionBinding(raw.sessionBinding, policy, trustedContext, idempotency, isStoreDirectory(method, path, policy),
     SESSION_BOUND_STORE_COMMANDS.has(key) && 'command' in raw);
-  const declared = { method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth, sessionBinding };
+  // Doc 18 §6.6: the closed gated set declares the write gate, as a command; nothing else may (undeclared is absent).
+  const gated = CREDIT_NOTE_WRITE_GATED.has(key) && 'command' in raw;
+  if (gated ? raw.writeGate !== 'credit_note_write' : raw.writeGate !== undefined && raw.writeGate !== null) {
+    throw new EnforcementSetupError('route_write_gate_invalid');
+  }
+  const declared = {
+    method: method as RouteMethod, path, policy, body, idempotency, trustedContext, recentAuth, sessionBinding,
+    ...(gated ? { writeGate: 'credit_note_write' as const } : {}),
+  };
   // The operation matches the policy: a handler for `none`; a `perform` or a `command` for `required` — exactly one.
   if (idempotency === 'none') {
     if (typeof handler !== 'function' || 'perform' in raw || 'command' in raw) throw new EnforcementSetupError('route_handler_invalid');

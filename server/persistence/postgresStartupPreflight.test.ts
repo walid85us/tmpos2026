@@ -602,7 +602,7 @@ test('evaluateMigrationLedger: each ledger code', () => {
 // --- D. createPostgresStartupPreflight over a FAKE SupervisedPgClient (no database) ----------------------
 
 type Row = Readonly<Record<string, unknown>>;
-type QueryKind = 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'grants' | 'database' | 'exposure' | 'ledgerAccess' | 'ledgerRows';
+type QueryKind = 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'grants' | 'database' | 'exposure' | 'ledgerAccess' | 'ledgerRows' | 'clock';
 
 /** Which of the preflight's fixed statements `text` is, by a substring only that statement's text carries. */
 function classify(text: string): QueryKind {
@@ -617,6 +617,7 @@ function classify(text: string): QueryKind {
   if (text.includes('database_create')) return 'database';
   if (text.includes('has_table_privilege')) return 'ledgerAccess';
   if (text.includes('finished_at')) return 'ledgerRows';
+  if (text.includes('as database_clock')) return 'clock';
   throw new Error(`fakeClient: unrecognized statement: ${text.slice(0, 120)}`);
 }
 
@@ -657,6 +658,7 @@ const GOLDEN: Readonly<Record<QueryKind, readonly Row[]>> = Object.freeze({
   database: Object.freeze([GOLDEN_DATABASE_ROW]),
   ledgerAccess: Object.freeze([GOLDEN_LEDGER_ACCESS_ROW]),
   ledgerRows: GOLDEN_LEDGER_ROW_ROWS,
+  clock: Object.freeze([Object.freeze({ database_clock: '2001-02-03T04:05:06.789012Z' })]),
 });
 
 /** A FAKE SupervisedPgClient: `script` overrides one or more of the preflight's fixed statements. */
@@ -700,6 +702,35 @@ test('connect: uses PREFLIGHT_BOUNDS and throws on a wrong answer', async () => 
   // A database-level failure (a rejection from the client, never caught by connect) also throws.
   const failing = fakeClient({ connect: new Error('connection refused') });
   await assert.rejects(() => createPostgresStartupPreflight({ client: failing.client }).connect(new AbortController().signal), /connection refused/);
+});
+
+// WRITTEN — NOT RUN (doc 18 spec 2).
+test('databaseClock (doc 18 §6.6, §9.3.2 "times"; CA-35 U): one read-only statement of pg_catalog.clock_timestamp() in UTC under PREFLIGHT_BOUNDS, answered exactly as the database gave it; zero rows, two rows or any other shape throws the fixed preflight_answer_invalid, and a client rejection propagates', async () => {
+  const statements: string[] = [];
+  const { client, boundsSeen } = fakeClient();
+  const recording: SupervisedPgClient = Object.freeze({
+    transaction: <T>(signal: AbortSignal, bounds: TransactionBounds, work: (sql: PgTransactionScope) => Promise<T>) => client.transaction(signal, bounds,
+      (sql) => work(Object.assign((strings: TemplateStringsArray, ...values: unknown[]) => {
+        statements.push(strings.join('$'));
+        return (sql as unknown as (s: TemplateStringsArray, ...v: unknown[]) => unknown)(strings, ...values);
+      }, { json: (v: unknown) => v }) as unknown as PgTransactionScope)),
+    end: client.end,
+  });
+  assert.equal(await createPostgresStartupPreflight({ client: recording }).databaseClock(new AbortController().signal), '2001-02-03T04:05:06.789012Z');
+  assert.deepEqual(boundsSeen, [PREFLIGHT_BOUNDS]);
+  assert.equal(statements.length, 1);
+  assert.match(statements[0], /^\s*select pg_catalog\.to_char\(\s*pg_catalog\.clock_timestamp\(\) at time zone 'UTC'/, 'one read-only select of the database clock');
+  assert.ok(!/\b(insert|update|delete|set|create|grant|lock)\b/i.test(statements[0].replace(/clock_timestamp|database_clock/g, '')), 'no write');
+  for (const bad of [[], [{ database_clock: '2001-02-03T04:05:06.789012Z' }, { database_clock: '2001-02-03T04:05:06.789013Z' }], [{ database_clock: 1 }], [{ database_clock: '2001-02-03T04:05:06Z' }], [{ database_clock: '2001-02-03 04:05:06.789012+00' }],
+    [{ database_clock: 'ERROR: something' }], [{}],
+    // The right shape naming no real instant (review 2026-11-19): month 13, February 30, hour 24, minute 60.
+    [{ database_clock: '2001-13-03T04:05:06.789012Z' }], [{ database_clock: '2001-02-30T04:05:06.789012Z' }],
+    [{ database_clock: '2001-02-03T24:05:06.789012Z' }], [{ database_clock: '2001-02-03T04:60:06.789012Z' }]]) {
+    await assert.rejects(() => createPostgresStartupPreflight({ client: fakeClient({ clock: bad }).client }).databaseClock(new AbortController().signal),
+      /preflight_answer_invalid/, JSON.stringify(bad));
+  }
+  await assert.rejects(() => createPostgresStartupPreflight({ client: fakeClient({ clock: new Error('connection lost') }).client }).databaseClock(new AbortController().signal),
+    /connection lost/);
 });
 
 test('runtimeLogin: over the golden facts, uses PREFLIGHT_BOUNDS, and answers []', async () => {

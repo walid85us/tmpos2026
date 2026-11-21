@@ -77,6 +77,21 @@ test('an operation id is one more bounded, stripped field, present only when giv
   assert.ok(String(forged.operationId).length <= 200);
 });
 
+// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only).
+test('CA-47 (U, doc 18 §9.3.4): the credit_note_write and startup fields are the closed id list, each bounded and stripped, absent unless given', () => {
+  const id = '6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b';
+  const fields = {
+    instanceId: id, creditNoteWrites: 'off', outcome: 'committed', kind: 'issue', correlationId: id, storeId: id, invoiceId: id,
+    registrationId: id, creditNoteId: id, attemptId: id,
+  };
+  const rec = buildLogRecord('info', { event: 'credit_note_write', ...fields, idempotencyKey: 'k', sessionKey: 's', registrationProof: 'p', grossCents: 1, reason2: 'r' } as never);
+  assert.deepEqual(Object.keys(rec), ['timestamp', 'level', 'event', ...Object.keys(fields)]);
+  for (const name of Object.keys(fields)) assert.ok(!(name in buildLogRecord('info', { event: 'e' })), `${name} absent unless given`);
+  const forged = buildLogRecord('info', { event: 'e', correlationId: `x${NL}{"level":"error"}${'y'.repeat(5000)}` });
+  assert.equal(String(forged.correlationId).includes(NL), false);
+  assert.ok(String(forged.correlationId).length <= 200);
+});
+
 test('numeric fields accept only finite numbers', () => {
   const rec = buildLogRecord('info', { event: 'e', status: Number.NaN, durationMs: Number.POSITIVE_INFINITY });
   assert.ok(!('status' in rec));

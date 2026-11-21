@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { STARTUP_STEP_DEADLINE_MS } from './entryStartup.js';
 import type { EntryResult, ServedRoute } from './entryStartup.js';
 import { TENANT_SHIPPING_ROUTES, servesExactlyTenantRoutes, startTenantEntry, validateTenantEntryConfig } from './tenantEntry.js';
@@ -53,6 +53,8 @@ const VALID_ENV: Readonly<Record<string, string>> = Object.freeze({
   TENANT_SESSION_ISSUER_KEY: ISSUER_KEY,
   IDEMPOTENCY_KEY,
   FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: SERVICE_ACCOUNT_JSON,
+  // Doc 18 §6.6 (D-CA-14 A): the credit-note write setting, required.
+  TMPOS_CREDIT_NOTE_WRITES: 'on',
 });
 
 const envWith = (over: Readonly<Record<string, string | undefined>>): Record<string, string | undefined> => ({ ...VALID_ENV, ...over });
@@ -131,6 +133,11 @@ test('M7TU-02 validateTenantEntryConfig: every code, each in a targeted single-f
     ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: b64(Buffer.concat([Buffer.alloc(32, 7), Buffer.alloc(1)])) })],
     ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: ISSUER_KEY })],
     ['IDEMPOTENCY_KEY', 'idempotency_key_shared', envWith({ IDEMPOTENCY_KEY: b64(Buffer.concat([Buffer.from(ISSUER_KEY, 'base64url'), Buffer.alloc(1)])) })],
+    // Doc 18 §6.6 (CA-35 U, WRITTEN — NOT RUN): the write setting, exactly `on` or `off`; absence or anything else refuses.
+    ['TMPOS_CREDIT_NOTE_WRITES', 'credit_note_writes_missing', envWith({ TMPOS_CREDIT_NOTE_WRITES: undefined })],
+    ['TMPOS_CREDIT_NOTE_WRITES', 'credit_note_writes_missing', envWith({ TMPOS_CREDIT_NOTE_WRITES: '' })],
+    ...['ON', 'Off', ' on', 'off ', 'true', 'false', '1', '0', 'enabled', 'disabled', 'on,off'].map((value): [string, string, Record<string, string | undefined>] =>
+      ['TMPOS_CREDIT_NOTE_WRITES', 'credit_note_writes_invalid', envWith({ TMPOS_CREDIT_NOTE_WRITES: value })]),
   ];
   for (const [field, code, env] of cases) {
     assert.deepEqual(validateTenantEntryConfig(env), [{ field, code }], `${field}:${code} over ${JSON.stringify(env[field])}`);
@@ -142,6 +149,8 @@ test('M7TU-02 validateTenantEntryConfig: every code, each in a targeted single-f
   // A malformed administrative origin is named once; the host comparison is not made against it.
   assert.deepEqual(validateTenantEntryConfig(envWith({ SESSION_ADMIN_ORIGINS: `https://${TENANT_HOST}/` })),
     [{ field: 'SESSION_ADMIN_ORIGINS', code: 'session_admin_origin_invalid' }]);
+  // Doc 18 §6.6: both exact words clear the check.
+  for (const value of ['on', 'off']) assert.deepEqual(validateTenantEntryConfig(envWith({ TMPOS_CREDIT_NOTE_WRITES: value })), [], value);
 });
 
 test('M7TU-03 validateTenantEntryConfig: no returned field or code carries any part of the submitted value', () => {
@@ -150,7 +159,7 @@ test('M7TU-03 validateTenantEntryConfig: no returned field or code carries any p
     NODE_ENV: MARKER, PORT: MARKER, APP_DATABASE_URL: `postgres://user:${MARKER}@db.${REF}.supabase.co:5432/postgres`,
     DATABASE_CA_CERT: MARKER, RATE_LIMIT_KEY: MARKER, TRUSTED_PROXY_CIDRS: MARKER, SESSION_ADMIN_ORIGINS: `https://${MARKER}.invalid`,
     SESSION_TENANT_ORIGINS: `https://${MARKER}.tenant.invalid/${MARKER}`, TENANT_SESSION_ISSUER_KEY: MARKER, IDEMPOTENCY_KEY: MARKER,
-    FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: MARKER, NODE_OPTIONS: `--use-openssl-ca ${MARKER}`,
+    FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: MARKER, NODE_OPTIONS: `--use-openssl-ca ${MARKER}`, TMPOS_CREDIT_NOTE_WRITES: MARKER,
   });
   const errors = validateTenantEntryConfig(env);
   assert.ok(errors.length > 0);
@@ -167,6 +176,8 @@ const DOCUMENTED_ENV_KEYS: readonly string[] = [
   'FIREBASE_AUTH_EMULATOR_HOST', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS', 'NODE_OPTIONS',
   'SUPABASE_DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY',
   'SESSION_TENANT_ORIGINS', 'TENANT_SESSION_ISSUER_KEY', 'IDEMPOTENCY_KEY',
+  // Doc 18 §6.6 (D-CA-14 A).
+  'TMPOS_CREDIT_NOTE_WRITES',
 ];
 
 test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documented keys of the supplied env, and never process.env', () => {
@@ -292,6 +303,8 @@ test('M7TU-06 TENANT_SHIPPING_ROUTES equals the table the runtime builds from th
     readiness, routes: tenantRouteDeclarations(), limits: sessions.limits, sessions: sessions.sessions, hsts: true, hosts: [TENANT_HOST], events: INVOICE_DRAFT_EVENTS,
     idempotency: { store: createMemoryIdempotencyStore(), keySecret: Buffer.from(IDEMPOTENCY_KEY, 'base64url') },
     transactions: { port: { commit: async () => ({ outcome: 'unavailable' }), probe: async () => true } },
+    // Doc 18 §6.6: the credit-note writers compose only with the write setting and an instance id.
+    creditNoteWrites: 'on', instanceId: randomUUID(),
   });
   assert.deepEqual(canonical(app.locals.routes as readonly ServedRoute[]), canonical(TENANT_SHIPPING_ROUTES));
 });
@@ -333,11 +346,13 @@ function listenSpy(): { calls: () => number; restore: () => void } {
 }
 
 type Row = Readonly<Record<string, unknown>>;
+/** The fake database's clock: years from any real instance clock (doc 18 §9.3.2: the database clock, not the instance's). */
+const DB_CLOCK = '2001-02-03T04:05:06.789012Z';
 type Kind =
   | 'connect' | 'login' | 'memberships' | 'reached' | 'owned' | 'exposure' | 'grants' | 'database' | 'ledgerAccess' | 'ledgerRows'
   | 'logging' | 'issuerKey' | 'rateLimitProbe' | 'rateLimitConsume' | 'sessionGet' | 'sessionMint' | 'tenantAdmissionProbe' | 'customerProbe'
   | 'customerDetailProbe' | 'customerProfileProbe' | 'customerSearchProbe' | 'storeDirectoryProbe' | 'invoiceDraftPageProbe' | 'invoiceDraftGetProbe'
-  | 'issuingSettingsProbe' | 'issuePreviewProbe' | 'issuedPageProbe' | 'issuedGetProbe' | 'paymentsProbe' | 'storeProbe' | 'paymentProofKey';
+  | 'issuingSettingsProbe' | 'issuePreviewProbe' | 'issuedPageProbe' | 'issuedGetProbe' | 'paymentsProbe' | 'storeProbe' | 'paymentProofKey' | 'clock';
 
 function classify(text: string): Kind {
   if (text.includes('as connected')) return 'connect';
@@ -371,6 +386,8 @@ function classify(text: string): Kind {
   if (text.includes('m7b_invoice_payments_get')) return 'paymentsProbe';
   if (text.includes('m6_store_probe')) return 'storeProbe';
   if (text.includes('m7b_payment_proof_key_probe')) return 'paymentProofKey';
+  // Doc 18 §6.6: the startup database-clock sample.
+  if (text.includes('as database_clock')) return 'clock';
   throw new Error(`fake client: a statement the tenant entry never sends: ${text.slice(0, 120)}`);
 }
 
@@ -436,6 +453,8 @@ const GOLDEN: Readonly<Record<Kind, readonly Row[]>> = Object.freeze({
   storeProbe: [{ ok: true }],
   // M7B-PAYMENTS-P2: 037's key-presence probe — a key installed at generation 1 (never its bytes).
   paymentProofKey: [{ o_present: true, o_generation: '1' }],
+  // Doc 18 §6.6: a synthetic DATABASE clock sample, deliberately far from the instance clock so the line provably carries it.
+  clock: [{ database_clock: DB_CLOCK }],
 });
 
 /** One call's answer: rows, 'reject' (the statement throws) or 'default' (GOLDEN). */
@@ -522,6 +541,9 @@ test('M7TU-08 an invalid construction refuses startup_failed; an invalid configu
     [envWith({ IDEMPOTENCY_KEY: ISSUER_KEY }), 'IDEMPOTENCY_KEY:idempotency_key_shared'],
     [envWith({ TENANT_SESSION_ISSUER_KEY: b64(VECTOR) }), 'TENANT_SESSION_ISSUER_KEY:tenant_issuer_key_weak'],
     [envWith({ SESSION_TENANT_ORIGINS: `https://${ADMIN_HOST}` }), 'SESSION_TENANT_ORIGINS:session_tenant_origin_shares_admin_host'],
+    // Doc 18 §6.6 (CA-35 U): an absent or invalid write setting refuses startup before any client exists.
+    [envWith({ TMPOS_CREDIT_NOTE_WRITES: undefined }), 'TMPOS_CREDIT_NOTE_WRITES:credit_note_writes_missing'],
+    [envWith({ TMPOS_CREDIT_NOTE_WRITES: 'paused' }), 'TMPOS_CREDIT_NOTE_WRITES:credit_note_writes_invalid'],
   ] as const) {
     const { result, exits: code, binds } = await start({ env, databaseClient: () => { built++; throw new Error('must never be called'); } });
     assert.equal(result.failure, 'config_invalid');
@@ -665,13 +687,79 @@ test('M7TU-15 the golden path listens on exactly the tenant inventory, in the st
     assert.deepEqual(steps, ['connect', 'login', 'memberships', 'reached', 'owned', 'grants', 'database', 'exposure', 'ledgerAccess', 'ledgerRows',
       'logging', 'issuerKey', 'paymentProofKey', 'rateLimitProbe', 'sessionGet', 'sessionMint', 'tenantAdmissionProbe', 'rateLimitProbe', 'customerProbe',
       'customerDetailProbe', 'customerProfileProbe', 'customerSearchProbe', 'storeDirectoryProbe', 'invoiceDraftPageProbe', 'invoiceDraftGetProbe', 'issuingSettingsProbe',
-      'issuePreviewProbe', 'issuedPageProbe', 'issuedGetProbe', 'paymentsProbe', 'storeProbe'],
+      'issuePreviewProbe', 'issuedPageProbe', 'issuedGetProbe', 'paymentsProbe', 'storeProbe', 'clock'],
     'nothing is asked of the issuer key before the ledger and the logging guard, nor of the payment proof key before the issuer key (M7B-PAYMENTS-P2), nor of the limiter before either');
   } finally {
     await stop();
   }
   assert.deepEqual(exits, [0]);
   assert.equal(fake.ended(), 1, 'shutdown ends the kernel');
+});
+
+// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only).
+test('M7TU-15b CA-35 (U; doc 18 §6.6, §9.3.2 step 3): the one startup_ready line carries this instance\'s write setting and a fresh random instance id per start — never a configuration value', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  for (const value of ['on', 'off', 'off'] as const) {
+    const lines: string[] = [];
+    const { result, stop } = await start({ env: envWith({ TMPOS_CREDIT_NOTE_WRITES: value }), log: lines });
+    try {
+      assert.equal(result.outcome, 'listening', JSON.stringify(result));
+    } finally {
+      await stop();
+    }
+    const ready = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((r) => r.event === 'startup_ready');
+    assert.equal(ready.length, 1, 'exactly one startup line');
+    assert.deepEqual(Object.keys(ready[0]), ['timestamp', 'level', 'event', 'instanceId', 'creditNoteWrites', 'databaseClock']);
+    assert.equal(ready[0].databaseClock, DB_CLOCK, 'the database clock from the preflight answer');
+    assert.notEqual(String(ready[0].timestamp).slice(0, 4), DB_CLOCK.slice(0, 4), 'the line\'s own time is the instance clock, a separate field');
+    assert.equal(ready[0].creditNoteWrites, value);
+    assert.match(String(ready[0].instanceId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    for (const secret of [ISSUER_KEY, IDEMPOTENCY_KEY, RATE_LIMIT_KEY, VALID_ENV.APP_DATABASE_URL]) {
+      assert.ok(!lines.join('\n').includes(secret), 'no configuration value on any line');
+    }
+    seen.push(ready[0]);
+  }
+  assert.equal(new Set(seen.map((r) => r.instanceId)).size, 3, 'a new instance id at every start, even with the same setting');
+});
+
+// WRITTEN — NOT RUN (doc 18 spec 2: the startup database clock).
+test('M7TU-15c CA-35 (U; doc 18 §6.6, §9.3.2 "times"): the database clock is sampled once through the preflight after every startup check and before the listener; an unanswered or malformed sample refuses database_unavailable startup_clock_unanswered (fail-closed, owner decision) and never binds; the config refusal still precedes any client', async () => {
+  const fake = fakeClient();
+  const golden = await start({ client: fake.client });
+  try {
+    assert.equal(golden.result.outcome, 'listening', JSON.stringify(golden.result));
+    assert.equal(fake.kinds.filter((k) => k === 'clock').length, 1, 'one sample');
+    const at = fake.kinds.indexOf('clock');
+    for (const before of ['ledgerRows', 'logging', 'issuerKey', 'paymentProofKey', 'storeProbe'] as const) {
+      assert.ok(fake.kinds.indexOf(before) < at, `the clock after ${before}`);
+    }
+  } finally {
+    await golden.stop();
+  }
+  for (const [label, entry] of [
+    ['the statement fails', 'reject'],
+    ['no row', []],
+    ['not text', [{ database_clock: 981173106 }]],
+    ['no microseconds', [{ database_clock: '2001-02-03T04:05:06Z' }]],
+    ['an offset', [{ database_clock: '2001-02-03T04:05:06.789012+00:00' }]],
+    ['the database text', [{ database_clock: 'ERROR: permission denied' }]],
+  ] as const) {
+    const lines: string[] = [];
+    const bad = fakeClient({ clock: [entry as never] });
+    const { result, exits, binds, stop } = await start({ client: bad.client, log: lines });
+    try {
+      assert.deepEqual([result.outcome, result.failure, result.reasons], ['refused', 'database_unavailable', ['startup_clock_unanswered']], label);
+      assert.deepEqual(exits, [1], label);
+      assert.equal(binds, 0, `${label}: never binds`);
+      assert.ok(!lines.some((l) => l.includes('startup_ready')), `${label}: no startup line`);
+      assert.ok(!lines.join('\n').includes('permission denied'), `${label}: never the database's text`);
+    } finally {
+      if (result.outcome === 'listening') await stop();
+    }
+  }
+  let built = 0;
+  const { result } = await start({ env: envWith({ TMPOS_CREDIT_NOTE_WRITES: undefined }), databaseClient: () => { built++; throw new Error('never'); } });
+  assert.deepEqual([result.failure, built], ['config_invalid', 0], 'the setting refuses before any client, so before any clock read');
 });
 
 interface Reply { readonly status: number; readonly headers: http.IncomingHttpHeaders; readonly body: string }

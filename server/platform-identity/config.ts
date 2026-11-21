@@ -87,6 +87,13 @@ export const SUPABASE_DATABASE_URL_VAR = 'SUPABASE_DATABASE_URL';
 export const APP_DATABASE_URL_VAR = 'APP_DATABASE_URL';
 
 /**
+ * Doc 18 §6.6 (D-CA-14 A) — the tenant entry's credit-note write setting: exactly `on` or `off`; anything else, or absence,
+ * refuses tenant startup (server/entry/tenantEntry.ts). Non-secret; the administrative entry serves no credit-note route and
+ * carries no setting.
+ */
+export const CREDIT_NOTE_WRITES_VAR = 'TMPOS_CREDIT_NOTE_WRITES';
+
+/**
  * Phase 4.0 M3 S4.1a — the certificate authority every database endpoint is verified against.
  *
  * Deliberately provider-neutral and deliberately SHARED by both principals: they address the

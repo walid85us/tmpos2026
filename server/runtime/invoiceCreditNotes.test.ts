@@ -371,20 +371,39 @@ function request(port: number, method: string, path: string, headers: Record<str
   });
 }
 
-type Answer = 'committed' | 'conflict' | 'invalid_state' | 'already_issued' | 'amount_exceeds_remaining' | 'not_found' | 'precondition_failed' | 'unavailable' | 'unchanged';
+type Answer = 'committed' | 'conflict' | 'invalid_state' | 'already_issued' | 'amount_exceeds_remaining' | 'not_found' | 'precondition_failed' | 'unavailable' | 'unchanged'
+  | 'lease_lost' | 'unknown_word';
 interface Chain {
   commits: TransactionCommand[];
   plans: unknown[];
   answer: (a: Answer) => void;
-  send: (path: string, payload: string, key: string) => Promise<Reply>;
-  relogin: () => Promise<(path: string, payload: string, key: string) => Promise<Reply>>;
+  send: (path: string, payload: string, key: string, over?: Record<string, string>) => Promise<Reply>;
+  relogin: () => Promise<((path: string, payload: string, key: string, over?: Record<string, string>) => Promise<Reply>) & { get: (path: string) => Promise<Reply> }>;
+  /** Doc 18 (written, not run): every log line the chain wrote, every idempotency acquisition, a GET on the session, and a POST with no session. */
+  lines: string[];
+  acquires: unknown[];
+  get: (path: string) => Promise<Reply>;
+  anonymous: (path: string, payload: string, key: string) => Promise<Reply>;
+  /** Doc 18 CA-46 (written, not run): flips the admission stub — false answers `{ admitted: false }`, as a suspended tenant's does. */
+  admit: (admitted: boolean) => void;
 }
-async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedAt?: number } = {}): Promise<void> {
+/** The synthetic instance id the chain is composed with (doc 18 §6.6). */
+const INSTANCE = randomUUID();
+async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedAt?: number; writes?: 'on' | 'off'; deny?: boolean; throwingWriteSink?: boolean } = {}): Promise<void> {
   const commits: TransactionCommand[] = [];
   const plans: unknown[] = [];
+  const lines: string[] = [];
+  const acquires: unknown[] = [];
   const authenticatedAt = opts.authenticatedAt ?? Date.now();
   let next: Answer = 'committed';
+  let admittedNow = true;
   const inner = createMemoryIdempotencyStore(createMemoryIdempotencyState());
+  // The chain's store: the memory store, counting every acquisition (doc 18 §9.3.1: a refused request reserves no key).
+  const counted = {
+    acquire: (r: Parameters<typeof inner.acquire>[0], s: AbortSignal) => { acquires.push(r); return inner.acquire(r, s); },
+    complete: (r: Parameters<typeof inner.complete>[0], s: AbortSignal) => inner.complete(r, s),
+    probe: (s: AbortSignal) => inner.probe(s),
+  };
   const complete = async (c: TransactionCommand, sealed: string | null | undefined, s: AbortSignal, outcome: string) => {
     if (sealed === null || sealed === undefined) return { outcome: 'unavailable' };
     const done = await inner.complete(Object.freeze({ scope: c.scope, lease: c.lease, response: sealed }), s);
@@ -408,8 +427,8 @@ async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedA
     verifier: { async verify(token) {
       return token.bearerToken === BEARER ? { verified: true, authProvider: PRINCIPAL.authProvider, authProviderUid: PRINCIPAL.authProviderUid, authenticatedAt, secondFactor: null } : null;
     } },
-    admission: { admit: () => ({ admitted: true, securityVersion: 'v1', actor: ACTOR }) },
-    authorizer: { authorize: (_principal: unknown, _requirement: unknown, view: { storeTarget?: string | null }) => (typeof view.storeTarget === 'string'
+    admission: { admit: () => (admittedNow ? { admitted: true, securityVersion: 'v1', actor: ACTOR } : { admitted: false }) },
+    authorizer: { authorize: (_principal: unknown, _requirement: unknown, view: { storeTarget?: string | null }) => (opts.deny !== true && typeof view.storeTarget === 'string'
       ? { granted: true, context: scopeAt(view.storeTarget) } : false) },
     store: createMemorySessionStore(),
   };
@@ -417,11 +436,22 @@ async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedA
     ? { ...route, command: { ...route.command, plan: (ctx) => { plans.push(ctx); return route.command.plan(ctx); } } } : route);
   const readiness = createReadinessState();
   readiness.setReady();
+  // The three reads over fixed synthetic answers, so the chain can show they stay available while writes are off (doc 18 §9.3.1).
+  const reads = portWith({
+    proof: () => ({ outcome: 'proof', registrationId: REGISTRATION, invoiceId: INVOICE, attemptId: ATTEMPT, proof: PROOF }),
+    attempts: () => ({ outcome: 'attempts', attempts: [] }),
+    list: () => listOf([], true),
+  });
   const app = createApp({
-    readiness, log: { log: () => undefined }, sessions: { tenant: boundary },
+    readiness, sessions: { tenant: boundary },
+    // A throwing sink, when asked, for the credit_note_write line only (the request log's 'finish' listener must not throw).
+    log: { log: (line) => { if (opts.throwingWriteSink === true && line.includes('"event":"credit_note_write"')) throw new Error('sink down'); lines.push(line); } },
     routes: [capture(INVOICE_CREDIT_NOTE_REGISTER_ROUTE), capture(INVOICE_CREDIT_NOTE_ISSUE_ROUTE), capture(INVOICE_CREDIT_NOTE_SETTLE_ROUTE),
-      capture(INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE)],
-    events: [], limits: testRequestLimits(), idempotency: { store: inner, keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
+      capture(INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE), createInvoiceCreditNoteProofRoute(reads), createInvoiceCreditNoteAttemptsRoute(reads),
+      createInvoiceCreditNotesRoute(reads)],
+    events: [], limits: testRequestLimits(), idempotency: { store: counted, keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
+    // Doc 18 §6.6: the write setting (on unless a case pauses it) and this process's instance id.
+    creditNoteWrites: opts.writes ?? 'on', instanceId: INSTANCE,
   });
   const server = createBoundedServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -435,12 +465,18 @@ async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedA
       const pair = (login.headers['set-cookie'] ?? [''])[0].split('; ')[0];
       const cookie = `${SESSION_COOKIES.tenant}=${pair.slice(pair.indexOf('=') + 1)}`;
       const csrf = (JSON.parse(login.body) as { csrfToken: string }).csrfToken;
-      return (path: string, payload: string, key: string) => request(p, 'POST', path, {
+      const send = (path: string, payload: string, key: string, over: Record<string, string> = {}) => request(p, 'POST', path, {
         origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, 'content-type': 'application/json',
-        cookie, [SESSION_CSRF_HEADER]: csrf, 'content-length': String(Buffer.byteLength(payload)), 'idempotency-key': key,
+        cookie, [SESSION_CSRF_HEADER]: csrf, 'content-length': String(Buffer.byteLength(payload)), 'idempotency-key': key, ...over,
       }, payload);
+      return Object.assign(send, { get: (path: string) => request(p, 'GET', path, { cookie, [SESSION_CSRF_HEADER]: csrf }) });
     };
-    await fn({ commits, plans, answer: (a) => { next = a; }, send: await relogin(), relogin });
+    const anonymous = (path: string, payload: string, key: string) => request(p, 'POST', path, {
+      origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, 'content-type': 'application/json',
+      'content-length': String(Buffer.byteLength(payload)), 'idempotency-key': key,
+    }, payload);
+    const first = await relogin();
+    await fn({ commits, plans, answer: (a) => { next = a; }, send: first, relogin, lines, acquires, get: first.get, anonymous, admit: (a) => { admittedNow = a; } });
   } finally {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
   }
@@ -516,4 +552,235 @@ test('ICN-09 over the chain: the withdrawal reads its credit note from the secon
     const settle = await h.send(settleAt, JSON.stringify(settleBody()), randomUUID());
     assert.equal(settle.status, 200, 'the recovery key needs no recent sign-in');
   }, { authenticatedAt: Date.now() - RECENT_AUTH_MAX_AGE_MS - 60_000 });
+});
+
+// --- the write setting and the write log line (docs/phase-4/18 §6.6, §9.3.1, §9.3.4; D-CA-14 A, D-CA-18 C) ------------------
+// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only): authored without executing any test, typecheck or build.
+
+const lineRecords = (lines: readonly string[]) => lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+const writeLines = (lines: readonly string[]) => lineRecords(lines).filter((r) => r.event === 'credit_note_write');
+const gatedWrites = () => [[registerAt, registerBody()], [issueAt, issueBody()], [withdrawAt(CREDIT_NOTE), withdrawBody()]] as const;
+
+test('ICN-10 CA-35 (U) (doc 18 §6.6, §9.3.1): with the write setting off, the registration, the issue and the withdrawal each answer 503 service_unavailable, logged credit_note_writes_disabled, before the body, the key and the commit — a malformed body, an unknown field, an empty key and a stale sign-in all still get that 503 — with no acquisition, no plan, no commit and no credit_note_write line; the settlement, the proof, the attempts lookup and the list answer as before', async () => {
+  await withChain(async (h) => {
+    for (const [path, body] of gatedWrites()) {
+      for (const [payload, key] of [[JSON.stringify(body), randomUUID()], ['{not json', randomUUID()], [JSON.stringify({ ...body, extra: 1 }), randomUUID()],
+        [JSON.stringify(body), '']] as const) {
+        const r = await h.send(path, payload, key);
+        assert.deepEqual([r.status, JSON.parse(r.body).error], [503, 'service_unavailable'], `${path} ${payload} key=${key === '' ? 'empty' : 'set'}`);
+      }
+    }
+    const refusals = lineRecords(h.lines).filter((r) => r.event === 'request' && r.status === 503);
+    assert.equal(refusals.length, 12);
+    assert.ok(refusals.every((r) => r.reason === 'credit_note_writes_disabled'), JSON.stringify(refusals));
+    assert.deepEqual([h.acquires.length, h.plans.length, h.commits.length], [0, 0, 0], 'no key reserved, nothing planned, nothing committed');
+    assert.deepEqual(writeLines(h.lines), [], 'a refused request writes no credit_note_write line');
+    // Recovery and every read stay available (doc 18 §9.3.1 table, column A).
+    const settled = await h.send(settleAt, JSON.stringify(settleBody()), randomUUID());
+    assert.equal(settled.status, 200, settled.body);
+    // CA-47 (d)/(i) input: the settlement under off writes its committed line, carrying this (off) instance's id.
+    assert.deepEqual(writeLines(h.lines).map((l) => [l.outcome, l.kind, l.instanceId, l.requestId]),
+      [['committed', 'settle', INSTANCE, settled.headers['x-request-id']]], 'the settlement\'s committed line');
+    for (const path of [`${INVOICE_CREDIT_NOTE_PROOF_PATH.replace('{storeId}', STORE).replace('{id}', INVOICE)}?registration=${REGISTRATION}`,
+      `/api/v1/stores/${STORE}/credit-note-attempts`, listPath]) {
+      const r = await h.get(path);
+      assert.equal(r.status, 200, `${path}: ${r.body}`);
+    }
+  }, { writes: 'off' });
+  // The setting stands before the step-up: a stale sign-in under off is the 503, never step_up_required, and reserves nothing.
+  await withChain(async (h) => {
+    for (const [path, body] of gatedWrites()) {
+      const r = await h.send(path, JSON.stringify(body), randomUUID());
+      assert.deepEqual([r.status, JSON.parse(r.body).error], [503, 'service_unavailable'], path);
+    }
+    assert.deepEqual([h.acquires.length, h.commits.length], [0, 0]);
+  }, { writes: 'off', authenticatedAt: Date.now() - RECENT_AUTH_MAX_AGE_MS - 60_000 });
+});
+
+test('ICN-11 CA-46 (U) (doc 18 §9.3.1, §6.6): with the write setting off, every refusal of the session or of authorization answers before the setting — no session 401, a suspended tenant\'s session 401 session_admission_denied (the three writes), a wrong session CSRF token 403, a session without the grant 403 authz_denied — each with no acquisition, no plan and no commit', async () => {
+  const reasonOf = (h: Chain, reply: Reply) => lineRecords(h.lines).find((r) => r.event === 'request' && r.requestId === reply.headers['x-request-id'])?.reason;
+  await withChain(async (h) => {
+    for (const [path, body] of gatedWrites()) {
+      const r = await h.anonymous(path, JSON.stringify(body), randomUUID());
+      assert.equal(r.status, 401, path);
+      assert.notEqual(reasonOf(h, r), 'credit_note_writes_disabled', `${path}: the session first`);
+    }
+    // The session-bound CSRF token is judged before the setting too. Checked before the suspended tenant below, whose
+    // admission denials end every session of the principal (sessions.ts revokeAllOf), this first session included.
+    for (const [path, body] of gatedWrites()) {
+      const r = await h.send(path, JSON.stringify(body), randomUUID(), { [SESSION_CSRF_HEADER]: 'wrong-token' });
+      assert.equal(r.status, 403, path);
+      assert.match(String(reasonOf(h, r)), /^csrf_session_/, `${path}: the session CSRF refusal, not the setting`);
+    }
+    // A suspended tenant: admission refuses the principal on its next protected request (sessions.ts:636-638), before the setting.
+    for (const [path, body] of gatedWrites()) {
+      h.admit(true);
+      const send = await h.relogin();
+      h.admit(false);
+      const r = await send(path, JSON.stringify(body), randomUUID());
+      assert.deepEqual([r.status, reasonOf(h, r)], [401, 'session_admission_denied'], `suspended: ${path}`);
+    }
+    assert.deepEqual([h.acquires.length, h.plans.length, h.commits.length], [0, 0, 0]);
+    assert.deepEqual(writeLines(h.lines), []);
+  }, { writes: 'off' });
+  await withChain(async (h) => {
+    for (const [path, body] of gatedWrites()) {
+      const r = await h.send(path, JSON.stringify(body), randomUUID());
+      assert.deepEqual([r.status, JSON.parse(r.body).error, reasonOf(h, r)], [403, 'forbidden', 'authz_denied'], path);
+    }
+    assert.deepEqual([h.acquires.length, h.plans.length, h.commits.length], [0, 0, 0]);
+  }, { writes: 'off', deny: true });
+});
+
+test('ICN-12 CA-47 (a), (b), (g) (U) (doc 18 §9.3.4): one committed credit_note_write line per committed register, issue, settlement and withdrawal, after the commit, with exactly the approved fields matched to the command; none for a replay, a sealed or rolled-back refusal, an invalid body or the unchanged settlement; unconfirmed on the 503 after a commit with no exact answer', async () => {
+  await withChain(async (h) => {
+    const approved = ['timestamp', 'level', 'event', 'requestId', 'instanceId', 'outcome', 'kind', 'correlationId', 'storeId', 'invoiceId'];
+    const expectLine = (reply: Reply, kind: string, subject: Record<string, string>, outcome = 'committed') => {
+      const all = writeLines(h.lines);
+      assert.equal(all.length, 1, `${kind}: exactly one line`);
+      const [line] = all;
+      const command = h.commits[h.commits.length - 1];
+      assert.deepEqual(Object.keys(line), [...approved, ...Object.keys(subject)], `${kind}: the closed field list`);
+      assert.deepEqual([line.level, line.outcome, line.instanceId, line.requestId, line.kind, line.correlationId, line.storeId, line.invoiceId],
+        ['info', outcome, INSTANCE, reply.headers['x-request-id'], kind, command.audit.correlationId, STORE, INVOICE], kind);
+      for (const [name, value] of Object.entries(subject)) assert.equal(line[name], value, `${kind}: ${name}`);
+      const text = h.lines.join('\n');
+      assert.ok(!text.includes(PROOF), 'never the registration proof');
+      for (const forbidden of ['grossCents', 'reason', 'idempotencyKey', 'scope', 'fingerprint', 'lease', 'sessionKey', 'registrationProof']) {
+        assert.ok(!(forbidden in line), `${kind}: no ${forbidden}`);
+      }
+      h.lines.length = 0;
+    };
+
+    // (a) the four committed writes, each with its own subject (doc 18 §9.3.4 "Fields").
+    const key = randomUUID();
+    const registered = await h.send(registerAt, JSON.stringify(registerBody()), key);
+    assert.equal(registered.status, 201, registered.body);
+    const registrationId = (JSON.parse(registered.body) as { registration: { id: string } }).registration.id;
+    assert.equal(h.commits[0].mutation.aggregateId, registrationId);
+    expectLine(registered, 'register', { registrationId });
+    const issued = await h.send(issueAt, JSON.stringify(issueBody()), randomUUID());
+    assert.equal(issued.status, 201, issued.body);
+    expectLine(issued, 'issue', { registrationId: REGISTRATION, creditNoteId: (JSON.parse(issued.body) as { creditNote: { id: string } }).creditNote.id });
+    const settled = await h.send(settleAt, JSON.stringify(settleBody()), randomUUID());
+    assert.equal(settled.status, 200, settled.body);
+    expectLine(settled, 'settle', { attemptId: ATTEMPT });
+    const withdrawn = await h.send(withdrawAt(CREDIT_NOTE), JSON.stringify(withdrawBody()), randomUUID());
+    assert.equal(withdrawn.status, 200, withdrawn.body);
+    expectLine(withdrawn, 'withdraw', { creditNoteId: CREDIT_NOTE });
+
+    // (b) a replay of the completed key: no line, its request line says idempotency_replayed.
+    const commitsBefore = h.commits.length;
+    const replay = await h.send(registerAt, JSON.stringify(registerBody()), key);
+    assert.deepEqual([replay.status, replay.headers['idempotent-replayed']], [201, 'true']);
+    assert.equal(h.commits.length, commitsBefore, 'the replay commits nothing');
+    assert.deepEqual(writeLines(h.lines), [], 'a replay writes no line');
+    assert.ok(lineRecords(h.lines).some((r) => r.event === 'request' && r.reason === 'idempotency_replayed'));
+    h.lines.length = 0;
+
+    // No line for any answer that wrote no row: the sealed refusals, the rolled-back 404 and 409, an invalid body, the unchanged settlement.
+    for (const word of ['already_issued', 'amount_exceeds_remaining', 'invalid_state', 'conflict', 'not_found', 'precondition_failed'] as const) {
+      h.answer(word);
+      const r = await h.send(issueAt, JSON.stringify(issueBody()), randomUUID());
+      assert.ok(r.status === 404 || r.status === 409, `${word}: ${r.status}`);
+      assert.deepEqual(writeLines(h.lines), [], `${word}: no line`);
+    }
+    h.answer('committed');
+    const invalid = await h.send(registerAt, JSON.stringify(registerBody({ grossCents: 0 })), randomUUID());
+    assert.equal(invalid.status, 400);
+    h.answer('unchanged');
+    const again = await h.send(settleAt, JSON.stringify(settleBody({ expectedVersion: 2 })), randomUUID());
+    assert.equal(again.status, 200);
+    assert.deepEqual(writeLines(h.lines), [], 'neither an invalid body nor the unchanged settlement writes a line');
+    h.lines.length = 0;
+
+    // (g) a commit with no exact answer is the 503 and one `unconfirmed` line, for each kind.
+    h.answer('unavailable');
+    for (const [path, body, kind] of [[registerAt, registerBody(), 'register'], [issueAt, issueBody(), 'issue'], [settleAt, settleBody(), 'settle'],
+      [withdrawAt(CREDIT_NOTE), withdrawBody(), 'withdraw']] as const) {
+      const r = await h.send(path, JSON.stringify(body), randomUUID());
+      assert.equal(r.status, 503, kind);
+      const lines = writeLines(h.lines);
+      assert.deepEqual([lines.length, lines[0]?.outcome, lines[0]?.kind], [1, 'unconfirmed', kind], kind);
+      h.lines.length = 0;
+    }
+
+    // (b) remainder: the retry of the unconfirmed register under a new key commits with a NEW correlation id; a further register of
+    // that attempt is the routine's sealed refusal (here the store's `conflict`): 409, no line.
+    const stalledKey = randomUUID();
+    const stalled = await h.send(registerAt, JSON.stringify(registerBody()), stalledKey);
+    assert.equal(stalled.status, 503);
+    const [unconfirmed] = writeLines(h.lines);
+    h.lines.length = 0;
+    h.answer('committed');
+    const retried = await h.send(registerAt, JSON.stringify(registerBody()), randomUUID());
+    assert.equal(retried.status, 201, retried.body);
+    const [committed] = writeLines(h.lines);
+    assert.deepEqual([committed?.outcome, committed?.kind], ['committed', 'register']);
+    assert.notEqual(committed?.correlationId, unconfirmed?.correlationId,'a retry is a new command with its own correlation id');
+    h.lines.length = 0;
+    h.answer('conflict');
+    const second = await h.send(registerAt, JSON.stringify(registerBody()), randomUUID());
+    assert.equal(second.status, 409);
+    assert.deepEqual(writeLines(h.lines), [], 'a refused second register writes no line');
+  });
+});
+
+// WRITTEN — NOT RUN (doc 18 §9.3.4 as amended 2026-11-19 on the owner's instruction; scratch/pause/outcome-trace.md).
+test('ICN-15 CA-47 (U; doc 18 §9.3.4, amended 2026-11-19): a lost lease still answers 503 service_unavailable with its request log reason transaction_lease_lost and writes no credit_note_write line; an unavailable and a broken answer each still write exactly one unconfirmed line, for all four kinds', async () => {
+  const reasons = { lease_lost: 'transaction_lease_lost', unavailable: 'transaction_unavailable', unknown_word: 'transaction_outcome_invalid' } as const;
+  await withChain(async (h) => {
+    for (const [path, body, kind] of [[registerAt, registerBody(), 'register'], [issueAt, issueBody(), 'issue'], [settleAt, settleBody(), 'settle'],
+      [withdrawAt(CREDIT_NOTE), withdrawBody(), 'withdraw']] as const) {
+      for (const word of ['lease_lost', 'unavailable', 'unknown_word'] as const) {
+        h.answer(word);
+        const r = await h.send(path, JSON.stringify(body), randomUUID());
+        assert.deepEqual([r.status, JSON.parse(r.body).error], [503, 'service_unavailable'], `${kind} ${word}`);
+        const requestLine = lineRecords(h.lines).find((l) => l.event === 'request' && l.requestId === r.headers['x-request-id']);
+        assert.equal(requestLine?.reason, reasons[word], `${kind} ${word}: the ordinary request log line is unchanged`);
+        assert.deepEqual(writeLines(h.lines).map((l) => [l.outcome, l.kind]), word === 'lease_lost' ? [] : [['unconfirmed', kind]],
+          `${kind} ${word}: ${word === 'lease_lost' ? 'no attribution line' : 'unconfirmed'}`);
+        h.lines.length = 0;
+      }
+    }
+  });
+});
+
+test('ICN-14 (doc 18 §9.3.4) a throwing log sink never changes the answer: the committed register and settlement still answer 201 and 200, and a commit with no exact answer still answers 503 (the lost line leaves the row class 3)', async () => {
+  await withChain(async (h) => {
+    const registered = await h.send(registerAt, JSON.stringify(registerBody()), randomUUID());
+    assert.equal(registered.status, 201, registered.body);
+    const settled = await h.send(settleAt, JSON.stringify(settleBody()), randomUUID());
+    assert.equal(settled.status, 200, settled.body);
+    h.answer('unavailable');
+    const stalled = await h.send(issueAt, JSON.stringify(issueBody()), randomUUID());
+    assert.deepEqual([stalled.status, JSON.parse(stalled.body).error], [503, 'service_unavailable']);
+    assert.equal(h.commits.length, 3, 'every command reached its commit');
+    assert.deepEqual(writeLines(h.lines), [], 'the sink lost every credit_note_write line');
+  }, { throwingWriteSink: true });
+});
+
+test('ICN-13 (doc 18 §6.6) the composition refuses a credit-note writer without its setting or its instance id; routes.ts keeps the write gate to exactly the registration, the issue and the withdrawal', () => {
+  const base = {
+    readiness: createReadinessState(), log: { log: () => undefined }, events: [], limits: testRequestLimits(),
+    idempotency: { store: createMemoryIdempotencyStore(), keySecret: TEST_IDEMPOTENCY_KEY },
+    transactions: { port: { commit: () => ({ outcome: 'unavailable' }), probe: () => true } },
+    sessions: { tenant: { trustedOrigins: [TENANT_ORIGIN], verifier: { verify: async () => null }, admission: { admit: () => null }, authorizer: { authorize: () => false },
+      store: createMemorySessionStore() } as unknown as SessionBoundaryDeps },
+  };
+  for (const routes of [[INVOICE_CREDIT_NOTE_REGISTER_ROUTE], [INVOICE_CREDIT_NOTE_SETTLE_ROUTE]]) {
+    assert.throws(() => createApp({ ...base, routes, instanceId: INSTANCE }), /credit_note_writes_invalid/);
+    assert.throws(() => createApp({ ...base, routes, creditNoteWrites: 'paused' as never, instanceId: INSTANCE }), /credit_note_writes_invalid/);
+    assert.throws(() => createApp({ ...base, routes, creditNoteWrites: 'off' }), /instance_id_invalid/);
+    assert.throws(() => createApp({ ...base, routes, creditNoteWrites: 'off', instanceId: 'host-1' }), /instance_id_invalid/);
+    assert.doesNotThrow(() => createApp({ ...base, routes, creditNoteWrites: 'off', instanceId: INSTANCE }));
+  }
+  assert.deepEqual([INVOICE_CREDIT_NOTE_REGISTER_ROUTE, INVOICE_CREDIT_NOTE_ISSUE_ROUTE, INVOICE_CREDIT_NOTE_SETTLE_ROUTE, INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE]
+    .map((r) => defineRoutes([r]).list()[0].writeGate), ['credit_note_write', 'credit_note_write', undefined, 'credit_note_write']);
+  for (const [label, def] of [['the registration undeclared', { ...INVOICE_CREDIT_NOTE_REGISTER_ROUTE, writeGate: undefined }],
+    ['the withdrawal with another word', { ...INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE, writeGate: 'on' }],
+    ['the settlement gated', { ...INVOICE_CREDIT_NOTE_SETTLE_ROUTE, writeGate: 'credit_note_write' }],
+    ['a read gated', { ...createInvoiceCreditNotesRoute(portWith({})), writeGate: 'credit_note_write' }]] as const) {
+    assert.throws(() => defineRoutes([def as unknown as RouteDefinition]), /route_write_gate_invalid/, label);
+  }
 });

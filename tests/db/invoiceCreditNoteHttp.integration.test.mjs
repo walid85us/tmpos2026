@@ -363,6 +363,7 @@ const ENV = Object.freeze({
   SESSION_ADMIN_ORIGINS: ADMIN_ORIGIN,
   SESSION_TENANT_ORIGINS: TENANT_ORIGIN,
   TENANT_SESSION_ISSUER_KEY: ISSUER_KEY.toString('base64url'),
+  TMPOS_CREDIT_NOTE_WRITES: 'on', // doc 18 §6.6 (D-CA-14 A): required by the tenant entry
   IDEMPOTENCY_KEY: IDEMPOTENCY_KEY.toString('base64url'),
   FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: JSON.stringify({
     type: 'service_account', project_id: 'ich-test-project', client_email: 'ich-test@ich-test-project.iam.gserviceaccount.com', private_key: FIREBASE_PRIVATE_KEY,
@@ -525,13 +526,14 @@ const databaseClient = () => createSupervisedPgClient(testDriver(TARGET), driver
   ...runtimeClientOptions(TARGET_DSN), ssl: false, max: 4, idle_timeout: 0, user: RUNTIME_LOGIN,
 });
 
-async function withEntry(fn) {
+async function withEntry(fn, { env = {} } = {}) {
   const lines = [];
   const codes = [];
   const proc = new EventEmitter();
   const log = { log: (l) => { lines.push(l); } };
   const result = await startTenantEntry({
-    env: ENV, construction: { databaseClient, tokenVerifier: VERIFIER, listen: () => ({ port: 0, host: '127.0.0.1' }) },
+    // Doc 18 §6.6: `env` overrides the suite's environment (TMPOS_CREDIT_NOTE_WRITES: 'off' for the write setting's cases).
+    env: { ...ENV, ...env }, construction: { databaseClient, tokenVerifier: VERIFIER, listen: () => ({ port: 0, host: '127.0.0.1' }) },
     proc, exit: (code) => { codes.push(code); }, log,
   });
   assert.equal(result.outcome, 'listening', JSON.stringify(result));
@@ -1414,3 +1416,247 @@ test('ICH-12 (CN-04 HTTP): a second store-scope owner registers the SAME attempt
 test('ICH-11 (CN-34s1/CN-34s2 HTTP variant): the stale payment or void call at the 038 cutover seam over HTTP', {
   skip: 'NOT ATTEMPTED — not stageable over the real tenant entry; stays UNVERIFIED per doc 16 §8 CN-34s2 and the 038 cutover section',
 }, () => {});
+
+// ===========================================================================
+// ICH-23 / ICH-24: the write setting and the write log line (docs/phase-4/18 §6.6, §9.3.1, §9.3.4; D-CA-14 A, D-CA-18 C)
+// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only): authored without executing any test, typecheck or build.
+// ===========================================================================
+
+const recordsOf = (lines) => lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+/** The credit_note_write lines of the request that `reply` answered. */
+const writeLinesOf = (ctx, reply) => recordsOf(ctx.lines).filter((r) => r.event === 'credit_note_write' && r.requestId === reply.headers['x-request-id']);
+const INSTANCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** The OWNER takes `invoice`'s issued header FOR UPDATE and keeps it until `release()`. */
+async function holdHeader(invoice) {
+  let taken;
+  let go;
+  const ready = new Promise((r) => { taken = r; });
+  const released = new Promise((r) => { go = r; });
+  const done = owner.begin(async (sql) => {
+    const [{ pid }] = await sql`select pg_catalog.pg_backend_pid() as pid`;
+    await sql`select 1 from tmpos_invoice_issue.issued_invoice where invoice_id = ${invoice} for update`;
+    taken(pid);
+    await released;
+  });
+  const first = await Promise.race([ready.then((pid) => ({ pid })), done.then(() => ({ early: true }), () => ({ early: true }))]);
+  assert.ok(!('early' in first), 'the header hold was taken');
+  return { pid: first.pid, release: () => { go(); return done; } };
+}
+
+test('ICH-23 (CA-35 H, CA-46 H): with TMPOS_CREDIT_NOTE_WRITES=off a real store-scope store_owner\'s register, issue and withdrawal each answer 503 service_unavailable (credit_note_writes_disabled) with no idempotency row, no lease and no credit-note row — a malformed body and an older tab\'s retry of a completed issue too; the lookup shows the issued row, the proof, the list and the settlement answer as before; a manager without the grant gets 403 and no session 401 first; the startup line shows off', async () => {
+  // Writes on: an issued credit note (its issue key kept for the retry) and an open registration for the settlement under off.
+  // A second owner of the store issues the note and leaves its registration issued and unacknowledged, holding ITS slot on x
+  // (038's one unsettled registration per owner per invoice); `so` registers the open one beside it.
+  const seeded = await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich23');
+    const so = await storeOwner(w, 'so');
+    const issuer = await storeOwner(w, 'issuer');
+    const s = await signIn(ctx, so);
+    const si = await signIn(ctx, issuer);
+    const x = await issueOne(ctx, w.sm, w, 'ich23 x');
+    const r = await registeredWithProof(ctx, si, w, x, 1000, 'ich23 seed');
+    r.issueKey = randomUUID();
+    r.creditNote = issuedOf(await ctx.issue(si, w, x, issueBody(w, r), r.issueKey), x, r, 'ich23 seed issue');
+    const open = await registeredWithProof(ctx, s, w, x, 500, 'ich23 open');
+    return { w, so, issuer, x, r, open, openSession: s };
+  });
+  const { w, so, issuer, x, r, open, openSession } = seeded;
+  await withEntry(async (ctx) => {
+    const ready = recordsOf(ctx.lines).filter((l) => l.event === 'startup_ready');
+    assert.equal(ready.length, 1, 'CA-35: one startup line');
+    assert.equal(ready[0].creditNoteWrites, 'off', 'CA-35: the startup log shows the value');
+    assert.match(String(ready[0].instanceId), INSTANCE_RE, 'CA-35: with this instance\'s id');
+    const s = await signIn(ctx, so); // a fresh session of the verification owner (doc 18 §9.3.1)
+    const si = await signIn(ctx, issuer); // the issuing owner: the completed issue's key and the issued row are its own
+    const refused = async (label, send) => {
+      const key = randomUUID();
+      const reply = await writes([w.T], keyOf(s, key), NOTHING, label, () => send(key));
+      assertRefusal(reply, 503, 'service_unavailable', label);
+      assert.equal(ctx.reason(reply), 'credit_note_writes_disabled', `${label}: the log reason`);
+      assert.deepEqual(writeLinesOf(ctx, reply), [], `${label}: no credit_note_write line`);
+      const [{ n }] = await owner`select count(*)::int as n from tmpos_internal.idempotency_record where scope = ${scopeOf(key, s.principal)}`;
+      assert.equal(n, 0, `${label}: no idempotency row and no lease for its key`);
+    };
+    await refused('CA-35 register', (key) => ctx.register(s, w, x, regBody(w, randomUUID(), 300), key));
+    await refused('CA-35 register, malformed body', (key) => ctx.register(s, w, x, '{"expectedTenant":', key));
+    await refused('CA-35 issue', (key) => ctx.issue(s, w, x, issueBody(w, open), key));
+    await refused('CA-35 withdrawal', (key) => ctx.withdraw(s, w, x, r.creditNote, withdrawBody(w), key));
+    // An older tab's Check again of the completed issue: the same key and bytes get the 503, never the recorded 201.
+    const retry = await writes([w.T], [], NOTHING, 'CA-35 retry of a completed issue', () => ctx.issue(si, w, x, issueBody(w, r), r.issueKey));
+    assertRefusal(retry, 503, 'service_unavailable', 'CA-35 retry of a completed issue');
+    assert.equal(retry.headers['idempotent-replayed'], undefined, 'not a replay');
+    // Recovery and every read answer as before (doc 18 §9.3.1, column A).
+    const issuedRow = (await attemptsOf(ctx, si, w, 'CA-35 lookup')).find((a) => a.attemptId === r.attempt);
+    assert.deepEqual([issuedRow?.state, issuedRow?.creditNote?.id], ['issued', r.creditNote], 'CA-35: Look up attempt shows the issued row');
+    // The proof is bound to the session that registered (038's proof, step 3: the session digest), so it is asked with that
+    // session — still live, as a new sign-in ends no other session — against this off entry.
+    proofOf(await ctx.proof(openSession, w, x, open.registration), open, x, 'CA-35 proof');
+    assert.equal(notesOf(await ctx.list(s, w, x), x, 'CA-35 list').length, 1, 'CA-35: the list');
+    // This build serves no store-wide credit-note read: that path is unregistered, 404 not_found even with a session.
+    assertRefusal(await ctx.read(s, `/api/v1/stores/${w.S}/credit-notes`), 404, 'not_found', 'CA-35 no store-wide activity read');
+    const k = randomUUID();
+    const settledReply = await writes([w.T], keyOf(s, k), { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 1 }, 'CA-35 settlement under off', async () => {
+      const reply = await ctx.settle(s, w, x, settleBody(w, open.attempt, 1), k);
+      settledOf(reply, x, open.attempt, 'released', 'CA-35 settlement under off');
+      return reply;
+    });
+    // CA-47 (d)/(i) input: the settlement's committed line carries this off instance's id.
+    assert.deepEqual(writeLinesOf(ctx, settledReply).map((l) => [l.outcome, l.kind, l.instanceId, l.attemptId]),
+      [['committed', 'settle', ready[0].instanceId, open.attempt]], 'CA-35: the settlement under off writes its committed line');
+    // CA-46's order: the session, its CSRF token and authorization answer before the setting is consulted, writing nothing.
+    const writeSends = [
+      ['register', (sess, key, opts) => ctx.register(sess, w, x, regBody(w, randomUUID(), 300), key, opts)],
+      ['issue', (sess, key, opts) => ctx.issue(sess, w, x, issueBody(w, open), key, opts)],
+      ['withdrawal', (sess, key, opts) => ctx.withdraw(sess, w, x, r.creditNote, withdrawBody(w), key, opts)],
+    ];
+    for (const [label, send] of writeSends) {
+      const denied = await writes([w.T], [], NOTHING, `CA-46 ${label}: the manager`, () => send(w.sm, randomUUID()));
+      assertRefusal(denied, 403, 'forbidden', `CA-46 ${label}: the manager`);
+      assert.equal(ctx.reason(denied), 'authz_denied', `CA-46 ${label}: authorization first`);
+      const anonymous = await writes([w.T], [], NOTHING, `CA-46 ${label}: no session`, () => send({ ...s, cookie: '', csrf: '' }, randomUUID()));
+      assert.equal(anonymous.status, 401, `CA-46 ${label}: no session`);
+      const badCsrf = await writes([w.T], [], NOTHING, `CA-46 ${label}: wrong session CSRF`,
+        () => send(s, randomUUID(), { headers: { [SESSION_CSRF_HEADER]: 'wrong-token' } }));
+      assert.equal(badCsrf.status, 403, `CA-46 ${label}: wrong session CSRF`);
+      assert.match(ctx.reason(badCsrf), /^csrf_session_/, `CA-46 ${label}: the CSRF refusal, not the setting`);
+    }
+    // CA-46's main case: a suspended tenant's sessions end at admission (401) on the three writes, before the setting; one fresh
+    // owner per request, since a denial ends every session of its principal.
+    const owners = [];
+    for (const label of ['susp-reg', 'susp-iss', 'susp-wd']) owners.push(await signIn(ctx, await storeOwner(w, label)));
+    await owner`update tenant set status = 'suspended' where tenant_id = ${w.T}`;
+    try {
+      const sends = writeSends.map(([label, send]) => [label, (sess) => send(sess, randomUUID())]);
+      for (const [i, [label, send]] of sends.entries()) {
+        // Nothing of the credit-note, idempotency or outbox data moves (AA, every audit row, is left out: ending the principal's
+        // sessions is the session store's own business, not a credit-note write).
+        const before = await counts([w.T]);
+        const reply = await send(owners[i]);
+        const { AA: _sessionAudit, ...moved } = delta(await counts([w.T]), before);
+        const { AA: _none, ...none } = NOTHING;
+        assert.deepEqual(moved, none, `CA-46 suspended: ${label}: nothing written`);
+        assertRefusal(reply, 401, 'unauthenticated', `CA-46 suspended: ${label}`);
+        assert.ok(['session_admission_denied', 'session_version_mismatch'].includes(ctx.reason(reply)), `CA-46 suspended: ${label}: ${ctx.reason(reply)}`);
+      }
+      // The surface an apply window relies on: an unregistered route is 404 with no session — the store-wide credit-notes path too,
+      // which this build does not serve.
+      assertRefusal(await send(ctx.port, 'GET', `/api/v1/stores/${w.S}/credit-activity`, { host: TENANT_HOST }), 404, 'not_found', 'CA-46 unregistered route');
+      assertRefusal(await send(ctx.port, 'GET', `/api/v1/stores/${w.S}/credit-notes`, { host: TENANT_HOST }), 404, 'not_found', 'CA-46 store-wide credit-notes, unregistered');
+    } finally {
+      await owner`update tenant set status = 'active' where tenant_id = ${w.T}`;
+    }
+    // A trialing tenant's session still reaches the runtime, so its write meets the setting: 503.
+    await owner`update tenant set status = 'trialing' where tenant_id = ${w.T}`;
+    try {
+      const st = await signIn(ctx, await storeOwner(w, 'trialing'));
+      const reply = await writes([w.T], [], NOTHING, 'CA-46 trialing', () => ctx.register(st, w, x, regBody(w, randomUUID(), 300)));
+      assertRefusal(reply, 503, 'service_unavailable', 'CA-46 trialing');
+      assert.equal(ctx.reason(reply), 'credit_note_writes_disabled', 'CA-46 trialing: reaches the setting');
+    } finally {
+      await owner`update tenant set status = 'active' where tenant_id = ${w.T}`;
+    }
+  }, { env: { TMPOS_CREDIT_NOTE_WRITES: 'off' } });
+});
+
+test('ICH-24 (CA-47 (a), (b), (g) H): each committed register, issue, settlement and withdrawal writes exactly one committed credit_note_write line whose correlationId, storeId, invoiceId and subject match exactly one audit row and its domain row; no line carries a key, the session, the proof, the amount or the reason; a replay writes no line and logs idempotency_replayed; a register whose commit is forced past its deadline answers 503 with one unconfirmed line and no row', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich24');
+    const so = await storeOwner(w, 'so');
+    const s = await signIn(ctx, so);
+    const x = await issueOne(ctx, w.sm, w, 'ich24 x');
+    const [{ instanceId }] = recordsOf(ctx.lines).filter((l) => l.event === 'startup_ready');
+    const lineOf = (reply, kind, label, invoice = x) => {
+      const found = writeLinesOf(ctx, reply);
+      assert.equal(found.length, 1, `${label}: exactly one line`);
+      const [line] = found;
+      assert.deepEqual([line.outcome, line.kind, line.instanceId, line.storeId, line.invoiceId], ['committed', kind, instanceId, w.S, invoice], label);
+      assert.match(line.correlationId, UUID_RE, `${label}: a server correlation id`);
+      for (const forbidden of ['grossCents', 'reason', 'idempotencyKey', 'scope', 'fingerprint', 'lease', 'sessionKey', 'registrationProof', 'amount']) {
+        assert.ok(!(forbidden in line), `${label}: no ${forbidden}`);
+      }
+      return line;
+    };
+    const auditOf = async (line, action) => (await owner`select store_id, actor_internal_user_id as actor, subject_invoice_credit_note_id as cn,
+        subject_invoice_credit_note_registration_id as reg from public.audit_event where request_id = ${line.correlationId} and action_id = ${action}`)
+      .map((row) => ({ ...row }));
+
+    // (a) register
+    const attempt = randomUUID();
+    const regKey = randomUUID();
+    const registered = await ctx.register(s, w, x, regBody(w, attempt, 700), regKey);
+    const registration = registeredOf(registered, x, attempt, 700, 'pricing_error', 'CA-47 register');
+    const reg = lineOf(registered, 'register', 'CA-47 register');
+    assert.equal(reg.registrationId, registration, 'CA-47 register: the aggregate id');
+    assert.deepEqual(await auditOf(reg, A.register), [{ store_id: w.S, actor: so.id, cn: null, reg: registration }], 'CA-47 register: one audit row matches');
+    const [regRow] = await owner`select invoice_id from tmpos_invoice_credit_note.invoice_credit_note_registration where registration_id = ${registration}`;
+    assert.equal(regRow.invoice_id, x, 'CA-47 register: the registration is of the line\'s invoice');
+    // (a) issue
+    const r = { registration, attempt, gross: 700, reason: 'pricing_error' };
+    r.proof = proofOf(await ctx.proof(s, w, x, registration), r, x, 'CA-47 proof');
+    const issued = await ctx.issue(s, w, x, issueBody(w, r));
+    const creditNote = issuedOf(issued, x, r, 'CA-47 issue');
+    const iss = lineOf(issued, 'issue', 'CA-47 issue');
+    assert.deepEqual([iss.registrationId, iss.creditNoteId], [registration, creditNote], 'CA-47 issue: the body\'s registration and the aggregate id');
+    assert.deepEqual(await auditOf(iss, A.issue), [{ store_id: w.S, actor: so.id, cn: creditNote, reg: registration }], 'CA-47 issue: one audit row matches');
+    const [cnRow] = await owner`select invoice_id, store_id, registration_id from tmpos_invoice_credit_note.invoice_credit_note where credit_note_id = ${creditNote}`;
+    assert.deepEqual([cnRow.invoice_id, cnRow.store_id, cnRow.registration_id], [x, w.S, registration], 'CA-47 issue: the note is of the line\'s invoice and store');
+    // (a) settlement
+    const settled = await ctx.settle(s, w, x, settleBody(w, attempt, 2));
+    settledOf(settled, x, attempt, 'confirmed', 'CA-47 settle');
+    const set = lineOf(settled, 'settle', 'CA-47 settle');
+    assert.equal(set.attemptId, attempt, 'CA-47 settle: the attempt id');
+    assert.deepEqual(await auditOf(set, A.settle), [{ store_id: w.S, actor: so.id, cn: null, reg: registration }], 'CA-47 settle: one audit row matches');
+    const [setRow] = await owner`select attempt_id, registered_by, acknowledged_at is not null as acknowledged
+      from tmpos_invoice_credit_note.invoice_credit_note_registration where registration_id = ${registration}`;
+    assert.deepEqual([setRow.attempt_id, setRow.registered_by, setRow.acknowledged], [attempt, so.id, true], 'CA-47 settle: attempt, registered_by = the actor');
+    // (a) withdrawal
+    const withdrawn = await ctx.withdraw(s, w, x, creditNote, withdrawBody(w));
+    withdrawnOf(withdrawn, x, creditNote, 'CA-47 withdraw');
+    const wd = lineOf(withdrawn, 'withdraw', 'CA-47 withdraw');
+    assert.equal(wd.creditNoteId, creditNote, 'CA-47 withdraw: the path\'s credit note');
+    assert.deepEqual(await auditOf(wd, A.withdraw), [{ store_id: w.S, actor: so.id, cn: creditNote, reg: null }], 'CA-47 withdraw: one audit row matches');
+    assert.equal(new Set([reg, iss, set, wd].map((l) => l.correlationId)).size, 4, 'CA-47: one correlation id per command');
+    const text = ctx.lines.join('\n');
+    for (const secret of [regKey, r.proof, s.cookie.slice(s.cookie.indexOf('=') + 1), s.csrf, s.key]) {
+      assert.ok(!text.includes(secret), 'CA-47 (a): no log line carries a key, the session, its CSRF token or the proof');
+    }
+
+    // (b) a replay of the completed register: no line, no row; its request line says idempotency_replayed.
+    const replay = await writes([w.T], [], NOTHING, 'CA-47 (b) replay', () => ctx.register(s, w, x, regBody(w, attempt, 700), regKey));
+    registeredOf(replay, x, attempt, 700, 'pricing_error', 'CA-47 (b) replay', { replayed: true });
+    assert.deepEqual(writeLinesOf(ctx, replay), [], 'CA-47 (b): a replay writes no line');
+    assert.equal(ctx.reason(replay), 'idempotency_replayed');
+
+    // (g) the commit forced past its deadline: the register waits at the OWNER's hold of the issued header until the runtime gives up.
+    const y = await issueOne(ctx, w.sm, w, 'ich24 y');
+    const h = await holdHeader(y);
+    const stalledAttempt = randomUUID();
+    let stalled;
+    try {
+      stalled = await writes([w.T], [], { ...NOTHING, LE: 1 }, 'CA-47 (g) stalled register', () => ctx.register(s, w, y, regBody(w, stalledAttempt, 400)));
+    } finally {
+      await h.release();
+    }
+    assertRefusal(stalled, 503, 'service_unavailable', 'CA-47 (g) stalled register');
+    // The deadline word is `transaction_timeout` (deadline.ts:47). Behind a row hold the transaction-local lock timeout (1,400 ms,
+    // postgresTransactionalStore.ts:396-400) usually fires before the 2,000 ms deadline, answering `transaction_unavailable`; a
+    // strict deadline needs the lost-COMMIT relay (tests/db/customerCreate.integration.test.mjs:1306-1319), which this suite lacks.
+    // Either is the final 503 that writes `unconfirmed` (as M5R-06e accepts both, tests/db/adminRevocation.integration.test.mjs:1029).
+    assert.ok(['transaction_timeout', 'transaction_unavailable'].includes(ctx.reason(stalled)), `CA-47 (g): ${ctx.reason(stalled)}`);
+    const unconfirmed = writeLinesOf(ctx, stalled);
+    assert.deepEqual(unconfirmed.map((l) => [l.outcome, l.kind, l.invoiceId]), [['unconfirmed', 'register', y]], 'CA-47 (g): one unconfirmed line');
+    assert.deepEqual(await auditOf(unconfirmed[0], A.register), [], 'CA-47 (g): nothing committed under its correlation id');
+
+    // (b) remainder: the retry under a new key re-runs the routine (the attempt committed nothing): one committed line with a NEW
+    // correlation id; a second register of the same attempt is the routine's sealed refusal, with no row and no line.
+    const retried = await writes([w.T], [], { ...NOTHING, RG: 1, RA: 1, AA: 1 }, 'CA-47 (b) retry under a new key',
+      () => ctx.register(s, w, y, regBody(w, stalledAttempt, 400)));
+    registeredOf(retried, y, stalledAttempt, 400, 'pricing_error', 'CA-47 (b) retry');
+    const retriedLine = lineOf(retried, 'register', 'CA-47 (b) retry', y);
+    assert.notEqual(retriedLine.correlationId, unconfirmed[0].correlationId, 'CA-47 (b): a new correlation id');
+    const twice = await writes([w.T], [], NOTHING, 'CA-47 (b) a second register of the attempt',
+      () => ctx.register(s, w, y, regBody(w, stalledAttempt, 400)));
+    assert.equal(twice.status, 409, `CA-47 (b) a second register: ${replyNote(twice)}`);
+    assert.deepEqual(writeLinesOf(ctx, twice), [], 'CA-47 (b): a refused second register writes no line');
+  });
+});

@@ -58,6 +58,10 @@
 //                  M7B-INVOICES-P1); the store directory, GET /api/v1/stores, declares no
 //                  requirement, so no authorizer runs and its window does not slide — its
 //                  handler receives the session key and its routine decides;
+//             6a. the credit-note write setting (doc 18 §6.6, D-CA-14 A): a route declaring `writeGate` (routes.ts: the
+//                credit-note registration, issue and withdrawal) while the setting is `off` -> 503 service_unavailable,
+//                logged credit_note_writes_disabled, right after authorization and before the trusted context, step-up,
+//                target, body and key — so a refused request reserves no key, takes no lease and calls no routine;
 //             6b. the target of a templated command (M7A-CUSTOMERS-P7: PATCH /api/v1/customers/{id}):
 //                the path's final segment must be a canonical lowercase uuid -> else 400, judged only
 //                now that the chain has authenticated and authorized the request and before anything
@@ -618,7 +622,26 @@ export interface AppDeps {
    * bounded 404 before anything else is asked, the two operational probes excepted (an orchestrator reaches those by address).
    */
   hosts?: readonly string[];
+  /**
+   * Doc 18 §6.6 (D-CA-14 A, D-CA-18 C): the tenant entry's credit-note write setting (TMPOS_CREDIT_NOTE_WRITES), exactly `on` or
+   * `off`, and this process's random instance id (a uuid v4 generated at its start). Both are required once any route declares
+   * `writeGate` or commits a credit-note kind (CREDIT_NOTE_WRITE_KINDS): startup refuses otherwise — there is no default.
+   */
+  creditNoteWrites?: 'on' | 'off';
+  instanceId?: string;
 }
+
+/**
+ * The credit-note command kinds that write the `credit_note_write` line (doc 18 §9.3.4), by the word the line carries. Literals,
+ * as app.ts imports no route module (the kinds are invoiceCreditNotes.ts's contracts).
+ */
+const CREDIT_NOTE_WRITE_KINDS: Readonly<Record<string, 'register' | 'issue' | 'settle' | 'withdraw'>> = Object.freeze({
+  'store.invoice_credit_note.register': 'register',
+  'store.invoice_credit_note.issue': 'issue',
+  'store.invoice_credit_note.settle': 'settle',
+  'store.invoice_credit_note.withdraw': 'withdraw',
+});
+const INSTANCE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // One DNS name of lowercase labels, then an optional explicit port: no user-info, wildcard, IP literal (bracketed, or a
 // dotted quad — the last label must carry a letter, as a top-level label always does), trailing dot or whitespace, so
@@ -762,6 +785,11 @@ export function createApp(deps: AppDeps): Express {
   const contractOf = new Map(commandRoutes.map((r, i) => [r, validated[i]]));
   if (transactions === null && commandRoutes.length > 0) throw new EnforcementSetupError('command_transaction_required');
   if (transactions !== null && idempotency === null) throw new EnforcementSetupError('idempotency_required');
+  // Doc 18 §6.6: a credit-note writer runs only with its write setting and the instance id its write line carries.
+  if (routes.some((r) => r.writeGate !== undefined) || validated.some((c) => Object.hasOwn(CREDIT_NOTE_WRITE_KINDS, c.kind))) {
+    if (deps.creditNoteWrites !== 'on' && deps.creditNoteWrites !== 'off') throw new EnforcementSetupError('credit_note_writes_invalid');
+    if (typeof deps.instanceId !== 'string' || !INSTANCE_ID_RE.test(deps.instanceId)) throw new EnforcementSetupError('instance_id_invalid');
+  }
 
   const app = express();
   app.disable('x-powered-by');
@@ -970,6 +998,13 @@ export function createApp(deps: AppDeps): Express {
         authenticatedAt = active.authenticatedAt;
         sessionKey = active.key;
       }
+      // Doc 18 §6.6/§9.3.1 (D-CA-14 A): the write setting, judged now — after the limiter, CSRF, the session and authorization
+      // (a 401 or 403 always comes first), and before the trusted context, step-up, target, body and key. A refused request
+      // reserves no key, takes no lease, opens no transaction and calls no routine; anything but `on` refuses (startup proved
+      // the setting is `on` or `off` once any route declares the gate).
+      if (route.writeGate === 'credit_note_write' && deps.creditNoteWrites !== 'on') {
+        return refuse(req, res, 503, 'service_unavailable', 'credit_note_writes_disabled');
+      }
       // The declared trusted-authorization context (routes.ts, M5-GIAM-D1-P2; docs/phase-4/08 DA-31). Every
       // route that requires idempotency declares it — startup refuses one that does not — so no `perform`
       // and no `command` is ever entered under a verified principal alone, on EITHER boundary: an authorizer
@@ -1145,6 +1180,31 @@ export function createApp(deps: AppDeps): Express {
           // nothing; any refusal beyond the sealed ones may or may not have committed, so none releases the
           // lease: a retry replays or waits.
           const refused = await commitCommand(transactions as CommandTransactions, prepared.command, deadlineMs);
+          // Doc 18 §9.3.4 (D-CA-18 C): a credit-note command whose commit call returned null (the store answered `committed`) or a
+          // refusal answered 503 below, other than a lost lease, writes ONE `credit_note_write` line, after that return and before the
+          // response is sent; every other answer (a lost lease, a sealed refusal, the unchanged settlement, a 4xx) wrote no
+          // credit-note or audit row (a sealed refusal or unchanged settlement only its completion) and writes no line, and a
+          // replay never got here. Only server-generated ids and ids the shop holds: never the key, scope, fingerprint, lease, session
+          // key, proof, amount or reason.
+          const writeKind = Object.hasOwn(CREDIT_NOTE_WRITE_KINDS, contract.kind) ? CREDIT_NOTE_WRITE_KINDS[contract.kind] : null;
+          const logWrite = (outcome: 'committed' | 'unconfirmed'): void => {
+            if (writeKind === null) return;
+            const { aggregateId, changes } = prepared.command.mutation;
+            const subject = writeKind === 'register' ? { registrationId: aggregateId }
+              // The issue's registration is the body's, as the plan carried it into the mutation (invoiceCreditNotes.ts).
+              : writeKind === 'issue' ? { registrationId: typeof changes.registrationId === 'string' ? changes.registrationId : undefined, creditNoteId: aggregateId }
+              : writeKind === 'settle' ? { attemptId: aggregateId }
+              : { creditNoteId: paymentId ?? undefined }; // the withdrawal's: the path's second id segment
+            try {
+              emitLog('info', {
+                event: 'credit_note_write', outcome, instanceId: deps.instanceId, requestId: requestIdOf(res), kind: writeKind,
+                correlationId: prepared.command.audit.correlationId, storeId: storeId ?? undefined, invoiceId: targetId ?? undefined, ...subject,
+              }, deps.log);
+            } catch {
+              // A sink that throws never changes the answer to a decided commit (nor turns the 503 into a 500): the lost line
+              // leaves the row unmatched, so class 3 (doc 18 §9.3.4, "No line").
+            }
+          };
           // The aggregate was not at the version this request named. The store determined that inside the
           // transaction that already held the lease and the row, and recorded this exact 409 as the
           // completion there (M5-GIAM-D1-P2-R1) — so it is sent as a decided answer, and every later
@@ -1225,7 +1285,15 @@ export function createApp(deps: AppDeps): Express {
           // same transaction that locked the aggregate and found them (M5-GIAM-D1-P1-R1), so it is sent as
           // committed. An answer the plan named no response for is no confirmation of anything: a 503.
           if (refused === 'transaction_unchanged' && prepared.unchanged !== null) return sendRecorded(res, prepared.unchanged, false);
-          if (refused !== null) return refuse(req, res, 503, 'service_unavailable', refused);
+          if (refused !== null) {
+            // Doc 18 §9.3.4 (amended 2026-11-19): every refusal the chain answers 503 writes `unconfirmed`, except a lost lease. The
+            // store answers that only before opening a transaction or after its ROLLBACK is acknowledged, COMMIT never handed over
+            // (postgresTransactionalStore.ts commandOf and commit step 1; supervisedPgClient.ts), so this invocation wrote nothing.
+            // Its 503 and its request log reason are unchanged.
+            if (refused !== 'transaction_lease_lost') logWrite('unconfirmed');
+            return refuse(req, res, 503, 'service_unavailable', refused);
+          }
+          logWrite('committed');
           return sendRecorded(res, prepared.response, false);
         }
         let outcome: unknown;

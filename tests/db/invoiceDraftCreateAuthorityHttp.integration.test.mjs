@@ -417,6 +417,7 @@ const ENV = Object.freeze({
   SESSION_ADMIN_ORIGINS: ADMIN_ORIGIN,
   SESSION_TENANT_ORIGINS: TENANT_ORIGIN,
   TENANT_SESSION_ISSUER_KEY: ISSUER_KEY.toString('base64url'),
+  TMPOS_CREDIT_NOTE_WRITES: 'on', // doc 18 §6.6 (D-CA-14 A): required by the tenant entry
   IDEMPOTENCY_KEY: IDEMPOTENCY_KEY.toString('base64url'),
   FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: JSON.stringify({
     type: 'service_account', project_id: 'ica-test-project', client_email: 'ica-test@ica-test-project.iam.gserviceaccount.com', private_key: FIREBASE_PRIVATE_KEY,

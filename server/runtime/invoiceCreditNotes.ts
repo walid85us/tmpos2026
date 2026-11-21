@@ -169,6 +169,8 @@ const REGISTER_ROUTE: RouteDefinition = {
   recentAuth: 'required',
   // D-CN-9 step 1: the session's digest joins the fingerprint (routes.ts SESSION_BOUND_STORE_COMMANDS).
   sessionBinding: 'required',
+  // Doc 18 §6.6 (D-CA-14 A): refused 503 while TMPOS_CREDIT_NOTE_WRITES is off (routes.ts CREDIT_NOTE_WRITE_GATED).
+  writeGate: 'credit_note_write',
   command: Object.freeze({ contract: INVOICE_CREDIT_NOTE_REGISTER_CONTRACT, plan: planInvoiceCreditNoteRegister }),
 };
 /** The registration route, as the tenant inventory registers it (server/composition/tenantTransactions.ts). */
@@ -226,6 +228,7 @@ const ISSUE_ROUTE: RouteDefinition = {
   trustedContext: 'required',
   recentAuth: 'required',
   sessionBinding: 'required',
+  writeGate: 'credit_note_write',
   command: Object.freeze({ contract: INVOICE_CREDIT_NOTE_ISSUE_CONTRACT, plan: planInvoiceCreditNoteIssue }),
 };
 /** The issue route, as the tenant inventory registers it. */
@@ -326,6 +329,7 @@ const WITHDRAW_ROUTE: RouteDefinition = {
   idempotency: 'required',
   trustedContext: 'required',
   recentAuth: 'required',
+  writeGate: 'credit_note_write',
   command: Object.freeze({ contract: INVOICE_CREDIT_NOTE_WITHDRAW_CONTRACT, plan: planInvoiceCreditNoteWithdraw }),
 };
 /** The withdrawal route, as the tenant inventory registers it. */

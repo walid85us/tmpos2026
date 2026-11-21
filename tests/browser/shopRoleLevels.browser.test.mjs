@@ -1220,6 +1220,7 @@ const ENV = Object.freeze({
   NODE_ENV: 'production',
   PORT: '8443',
   APP_DATABASE_URL: 'postgres://tmpos_runtime:synthetic-pw@db.abcdefghijklmnop.supabase.co:5432/postgres',
+  TMPOS_CREDIT_NOTE_WRITES: 'on', // doc 18 §6.6 (D-CA-14 A): required by the tenant entry
   DATABASE_CA_CERT: tls.rootCertificates[0],
   RATE_LIMIT_KEY: RATE_KEY.toString('base64url'),
   TRUSTED_PROXY_CIDRS: '127.0.0.2/32',

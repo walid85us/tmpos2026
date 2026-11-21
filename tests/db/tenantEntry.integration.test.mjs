@@ -458,6 +458,7 @@ function baseEnv(overrides = {}) {
     SESSION_ADMIN_ORIGINS: ADMIN_ORIGIN,
     SESSION_TENANT_ORIGINS: TENANT_ORIGIN,
     TENANT_SESSION_ISSUER_KEY: ISSUER_KEY.toString('base64url'),
+    TMPOS_CREDIT_NOTE_WRITES: 'on', // doc 18 §6.6 (D-CA-14 A): required by the tenant entry
     IDEMPOTENCY_KEY: IDEMPOTENCY_KEY.toString('base64url'),
     FIREBASE_ADMIN_SERVICE_ACCOUNT_JSON: FIREBASE_JSON,
     ...overrides,
@@ -890,6 +891,14 @@ test('M7TE-01: a valid configuration binds exactly one listener serving TENANT_S
     assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
     assert.equal(ctx.result.address.address, '127.0.0.1');
     assert.deepEqual(canonical(ctx.result.routes), canonical(TENANT_SHIPPING_ROUTES));
+    // Doc 18 §6.6 / §9.3.2 (CA-35 H, WRITTEN — NOT RUN): the startup line carries the DATABASE clock, sampled by the preflight,
+    // beside the write setting and the instance id; it is no later than the database's clock now.
+    const ready = ctx.cap.lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } }).filter((r) => r.event === 'startup_ready');
+    assert.equal(ready.length, 1, 'one startup line');
+    assert.match(String(ready[0].databaseClock), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/, 'the database clock sample');
+    assert.equal(ready[0].creditNoteWrites, 'on');
+    const [{ later }] = await owner`select ${ready[0].databaseClock}::timestamptz <= pg_catalog.clock_timestamp() as later`;
+    assert.equal(later, true, 'the sample is the database\'s own clock, taken before now');
     // The table itself, pinned here rather than read from the module: the customer create (M7A-CUSTOMERS-P3) and the
     // owner's role-level edit (M7A-CUSTOMERS-P3-R1) are its two body-bearing, idempotent routes; the edit's read-back
     // (M7A-CUSTOMERS-P3-R2) is a bodiless session read, and so is its Invoices sibling (M5-INVOICES-AUTH-P1), and so is the
@@ -1142,6 +1151,9 @@ test('M7TE-07: each missing or malformed tenant configuration refuses config_inv
     ['IDEMPOTENCY_KEY malformed', { IDEMPOTENCY_KEY: 'abc' }, 'IDEMPOTENCY_KEY:idempotency_key_invalid'],
     ['IDEMPOTENCY_KEY = RATE_LIMIT_KEY', { IDEMPOTENCY_KEY: RATE_KEY.toString('base64url') }, 'IDEMPOTENCY_KEY:idempotency_key_shared'],
     ['IDEMPOTENCY_KEY = the issuer key', { IDEMPOTENCY_KEY: ISSUER_KEY.toString('base64url') }, 'IDEMPOTENCY_KEY:idempotency_key_shared'],
+    // Doc 18 §6.6 (CA-35 H, WRITTEN — NOT RUN): the credit-note write setting, exactly `on` or `off`.
+    ['TMPOS_CREDIT_NOTE_WRITES missing', { TMPOS_CREDIT_NOTE_WRITES: undefined }, 'TMPOS_CREDIT_NOTE_WRITES:credit_note_writes_missing'],
+    ['TMPOS_CREDIT_NOTE_WRITES not a word', { TMPOS_CREDIT_NOTE_WRITES: 'OFF' }, 'TMPOS_CREDIT_NOTE_WRITES:credit_note_writes_invalid'],
     ['RATE_LIMIT_KEY missing', { RATE_LIMIT_KEY: undefined }, 'RATE_LIMIT_KEY:rate_limit_key_missing'],
     ['RATE_LIMIT_KEY malformed', { RATE_LIMIT_KEY: 'abc' }, 'RATE_LIMIT_KEY:rate_limit_key_invalid'],
     ['APP_DATABASE_URL missing', { APP_DATABASE_URL: undefined }, 'APP_DATABASE_URL:app_database_url_missing'],
@@ -1689,6 +1701,23 @@ test('M7TE-15: a create with contacts and the profile read end to end — 201 {c
     await owner`delete from tmpos_role_edit.role_level_version where tenant_id = ${T_C}`;
     await owner`delete from tmpos_role.tenant_role_level where tenant_id = ${T_C}`;
   }
+});
+
+test('M7TE-16 (CA-35 H, doc 18 §6.6): separate instances started with on and with off each log exactly one startup_ready, in their own log, showing their own setting and their own instance id', async () => {
+  const ids = [];
+  for (const value of ['on', 'off']) {
+    await withEntry({ env: { TMPOS_CREDIT_NOTE_WRITES: value } }, async (ctx) => {
+      assert.equal(ctx.result.outcome, 'listening', JSON.stringify(ctx.result));
+      const ready = ctx.cap.lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } }).filter((r) => r.event === 'startup_ready');
+      assert.equal(ready.length, 1, `${value}: one startup line in this instance's log`);
+      assert.equal(ready[0].creditNoteWrites, value, `${value}: the line shows the setting this instance was started with`);
+      // §6.6: a random id generated at each process start (tenantEntry.ts randomUUID) — never a hostname or an environment value.
+      assert.equal(typeof ready[0].instanceId, 'string', `${value}: the raw instance id is a string`);
+      assert.match(ready[0].instanceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, `${value}: its instance id`);
+      ids.push(ready[0].instanceId);
+    });
+  }
+  assert.notEqual(ids[0], ids[1], 'each instance logs its own id, so the two lines are told apart in one sink');
 });
 
 // ===========================================================================

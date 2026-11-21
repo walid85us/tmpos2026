@@ -4,7 +4,7 @@
 // reads any other key, so a caller cannot smuggle a secret into a log line.
 // Every string value is stripped of control bytes (so a value cannot forge a
 // second record) and length-bounded. Never logs headers, bodies, query values,
-// tokens, credentials, identifiers, or raw Error objects/stacks.
+// tokens, credentials, identifiers (other than the closed id fields below), or raw Error objects/stacks.
 export type LogLevel = 'info' | 'warn' | 'error';
 
 export interface LogSink {
@@ -21,7 +21,31 @@ export interface LogFields {
   reason?: string;
   /** The id THIS server generated for an audited session operation (sessions.ts) — never a client's value. */
   operationId?: string;
+  // Doc 18 §6.6/§9.3.4 (D-CA-14 A, D-CA-18 C): the tenant startup line's evidence and the closed field list of the
+  // `credit_note_write` line. Every value is an id this server generated for the command or one the shop already holds, or
+  // a closed word — never an idempotency key, scope, fingerprint or lease, a session key, a proof, an amount or a reason.
+  /** A random id this process generated at its start (tenantEntry.ts) — never a hostname, an environment value or a secret. */
+  instanceId?: string;
+  /** The tenant entry's write setting, `on` or `off` (TMPOS_CREDIT_NOTE_WRITES). */
+  creditNoteWrites?: string;
+  /** The DATABASE clock sampled at startup (doc 18 §9.3.2 "times"), `YYYY-MM-DDTHH:MM:SS.ffffffZ` — never the instance's. */
+  databaseClock?: string;
+  /** `committed` or `unconfirmed`. */
+  outcome?: string;
+  /** `register`, `issue`, `settle` or `withdraw`. */
+  kind?: string;
+  correlationId?: string;
+  storeId?: string;
+  invoiceId?: string;
+  registrationId?: string;
+  creditNoteId?: string;
+  attemptId?: string;
 }
+
+/** The optional string fields, in record order after `operationId`. */
+const ID_FIELDS = [
+  'instanceId', 'creditNoteWrites', 'databaseClock', 'outcome', 'kind', 'correlationId', 'storeId', 'invoiceId', 'registrationId', 'creditNoteId', 'attemptId',
+] as const;
 
 const MAX_VALUE_LEN = 200;
 // C0 controls, DEL, C1 controls, and the Unicode line/paragraph separators
@@ -53,6 +77,7 @@ export function buildLogRecord(
   if (isFiniteNumber(fields.durationMs)) rec.durationMs = Math.max(0, Math.round(fields.durationMs));
   if (fields.reason !== undefined) rec.reason = sanitizeLogValue(String(fields.reason));
   if (fields.operationId !== undefined) rec.operationId = sanitizeLogValue(String(fields.operationId));
+  for (const name of ID_FIELDS) if (fields[name] !== undefined) rec[name] = sanitizeLogValue(String(fields[name]));
   return rec;
 }
 
