@@ -11,6 +11,9 @@
 //   POST /api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement           — recover_invoice_credit_notes, an UPDATE
 //   POST /api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal — withdraw_invoice_credit_notes (SENSITIVE)
 //   GET  /api/v1/stores/{storeId}/invoices/{id}/credit-notes                     — view_issued_invoices, the credit-note list
+// and (docs/phase-4/18, migration 039, D-CA-1 A) an EIGHTH, the store-wide credit-activity read:
+//   GET  /api/v1/stores/{storeId}/credit-notes                                   — view_store_credit_activity (owner-only, not
+//        sensitive, Invoices Full): every credit note of the store, newest number first, names always present (THE ACTIVITY).
 //
 // THE RECOVERY CONTRACT (doc 16 "CN-P1 recovery contract", D-CN-9 A) mirrors 037 routine by routine: a registration binds the
 // attempt, the amount and the reason; its post-commit proof; the issue presenting both; the caller's attempts; a deliberate
@@ -29,6 +32,10 @@
 // THE LIST. No query or exactly ?after=<credit note id>; 038's m7b_invoice_credit_notes_list. Staff display names reach the
 // store owner only: when the routine answers names not visible, the issuedByName and withdrawnByName fields are ABSENT (not
 // null); when visible, a NULL name is sent as null (doc 16 D-CN-7, CN-33). Never an id or an email.
+//
+// THE ACTIVITY (doc 18 §5, §6.3). No query or exactly ?after=<credit note id> (the list's parser, D-CA-6 A); 039's
+// m7b_store_credit_activity, 51 asked, 50 served, credit_note_number strictly descending. 200 exactly { store: { id },
+// creditNotes, nextCursor }; no tax or net (D-CA-5 A); a name over 1,000 characters or with a control character is the 503.
 //
 // Every routine answer is decoded exactly; anything out of shape is the 503. PURE AND PORTABLE: part of the emitted tenant
 // runtime artifact, importing only the runtime. invoicePayments.ts's private helpers are restated.
@@ -67,11 +74,15 @@ export const INVOICE_CREDIT_NOTES_PATH = `${INVOICE_PATH}${CREDIT_NOTES_SUFFIX}`
 export const INVOICE_CREDIT_NOTE_SETTLE_PATH = `${INVOICE_PATH}${SETTLEMENT_SUFFIX}`;
 export const INVOICE_CREDIT_NOTE_WITHDRAW_PATH = `${INVOICE_CREDIT_NOTES_PATH}${CREDIT_NOTE_ID_SEGMENT}/withdrawal`;
 export const INVOICE_CREDIT_NOTE_ATTEMPTS_PATH = `${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/credit-note-attempts`;
+/** The store-wide activity read (doc 18 §5.1): no invoice segment, so no collision with the per-invoice list. */
+export const STORE_CREDIT_ACTIVITY_PATH = `${STORE_DIRECTORY_PATH}${STORE_SEGMENT}${CREDIT_NOTES_SUFFIX}`;
 /** The store route permissions (m5CanonicalPermissions.ts, D-CN-7 A). */
 export const INVOICE_CREDIT_NOTE_ISSUE_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'issue_invoice_credit_notes' });
 export const INVOICE_CREDIT_NOTE_WITHDRAW_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'withdraw_invoice_credit_notes' });
 export const INVOICE_CREDIT_NOTE_RECOVER_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'recover_invoice_credit_notes' });
 export const INVOICE_CREDIT_NOTES_VIEW_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'view_issued_invoices' });
+/** Doc 18 D-CA-1 A: the owner-only activity key, decided by the store owner rule (denied while read-only or overdue). */
+export const STORE_CREDIT_ACTIVITY_REQUIREMENT: AuthorizationRequirement = Object.freeze({ scope: 'store', permission: 'view_store_credit_activity' });
 /** Each command's body bound: 1 KiB. */
 export const INVOICE_CREDIT_NOTE_MAX_BODY_BYTES = 1024;
 /** The list's and the attempts' page (at most 50) and what each asks 038 for: one more, to know whether more exist. */
@@ -346,6 +357,8 @@ export const INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE: RouteDefinition = Object.freeze
  *   attempts: { outcome: 'attempts', attempts: InvoiceCreditNoteAttempt-shaped[] (at most 51) } | { outcome: 'denied' | 'cursor_unknown' }
  *   list:     { outcome: 'credit_notes', invoiceId, namesVisible, creditNotes: row-shaped[] (at most 51) }
  *             | { outcome: 'denied' | 'not_found' | 'cursor_unknown' }
+ *   storeActivity: { outcome: 'credit_notes', storeId, creditNotes: StoreCreditActivityNote-shaped[] (at most 51) }
+ *             | { outcome: 'denied' | 'cursor_unknown' }   (039, doc 18)
  * A throw — 038's fail-closed raises included — is an outage. The proof is handed the route's own deadline and settles within
  * it: 038's 'not_durable' is the port's alone (it commits and may ask once more in a fresh transaction).
  */
@@ -353,8 +366,9 @@ export interface InvoiceCreditNotesPort {
   proof(scope: TrustedScope, sessionKey: string, invoiceId: string, registrationId: string, signal: AbortSignal, deadlineMs: number): unknown;
   attempts(scope: TrustedScope, sessionKey: string, after: InvoiceCreditNoteAttemptsCursor | null, signal: AbortSignal): unknown;
   list(scope: TrustedScope, sessionKey: string, invoiceId: string, after: string | null, signal: AbortSignal): unknown;
+  storeActivity(scope: TrustedScope, sessionKey: string, after: string | null, signal: AbortSignal): unknown;
 }
-/** What the three read routes are built from. */
+/** What the four read routes are built from. */
 export interface InvoiceCreditNotesPorts {
   readonly invoiceCreditNotes: InvoiceCreditNotesPort;
 }
@@ -402,7 +416,7 @@ const queryOf = (target: string): string | null => {
   return at < 0 ? null : target.slice(at + 1);
 };
 
-function portOf(ports: InvoiceCreditNotesPorts, method: 'proof' | 'attempts' | 'list', deadlineMs: number): InvoiceCreditNotesPort {
+function portOf(ports: InvoiceCreditNotesPorts, method: 'proof' | 'attempts' | 'list' | 'storeActivity', deadlineMs: number): InvoiceCreditNotesPort {
   const port = ports?.invoiceCreditNotes;
   if (typeof port?.[method] !== 'function') throw new EnforcementSetupError('route_handler_invalid');
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > PORT_DEADLINE_MS) throw new EnforcementSetupError('port_deadline_invalid');
@@ -715,6 +729,113 @@ export function createInvoiceCreditNotesRoute(ports: InvoiceCreditNotesPorts, op
         withdrawal: n.withdrawal === null ? null : {
           withdrawnAt: n.withdrawal.withdrawnAt, reason: n.withdrawal.reason, ...nameOf('withdrawnByName', n.withdrawal.withdrawnByName),
         },
+      })),
+      nextCursor: page.hasMore && last !== undefined ? last.id : null,
+    });
+  });
+}
+
+// --- The store credit activity (doc 18, migration 039) ---------------------
+
+/** One credit note as the store activity serves it (doc 18 §5.2): flat invoice id and number, names always present, no tax or net. */
+export interface StoreCreditActivityNote {
+  readonly id: string;
+  readonly number: number;
+  readonly invoiceId: string;
+  readonly invoiceNumber: number;
+  readonly grossCents: number;
+  readonly reason: InvoiceCreditNoteReason;
+  readonly issuedAt: string;
+  readonly issuedByName: string | null;
+  readonly withdrawal: Readonly<{ withdrawnAt: string; reason: InvoiceCreditNoteWithdrawalReason; withdrawnByName: string | null }> | null;
+}
+/** One validated page of the activity. */
+export interface StoreCreditActivityPage {
+  readonly creditNotes: readonly StoreCreditActivityNote[];
+  readonly hasMore: boolean;
+}
+
+const ACTIVITY_ANSWER_KEYS: readonly string[] = ['outcome', 'storeId', 'creditNotes'];
+const ACTIVITY_NOTE_KEYS: readonly string[] = ['id', 'number', 'invoiceId', 'invoiceNumber', 'grossCents', 'reason', 'issuedAt', 'issuedByName', 'withdrawal'];
+
+function activityNoteOf(raw: unknown): StoreCreditActivityNote | null {
+  if (!isRecord(raw) || !hasExactly(raw, ACTIVITY_NOTE_KEYS)) return null;
+  const { id, number, invoiceId, invoiceNumber, grossCents, reason, issuedAt, issuedByName, withdrawal } = raw;
+  if (!isUuid(id) || !isAmount(number, 1) || !isUuid(invoiceId) || !isAmount(invoiceNumber, 1) || !isAmount(grossCents, 1)) return null;
+  if (!isInvoiceCreditNoteReason(reason) || !isDraftCreatedAt(issuedAt) || !isName(issuedByName)) return null;
+  const base = { id, number, invoiceId, invoiceNumber, grossCents, reason, issuedAt, issuedByName };
+  if (withdrawal === null) return Object.freeze({ ...base, withdrawal: null });
+  if (!isRecord(withdrawal) || !hasExactly(withdrawal, WITHDRAWAL_KEYS)) return null;
+  const { withdrawnAt, reason: withdrawalReason, withdrawnByName } = withdrawal;
+  if (!isDraftCreatedAt(withdrawnAt) || withdrawnAt < issuedAt || !isInvoiceCreditNoteWithdrawalReason(withdrawalReason) || !isName(withdrawnByName)) return null;
+  return Object.freeze({ ...base, withdrawal: Object.freeze({ withdrawnAt, reason: withdrawalReason, withdrawnByName }) });
+}
+
+/**
+ * The activity port's answer as a validated page, 'denied', 'cursor_unknown' — or null for anything out of shape. Never
+ * throws. The page names `storeId`, its numbers strictly descending (so distinct), ids distinct, none the cursor, at most 51.
+ */
+export function storeCreditActivityOf(raw: unknown, storeId: string, after: string | null): StoreCreditActivityPage | 'denied' | 'cursor_unknown' | null {
+  try {
+    if (!isRecord(raw)) return null;
+    const { outcome } = raw;
+    if (outcome === 'denied' || outcome === 'cursor_unknown') {
+      return hasExactly(raw, ['outcome']) && (outcome !== 'cursor_unknown' || after !== null) ? outcome : null;
+    }
+    if (outcome !== 'credit_notes' || !hasExactly(raw, ACTIVITY_ANSWER_KEYS) || raw.storeId !== storeId) return null;
+    const { creditNotes } = raw;
+    if (!Array.isArray(creditNotes) || creditNotes.length > INVOICE_CREDIT_NOTES_ASK) return null;
+    const page: StoreCreditActivityNote[] = [];
+    const ids = new Set<string>();
+    // inv: page holds a checked copy of each note below i, ids distinct, none the cursor, numbers strictly descending.
+    for (let i = 0; i < creditNotes.length; i++) {
+      const note = activityNoteOf(creditNotes[i]);
+      if (note === null || ids.has(note.id) || note.id === after) return null;
+      const prev = page[page.length - 1];
+      if (prev !== undefined && !(prev.number > note.number)) return null;
+      ids.add(note.id);
+      page.push(note);
+    }
+    const hasMore = page.length > INVOICE_CREDIT_NOTES_PAGE_SIZE;
+    return Object.freeze({ creditNotes: Object.freeze(hasMore ? page.slice(0, INVOICE_CREDIT_NOTES_PAGE_SIZE) : page), hasMore });
+  } catch {
+    return null; // a hostile getter: not in contract
+  }
+}
+
+/**
+ * The store's credit activity (header: THE ACTIVITY; doc 18 §5.3's order: query, scope, port, decode). 200 exactly
+ * { store: { id }, creditNotes, nextCursor }; 400 for any other query or an unknown cursor; 403 (the scope, or 039's
+ * 'denied'); 503 (a deadline, a raise, an outage, or an answer out of shape).
+ */
+export function createStoreCreditActivityRoute(ports: InvoiceCreditNotesPorts, options: { deadlineMs?: number } = {}): RouteDefinition {
+  const deadlineMs = options.deadlineMs ?? PORT_DEADLINE_MS;
+  const port = portOf(ports, 'storeActivity', deadlineMs);
+  return readRoute(STORE_CREDIT_ACTIVITY_PATH, STORE_CREDIT_ACTIVITY_REQUIREMENT, async (req, res, ctx) => {
+    // The credit-note family's query exactly (doc 18 §6.3): none, or exactly `after=<canonical lowercase uuid>`.
+    const query = parseInvoiceCreditNotesQuery(urlOf(req));
+    if (query === null) return refuse(res, ctx, 400, 'invalid_request', 'store_credit_activity_query_invalid');
+    const reading = readerOf(req, ctx);
+    if (reading === null) return refuse(res, ctx, 403, 'forbidden', 'authz_context_missing');
+    // readerOf: a store scope whose store is the path's, never null.
+    const storeId = reading.scope.store as string;
+    let raw: unknown;
+    try {
+      raw = await withDeadline(deadlineMs, (signal) => port.storeActivity(reading.scope, reading.sessionKey, query.after, signal));
+    } catch (err) {
+      return refuse(res, ctx, 503, 'service_unavailable', outage('store_credit_activity', err));
+    }
+    const page = storeCreditActivityOf(raw, storeId, query.after);
+    if (page === 'denied') return refuse(res, ctx, 403, 'forbidden', 'store_credit_activity_denied');
+    if (page === 'cursor_unknown') return refuse(res, ctx, 400, 'invalid_request', 'store_credit_activity_cursor_unknown');
+    if (page === null) return refuse(res, ctx, 503, 'service_unavailable', 'store_credit_activity_answer_invalid');
+    const last = page.creditNotes[page.creditNotes.length - 1];
+    res.status(200).json({
+      store: { id: storeId },
+      creditNotes: page.creditNotes.map((n) => ({
+        id: n.id, number: n.number, invoiceId: n.invoiceId, invoiceNumber: n.invoiceNumber, grossCents: n.grossCents, reason: n.reason,
+        issuedAt: n.issuedAt, issuedByName: n.issuedByName,
+        withdrawal: n.withdrawal === null ? null : { withdrawnAt: n.withdrawal.withdrawnAt, reason: n.withdrawal.reason, withdrawnByName: n.withdrawal.withdrawnByName },
       })),
       nextCursor: page.hasMore && last !== undefined ? last.id : null,
     });

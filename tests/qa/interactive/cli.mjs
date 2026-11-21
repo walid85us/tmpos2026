@@ -18,6 +18,7 @@ const HELP = `QA-INTERACTIVE-P1 — isolated interactive QA of the tenant runtim
   npm run qa:interactive -- status
   npm run qa:interactive -- scenario normal
   npm run qa:interactive -- scenario held-void [invoice label, default inv-held]
+  npm run qa:interactive -- scenario held-credit-note <invoice label> <register|issue|settlement> [label]
   npm run qa:interactive -- scenario aged-sign-in [account label, default owner-a]
   npm run qa:interactive -- scenario stalled-reauth [account label, default owner-a]
   npm run qa:interactive -- release
@@ -342,7 +343,7 @@ async function main() {
   const runId = found.live.runId;
   const show = (r) => console.log(JSON.stringify(r, null, 2));
   if (cmd === 'status') return printSummary(await control(runId, { cmd: 'status' }));
-  if (cmd === 'scenario') return show(await control(runId, { cmd: 'scenario', name: args[0], target: args[1] }));
+  if (cmd === 'scenario') return show(await control(runId, { cmd: 'scenario', name: args[0], target: args[1], step: args[2], label: args[3] }));
   if (cmd === 'release') return show(await control(runId, { cmd: 'release' }));
   if (cmd === 'evidence') return show(await control(runId, { cmd: 'evidence', recent: args.includes('--recent'), targets: args.filter((a) => a !== '--recent') }));
   if (cmd === 'probe') return show(await control(runId, { cmd: 'probe', positive: args.includes('--positive') }, 120_000));

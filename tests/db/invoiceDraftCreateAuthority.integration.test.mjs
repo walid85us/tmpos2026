@@ -164,9 +164,13 @@ const UP_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.up.
 /** M7B-CREDITNOTES-P1: 038 (credit notes, in its own schema) sits above 037: it rolls back before it and is re-applied after it. */
 const DOWN_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.down.sql`, 'utf8');
 const UP_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.up.sql`, 'utf8');
+/** M7B-CREDITACTIVITY: 039 (the store credit-activity read, in 038's schema) sits above 038: it rolls back before it and is re-applied after it. */
+const DOWN_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.down.sql`, 'utf8');
+const UP_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.up.sql`, 'utf8');
+const has039 = async (sql) => (await sql`select pg_catalog.to_regprocedure('tmpos_invoice_credit_note.m7b_store_credit_activity(text, uuid, uuid, uuid, integer)') is not null as present`)[0].present;
 const has037 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`)[0].present;
 const has038 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_credit_note.invoice_credit_note') is not null as present`)[0].present;
-const down036 = async (sql) => { if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
+const down036 = async (sql) => { if (await has039(sql)) await sql.unsafe(DOWN_039).simple(); if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
 /** Each up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_030 = UP_030.slice(UP_030.lastIndexOf('do $$'));
 const POSTCONDITION_031 = UP_031.slice(UP_031.lastIndexOf('do $$'));
@@ -308,7 +312,7 @@ test.after(async () => {
     await step(removeSynthetic);
     // A failed ICA-10 + CCA-12 may have left 036, 035, 034, 033, 032, 031 and 030 rolled back: the executor applies them again.
     await step(async () => {
-      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '038') as applied`)[0].applied) {
+      if (!(await owner`select exists (select 1 from public.schema_migrations where version = '039') as applied`)[0].applied) {
         const report = await trustedApply();
         assert.equal(report.outcome, 'complete', JSON.stringify(report).slice(0, 300));
       }
@@ -2170,7 +2174,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     let restored032 = false;
     let rows1;
     try {
-      assert.deepEqual(undone032, ['038', '037', '036', '035', '034', '033', '032'], 'only 034, 033 and 032 sit above 031');
+      assert.deepEqual(undone032, ['039', '038', '037', '036', '035', '034', '033', '032'], 'only 034, 033 and 032 sit above 031');
       assert.deepEqual(await rowsOf([u.T]), rows0, 'every draft, line, level, version, audit, outbox and idempotency row identical');
       assert.deepEqual(await surface(), surface031(with032), 'the exact 031-era surface: create_v3, 032\'s trigger function and trigger gone; create_v2\'s EXECUTE tmpos_app\'s again; 030\'s and 031\'s functions (bodies, ACLs, attributes, comments), the schema, the two triggers and 028\'s save as they were');
       assert.deepEqual([await isGone(CREATE_V3), await isGone(CUSTOMERS_GUARD)], [true, true], 'create_v3 and the Customers guard gone');
@@ -2226,7 +2230,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
 
       // 5. THE UPGRADE 031 -> 034 by the trusted executor: no row changes, the same surface the first apply left.
       const upgrade = await trustedApply();
-      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['032', '033', '034', '035', '036', '037', '038']], JSON.stringify(upgrade).slice(0, 300));
+      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['032', '033', '034', '035', '036', '037', '038', '039']], JSON.stringify(upgrade).slice(0, 300));
       restored032 = true;
       assert.deepEqual(await rowsOf([u.T]), rows1, 'every draft, line, level, version, audit, outbox and idempotency row identical across the upgrade');
       assert.deepEqual(await surface(), with032, 'the same schema, functions (bodies, grants, attributes, comments), triggers and 028 ACL as the first apply left');
@@ -2247,7 +2251,7 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '030');
     let restored = false;
     try {
-      assert.deepEqual(undone, ['038', '037', '036', '035', '034', '033', '032', '031'], '034 rolls back first, then 033, then 032, then 031');
+      assert.deepEqual(undone, ['039', '038', '037', '036', '035', '034', '033', '032', '031'], '034 rolls back first, then 033, then 032, then 031');
       assert.deepEqual(await rowsOf([u.T]), rows2, 'every draft, line, level, version, audit, outbox and idempotency row identical');
       assert.deepEqual(await surface(), surface030(with031), 'the exact 030-era surface: create_v2 and create_v3 gone; tmpos_invoice_edit exactly 030\'s two functions (bodies, ACLs, attributes, comments), its ACL and comment; the two triggers; 028\'s save the owner\'s and tmpos_app\'s again');
       assert.deepEqual([await isGone(CREATE_V2), await isGone(CREATE_V3)], [true, true], 'create_v2 and create_v3 gone');
@@ -2288,13 +2292,13 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
 
       // 4. THE UPGRADE 030 -> 036 by the trusted executor: no row changes, the same surface the first apply left.
       const upgrade = await trustedApply();
-      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['031', '032', '033', '034', '035', '036', '037', '038']], JSON.stringify(upgrade).slice(0, 300));
+      assert.deepEqual([upgrade.outcome, upgrade.applied], ['complete', ['031', '032', '033', '034', '035', '036', '037', '038', '039']], JSON.stringify(upgrade).slice(0, 300));
       restored = true;
       assert.deepEqual(await rowsOf([u.T]), rows3, 'every draft, line, level, version, audit, outbox and idempotency row identical across the upgrade');
       assert.deepEqual(await surface(), with032, 'the same schema, functions (bodies, grants, attributes, comments), triggers and 028 ACL as the first apply left');
       const ledger = await owner`select version, checksum from public.schema_migrations order by version`;
       assert.deepEqual(ledger.map((x) => [x.version, x.checksum]), REQUIRED_MIGRATIONS.map((m) => [m.version, m.checksum]), 'the ledger is 001-036 again');
-      assert.equal(ledger.at(-1).version, '038');
+      assert.equal(ledger.at(-1).version, '039');
       assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'accepted again');
       assert.equal((await rolledBack((tx) => tx.unsafe(POSTCONDITION_032).simple())).code, undefined, '032\'s postcondition holds again');
       assert.equal((await errorOf(create(u.kManager, u.S, u.T, u.C1, LINES, { fn: CREATE_FN_028 })))?.code, '42501', '028\'s save closed to the login again');
@@ -2327,13 +2331,13 @@ test('ICA-10 + CCA-12 (AC-13 / AC-12, N): over drafts at version 1 and above it,
     const { rolledBack: undoneAll, restore: restoreAll } = await rollBackAbove(owner, MIG_DIR, '029');
     let restoredAll = false;
     try {
-      assert.deepEqual(undoneAll, ['038', '037', '036', '035', '034', '033', '032', '031', '030'], '034, then 033, then 032, then 031, then 030');
+      assert.deepEqual(undoneAll, ['039', '038', '037', '036', '035', '034', '033', '032', '031', '030'], '034, then 033, then 032, then 031, then 030');
       assert.deepEqual(await rowsOf([u.T]), rows4, 'every draft (edited ones included), line, level, version, audit, outbox and idempotency row identical with 030 rolled back too');
       assert.equal((await owner`select pg_catalog.to_regnamespace('tmpos_invoice_edit') is null as gone`)[0].gone, true, '030\'s schema gone');
       assert.deepEqual((await owner`select g.tgname::text as name from pg_catalog.pg_trigger g where g.tgrelid = 'tmpos_role.tenant_role_level'::regclass and not g.tgisinternal`).map((r) => r.name),
         ['trg_tenant_role_level_version_advance'], 'only 021\'s trigger remains on the level table');
       const reapply = await trustedApply();
-      assert.deepEqual([reapply.outcome, reapply.applied], ['complete', ['030', '031', '032', '033', '034', '035', '036', '037', '038']], JSON.stringify(reapply).slice(0, 300));
+      assert.deepEqual([reapply.outcome, reapply.applied], ['complete', ['030', '031', '032', '033', '034', '035', '036', '037', '038', '039']], JSON.stringify(reapply).slice(0, 300));
       restoredAll = true;
       assert.deepEqual(await rowsOf([u.T]), rows4, 'every row identical across the re-apply');
       assert.deepEqual(await surface(), with032, 'the same surface as the first apply');

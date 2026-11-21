@@ -537,11 +537,12 @@ test('M5-INVOICES-AUTH-P1: a stored Invoices level is materialized as the edit s
 
 // --- M7B-INVOICES-P1: the store route permissions ------------------------------------------------------------------------
 
-// M7B-CREDITNOTES-P1 (CN-I1): the inventory grows by the three owner-only credit-note keys, two of them sensitive.
-test('M7B: exactly twelve store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1), the payment reversal (M7B-PAYMENTS-P1) and the credit-note issue and withdrawal (M7B-CREDITNOTES-P1), none shadowing a tenant key', () => {
+// M7B-CREDITNOTES-P1 (CN-I1): the inventory grows by the three owner-only credit-note keys, two of them sensitive. Doc 18
+// (D-CA-1 A): and by the owner-only, non-sensitive credit-activity key — thirteen.
+test('M7B: exactly thirteen store route permissions, decided at store scope only, non-sensitive but the void (M7B-INVOICES-VOID-P1), the payment reversal (M7B-PAYMENTS-P1) and the credit-note issue and withdrawal (M7B-CREDITNOTES-P1), none shadowing a tenant key', () => {
   assert.deepEqual([...STORE_ROUTE_PERMISSIONS.keys()],
     ['view_invoice_drafts', 'create_invoice_drafts', 'edit_invoice_drafts', 'discard_invoice_drafts', 'issue_invoices', 'view_issued_invoices', 'void_issued_invoices', 'record_invoice_payments', 'reverse_invoice_payments',
-      'issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes']);
+      'issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes', 'view_store_credit_activity']);
   // M7B-INVOICES-VOID-P1 (D-VOID-2): the void at Invoices Approve with Customers View, the one sensitive store entry.
   assert.deepEqual(STORE_ROUTE_PERMISSIONS.get('void_issued_invoices'),
     { key: 'void_issued_invoices', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'approve', corequisite: { parent: 'customers', threshold: 'view' } });
@@ -584,12 +585,13 @@ test('M7B: exactly twelve store route permissions, decided at store scope only, 
 
 // --- M7B-CREDITNOTES-P1: the store owner rule (doc 16 D-CN-7 A, CN-I1) ---------------------------------------------------
 
-test('M7B-CREDITNOTES-P1: the three credit-note keys are decided by the store owner rule — store_owner unlimited at store scope only; the manager at Invoices Full is denied', () => {
-  const keys = ['issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes'];
+test('M7B-CREDITNOTES-P1 + doc 18 (D-CA-1 A): the three credit-note keys and the credit-activity key are decided by the store owner rule — store_owner unlimited at store scope only (read-only denied); the manager at Invoices Full is denied', () => {
+  const keys = ['issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes', 'view_store_credit_activity'];
   assert.deepEqual(keys.map((key) => STORE_ROUTE_PERMISSIONS.get(key)), [
     { key: 'issue_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'full' },
     { key: 'withdraw_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: true, threshold: 'full' },
     { key: 'recover_invoice_credit_notes', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'full' },
+    { key: 'view_store_credit_activity', plane: 'tenant', parent: 'invoices', sensitive: false, threshold: 'full' },
   ]);
   for (const permission of keys) {
     for (const roleId of TENANT_ROLE_IDS) {
@@ -629,6 +631,12 @@ test('M7B-CREDITNOTES-P1: the store guard admits the owner-only keys by name, in
   }
   // The recovery key is NOT sensitive, and Full under any other name still refuses to load.
   assert.throws(() => assertStoreRoutePermissions(withEntry('recover_invoice_credit_notes', { ...entry, key: 'recover_invoice_credit_notes', sensitive: true })));
+  // Doc 18 (D-CA-1 A): the credit-activity key is admitted only non-sensitive, at Invoices Full, no corequisite.
+  const activity = { ...entry, key: 'view_store_credit_activity', sensitive: false };
+  assert.doesNotThrow(() => assertStoreRoutePermissions(withEntry('view_store_credit_activity', activity)));
+  for (const bad of [{ ...activity, sensitive: true }, { ...activity, threshold: 'view' }, { ...activity, corequisite: { parent: 'customers', threshold: 'view' } }]) {
+    assert.throws(() => assertStoreRoutePermissions(withEntry('view_store_credit_activity', bad)), JSON.stringify(bad));
+  }
   assert.throws(() => assertStoreRoutePermissions(withEntry('credit_invoices', { ...entry, key: 'credit_invoices' })));
 });
 

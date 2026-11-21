@@ -28,7 +28,8 @@
 //   ICC-11 [CN-36]       after a clean rollback, a pre-038 registration completes through record_v2 again.
 //
 // DISPOSABLE ONLY, DURABLE (proofs need fsync on). Teardown removes every credit-note row, payment, registration, audit row,
-// session, login and fixture of its own (guards lifted in the deleting transaction only) and leaves 001-038 applied.
+// session, login and fixture of its own (guards lifted in the deleting transaction only). Rolls back anything applied above
+// 038 (039) at setup, runs on 001-038, and re-applies it at teardown, so the ledger ends as it began.
 // No sleep decides an outcome: every wait is a lock wait observed in pg_locks / pg_blocking_pids.
 import test from 'node:test';
 import assert from 'node:assert/strict';

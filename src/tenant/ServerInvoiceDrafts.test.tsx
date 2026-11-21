@@ -37,7 +37,7 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within }
 import userEvent from '@testing-library/user-event';
 import {
   DISCARD_ELIGIBILITY_TEXT, DISCARD_REFUSED_TEXT, DISCARD_TEXT, DRAFTS_TEXT, DRAFT_RULE_TEXT, EDIT_ELIGIBILITY_TEXT, EDIT_REFUSED_TEXT, EDIT_TEXT, ELIGIBILITY_TEXT, HOLD_TEXT,
-  ISSUE_ELIGIBILITY_TEXT, ISSUE_REFUSED_TEXT, ISSUE_TEXT, NOT_SENT_TEXT, RECORD_ID_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
+  DialogFrame, ISSUE_ELIGIBILITY_TEXT, ISSUE_REFUSED_TEXT, ISSUE_TEXT, NOT_SENT_TEXT, RECORD_ID_TEXT, REFUSED_TEXT, ServerInvoiceDrafts,
   bindDraftHoldsToSessionEnd, createDraftHoldStore, createIssueHoldStore, customerFallbackText, storeLabel, type DraftHoldStore, type HeldDraft, type IssueHoldStore, type ServerInvoiceDraftsProps,
 } from './ServerInvoiceDrafts';
 import { createInvoiceIssuingClient, issueEligibilityPathOf, issuePathOf, issuePreviewPathOf, issuedInvoicePathOf, issuedInvoicesPathOf } from './invoiceIssuingClient';
@@ -6538,5 +6538,40 @@ describe('Server drafts — visible record IDs (QA-UI-02)', () => {
     await act(async () => { finish(); });
     await settle();
     expect(within(again).getByTestId('draft-view-id-note').textContent).toBe('');
+  });
+});
+
+describe('Server drafts — the shared dialog\'s Tab after a scripted focus move (QA r2, manual QA items 12 and 16)', () => {
+  it('QA r2 › DialogFrame. Tab from an element focused by script (tabIndex -1) goes to the next stop after it, Shift+Tab to the stop before it; past the ends it wraps; from the dialog itself Tab → the first stop, Shift+Tab → the last', () => {
+    render(
+      <DialogFrame labelledBy="qa-r2-title" testId="qa-r2-frame" onClose={() => {}}>
+        <p data-testid="qa-r2-lead" tabIndex={-1}>Lead</p>
+        <button type="button">Close</button>
+        <button type="button">Before</button>
+        <h3 id="qa-r2-title" tabIndex={-1}>Heading</h3>
+        <button type="button" disabled>Off</button>
+        <button type="button">After</button>
+        <button type="button">Last</button>
+        <p data-testid="qa-r2-tail" tabIndex={-1}>Tail</p>
+      </DialogFrame>,
+    );
+    const button = (name: string) => screen.getByRole('button', { name });
+    const tabFrom = (from: HTMLElement, shiftKey = false) => {
+      act(() => { from.focus(); });
+      const e = createEvent.keyDown(from, { key: 'Tab', shiftKey });
+      fireEvent(from, e);
+      expect(e.defaultPrevented).toBe(true);
+      return document.activeElement;
+    };
+    const title = screen.getByRole('heading', { name: 'Heading' });
+    expect(tabFrom(title)).toBe(button('After')); // the disabled one between is no stop
+    expect(tabFrom(title, true)).toBe(button('Before'));
+    expect(tabFrom(screen.getByTestId('qa-r2-tail'))).toBe(button('Close'));
+    expect(tabFrom(screen.getByTestId('qa-r2-lead'), true)).toBe(button('Last'));
+    expect(tabFrom(screen.getByTestId('qa-r2-frame'))).toBe(button('Close'));
+    expect(tabFrom(screen.getByTestId('qa-r2-frame'), true)).toBe(button('Last'));
+    expect(tabFrom(button('Last'))).toBe(button('Close'));
+    expect(tabFrom(button('Close'), true)).toBe(button('Last'));
+    cleanup();
   });
 });

@@ -1,7 +1,7 @@
 // QA-INTERACTIVE-P1 — the one long-lived owner of an interactive QA session, started detached by `cli.mjs start` under
 // tsx and alive after that terminal ends. It owns, in this order: the QA front on :5000 (claimed first, so nothing else
 // can take the Preview port), its private control socket (0600, never reachable over HTTP), the Firebase emulators, one
-// disposable PostgreSQL cluster from the test harness (migrations 001–038 through the same trusted-apply path every
+// disposable PostgreSQL cluster from the test harness (migrations 001–039 through the same trusted-apply path every
 // DB suite uses), the real tenant runtime (startTenantEntry with the QA verifier as its only substitute), and the
 // seeded synthetic world. A failed part leaves the session honestly unavailable; nothing falls back to a real service.
 import { spawnSync } from 'node:child_process';
@@ -418,7 +418,7 @@ const requireReady = () => {
   return world.registry;
 };
 
-async function scenario({ name, target }) {
+async function scenario({ name, target, step, label: customLabel }) {
   const reg = requireReady();
   if (name === 'normal') {
     qaVerifier.clearAged();
@@ -429,6 +429,12 @@ async function scenario({ name, target }) {
     const inv = reg.invoices[label];
     if (!inv) throw new Error(`unknown invoice fixture: ${label}`);
     return faults.arm({ kind: 'held-void', storeId: reg.stores[inv.store].id, invoiceId: inv.id, label });
+  }
+  if (name === 'held-credit-note') {
+    const inv = typeof target === 'string' ? reg.invoices[target] : undefined;
+    if (!inv) throw new Error(`unknown invoice fixture: ${target}`);
+    if (step !== 'register' && step !== 'issue' && step !== 'settlement') throw new Error('step must be register, issue or settlement');
+    return faults.arm({ kind: 'held-credit-note', storeId: reg.stores[inv.store].id, invoiceId: inv.id, step, label: customLabel ?? target });
   }
   if (name === 'stalled-reauth' || name === 'aged-sign-in') {
     const label = target ?? 'owner-a';

@@ -80,6 +80,8 @@ const ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/;
 // The front reaches the fault state through this symbol; the returned object's public surface
 // stays arm/disarm/release/snapshot.
 const HOOKS = Symbol('qaFaultHooks');
+// The credit-note command routes a fault may hold, by step; the withdrawal route is deliberately absent.
+const CREDIT_NOTE_STEPS = Object.freeze({ register: 'credit-note-registrations', issue: 'credit-notes', settlement: 'credit-note-settlement' });
 
 const nowIso = () => new Date().toISOString();
 
@@ -112,6 +114,12 @@ export function createFaults() {
           throw new TypeError('storeId and invoiceId must be plain ids');
         }
         armed = Object.freeze({ kind: 'held-void', storeId: spec.storeId, invoiceId: spec.invoiceId, label });
+      } else if (spec.kind === 'held-credit-note') {
+        if (!ID_SHAPE.test(String(spec.storeId ?? '')) || !ID_SHAPE.test(String(spec.invoiceId ?? ''))) {
+          throw new TypeError('storeId and invoiceId must be plain ids');
+        }
+        if (!Object.hasOwn(CREDIT_NOTE_STEPS, spec.step)) throw new TypeError('step must be register, issue or settlement');
+        armed = Object.freeze({ kind: 'held-credit-note', storeId: spec.storeId, invoiceId: spec.invoiceId, step: spec.step, label });
       } else if (spec.kind === 'stalled-reauth') {
         const email = typeof spec.email === 'string' ? spec.email.trim().toLowerCase() : '';
         if (!/^[^\s@]{1,64}@[^\s@]{1,190}$/.test(email)) throw new TypeError('email required');
@@ -148,6 +156,20 @@ export function createFaults() {
           record(upstreamStatus, upstreamError = null) {
             const committed = upstreamStatus === null ? null : upstreamStatus === 200;
             push({ kind: taken.kind, label: taken.label, at: nowIso(), upstreamStatus, committed, upstreamError });
+          },
+        };
+      },
+      // Same one-shot shape as takeVoid, for the credit-note commands (register, issue, settlement; never withdrawal).
+      takeCreditNote(method, rawPath) {
+        if (!armed || armed.kind !== 'held-credit-note' || method !== 'POST') return null;
+        if (rawPath !== `/api/v1/stores/${armed.storeId}/invoices/${armed.invoiceId}/${CREDIT_NOTE_STEPS[armed.step]}`) return null;
+        const taken = armed;
+        armed = null;
+        return {
+          record(upstreamStatus, upstreamError = null) {
+            // 201 for register and issue, 200 for settlement: any 2xx means the command committed.
+            const committed = upstreamStatus === null ? null : upstreamStatus >= 200 && upstreamStatus < 300;
+            push({ kind: taken.kind, label: taken.label, step: taken.step, at: nowIso(), upstreamStatus, committed, upstreamError });
           },
         };
       },
@@ -265,7 +287,7 @@ export function createQaFront(options) {
     if (!readyOr503(res)) return;
     if (declaredTooLarge(req, API_CAP)) return refuse(res, 413, { error: 'payload_too_large' }, { connection: 'close' });
     ctx.cls = 'api';
-    const voidFault = hooks.takeVoid(req.method, rawPath);
+    const voidFault = hooks.takeVoid(req.method, rawPath) ?? hooks.takeCreditNote(req.method, rawPath);
     if (voidFault) ctx.cls = 'fault';
     const headers = forwardHeaders(req, publicHost, { keepCookie: true });
     streamThrough(req, res, targets.api, headers, API_CAP, API_TIMEOUT_MS, voidFault

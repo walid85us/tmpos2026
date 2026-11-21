@@ -94,10 +94,14 @@ const UP_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.up.
 /** M7B-CREDITNOTES-P1: 038 (credit notes, in its own schema) sits above 037: it rolls back before it and is re-applied after it. */
 const DOWN_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.down.sql`, 'utf8');
 const UP_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.up.sql`, 'utf8');
+/** M7B-CREDITACTIVITY: 039 (the store credit-activity read, in 038's schema) sits above 038: it rolls back before it and is re-applied after it. */
+const DOWN_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.down.sql`, 'utf8');
+const UP_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.up.sql`, 'utf8');
+const has039 = async (sql) => (await sql`select pg_catalog.to_regprocedure('tmpos_invoice_credit_note.m7b_store_credit_activity(text, uuid, uuid, uuid, integer)') is not null as present`)[0].present;
 const has037 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`)[0].present;
 const has038 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_credit_note.invoice_credit_note') is not null as present`)[0].present;
-const down036 = async (sql) => { if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
-const up036 = async (sql) => { await sql.unsafe(UP_036).simple(); if (!(await has037(sql))) await sql.unsafe(UP_037).simple(); if (!(await has038(sql))) await sql.unsafe(UP_038).simple(); };
+const down036 = async (sql) => { if (await has039(sql)) await sql.unsafe(DOWN_039).simple(); if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
+const up036 = async (sql) => { await sql.unsafe(UP_036).simple(); if (!(await has037(sql))) await sql.unsafe(UP_037).simple(); if (!(await has038(sql))) await sql.unsafe(UP_038).simple(); if (!(await has039(sql))) await sql.unsafe(UP_039).simple(); };
 /** 018's section 8 postcondition, run again on its own after a deliberate widening, to prove it refuses. */
 const POSTCONDITION_018 = UP_018.slice(UP_018.lastIndexOf('do $$'));
 const CREATE_011 = 'tmpos_session.m5_session_create(text, text, text, text, text, text, bigint, bigint, bigint, bigint, bigint)';
@@ -1356,7 +1360,7 @@ test('M7M-02b: the real startup preflight accepts the login after 018, and refus
     assert.deepEqual(await runtimePreflight(), { runtimeLogin: [], migrationLedger: [] },
       'postgresStartupPreflight.ts REQUIRED_MIGRATIONS and APPROVED_ROLE_GRANTS carry 018 (and, since P3-R1, 019 and 020; since P4, 021 and 022; since P6, 023; since P7, 024; since P8, 025; since M5-INVOICES-AUTH-P1, 026; since M7B-INVOICES-P1, 027 and 028; since M7B-INVOICES-P2, 029; since M7B-INVOICES-P2-R1, 030; since M7B-INVOICES-P1-R3, 031; since M7B-INVOICES-P1-R4, 032; since M7B-INVOICES-DISCARD-P1, 033; since M7B-INVOICES-ISSUE-P1, 034)');
   } finally {
-    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['038', '037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 035, 034, 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
+    assert.deepEqual((await rollBackAbove(owner, MIG_DIR, '019')).rolledBack, ['039', '038', '037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027', '026', '025', '024', '023', '022', '021', '020'], 'newest first: 035, 034, 033, 032, 031, 030, 029, 028, 027, 026, 025, 024, 023, 022, 021, then 020');
   }
   assert.ok(preflightAt017 !== null, 'M7M-09 captured the 017-era answer');
   // 018 rolled back: both categories. The codes name categories, not grants; which grants moved (011's create and 017's
