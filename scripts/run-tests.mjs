@@ -301,6 +301,33 @@ export function suiteContentProblem(result, source = '') {
   return null;
 }
 
+/**
+ * The failed tests' TAP blocks (a `not ok` line through its closing `...`), so the name, the assertion (expected/actual) and the
+ * stack survive however much passing output follows them; the tail below only ever kept the last 1,200 characters. Bounded:
+ * each block to `perBlock` characters and all of them, separators included, to `total`; anything beyond is replaced by one short note.
+ */
+export function failedTapBlocks(stdout = '', { perBlock = 1500, total = 4000 } = {}) {
+  const blocks = [];
+  let cur = null;
+  const close = () => { if (cur) blocks.push(cur.join('\n')); cur = null; };
+  for (const line of String(stdout).split('\n')) {
+    if (/^\s*not ok \d+\b/.test(line)) { close(); cur = [line]; continue; }
+    if (cur === null) continue;
+    cur.push(line);
+    if (/^\s*\.\.\.\s*$/.test(line)) close(); // \s* also takes a CRLF's \r
+  }
+  close();
+  const out = [];
+  let used = 0;
+  for (const [i, raw] of blocks.entries()) {
+    const b = raw.length > perBlock ? `${raw.slice(0, perBlock)}\n  [block truncated at ${perBlock} characters]` : raw;
+    if (used + b.length + 1 > total) { out.push(`[${blocks.length - i} more failed block(s) omitted]`); break; }
+    out.push(b);
+    used += b.length + 1; // + the joining newline
+  }
+  return out.join('\n');
+}
+
 function main() {
   const result = validateDiscovery({ files: discover() });
   console.log(`[run-tests] ${formatRatchet(result.summary, result.ok).split('\n').join('\n[run-tests] ')}`);
@@ -320,7 +347,8 @@ function main() {
     else {
       fail++;
       const why = r.status === 0 ? `${problem}\n` : '';
-      process.stdout.write(`\nFAIL ${f}\n${why}${((r.stdout || '') + (r.stderr || '')).slice(-1200)}\n`);
+      const failed = failedTapBlocks(r.stdout || '');
+      process.stdout.write(`\nFAIL ${f}\n${why}${failed ? `${failed}\n[tail]\n` : ''}${((r.stdout || '') + (r.stderr || '')).slice(-1200)}\n`);
     }
   }
   console.log(`\n[run-tests] suites=${result.files.length} pass=${pass} fail=${fail}`);
