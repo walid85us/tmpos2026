@@ -382,12 +382,21 @@ const Q = {
 const run = async (db, [sql, params]) => (await db.unsafe(sql, params)).map((r) => ({ ...r }));
 const one = async (db, q) => (await run(db, q))[0];
 const word = async (db, q) => (await one(db, q)).o_outcome;
+/** A fixture's proof row. With `record` (opt-in) the first call's outcome word is recorded and an explicit 'not_durable' is asked
+ * ONCE more, as the ports do: `db` runs each statement alone, so the first answer's transaction has committed before the second
+ * begins. Any other first answer, and any second answer, is returned as is for the caller's assertion. */
+async function fixtureProof(db, q, record, label) {
+  const first = await one(db, q);
+  if (record === undefined) return first;
+  record(label, first.o_outcome);
+  return first.o_outcome === 'not_durable' ? one(db, q) : first;
+}
 
 /** Register + proof (committed, durable) for a credit of `gross`; nothing issued yet. */
-async function prepareCredit(f, invoice, gross, { reason = 'pricing_error', key = f.k.boss, store = f.S } = {}) {
+async function prepareCredit(f, invoice, gross, { reason = 'pricing_error', key = f.k.boss, store = f.S, proofRetry } = {}) {
   const a = { store, invoice, tenant: f.T, registration: randomUUID(), attempt: randomUUID(), gross, reason, cn: randomUUID(), key };
   assert.equal(await word(runtime, Q.register(key, a)), 'applied', 'credit registered');
-  const p = await one(prover, Q.proof(key, a));
+  const p = await fixtureProof(prover, Q.proof(key, a), proofRetry, 'credit-note proof');
   assert.equal(p.o_outcome, 'proof', 'credit-note proof');
   a.proof = p.o_proof;
   return a;
@@ -402,10 +411,10 @@ async function credit(f, invoice, gross, opts = {}) {
   if (opts.settle !== false) await settleCredit(a, a.outcome);
   return a;
 }
-async function preparePay(f, invoice, amount, { key = f.k.boss2, store = f.S } = {}) {
+async function preparePay(f, invoice, amount, { key = f.k.boss2, store = f.S, proofRetry } = {}) {
   const a = { store, invoice, tenant: f.T, registration: randomUUID(), attempt: randomUUID(), amount, payment: randomUUID(), key };
   assert.equal(await word(runtime, Q.payRegister(key, a)), 'applied', 'payment registered');
-  const p = await one(prover, Q.payProof(key, a));
+  const p = await fixtureProof(prover, Q.payProof(key, a), proofRetry, 'payment proof');
   assert.equal(p.o_outcome, 'proof', 'payment proof');
   a.proof = p.o_proof;
   return a;
@@ -1224,12 +1233,15 @@ test('ICR-19 (CN-11): expiry and sign-in judged on one database-clock reading af
   assert.equal(await word(runtime, Q.settle(kIss, { ...a, version: 1 })), 'applied', 'settlement needs no recent sign-in');
 });
 
-test('ICR-20 (CN-14): the issued header and lines, the invoice counter, payments and reversals are byte-identical around credits', async () => {
+test('ICR-20 (CN-14): the issued header and lines, the invoice counter, payments and reversals are byte-identical around credits', async (t) => {
+  // Its fixture proofs follow ICR-19's long lock holds and are not what it tests: an explicit 'not_durable' is asked once more
+  // (the ports' rule; CI runs 44912821270 and 44921793712). Each first answer's word, and each retry, is in the TAP output.
+  const proofRetry = (label, outcome) => t.diagnostic(`fixture ${label}: first call ${outcome}${outcome === 'not_durable' ? ', asked once more' : ''}`);
   const f = await scene('unchanged');
   const x = await invoice(f);
-  const p = await pay(f, x, 1000);
+  const p = await pay(f, x, 1000, { proofRetry });
   assert.equal(await word(runtime, Q.reverse(f.k.boss2, p)), 'applied', 'a reversal');
-  await pay(f, x, 500);
+  await pay(f, x, 500, { proofRetry });
   const snap = async () => (await owner`select
       (select row_to_json(i)::text from tmpos_invoice_issue.issued_invoice i where i.invoice_id = ${x}) as header,
       (select json_agg(l order by l.position)::text from tmpos_invoice_issue.issued_invoice_line l where l.invoice_id = ${x}) as lines,
@@ -1237,10 +1249,10 @@ test('ICR-20 (CN-14): the issued header and lines, the invoice counter, payments
       (select json_agg(p order by p.payment_id)::text from tmpos_invoice_payment.invoice_payment p where p.invoice_id = ${x}) as payments,
       (select json_agg(r order by r.payment_id)::text from tmpos_invoice_payment.invoice_payment_reversal r where r.invoice_id = ${x}) as reversals`)[0];
   const before = { ...(await snap()) };
-  const c1 = await credit(f, x, 2000);
+  const c1 = await credit(f, x, 2000, { proofRetry });
   assert.equal(await withdraw(f, c1), 'applied', 'withdrawn');
-  await credit(f, x, 1500);
-  assert.equal((await credit(f, x, 50_000)).outcome, 'amount_exceeds_remaining', 'a refusal');
+  await credit(f, x, 1500, { proofRetry });
+  assert.equal((await credit(f, x, 50_000, { proofRetry })).outcome, 'amount_exceeds_remaining', 'a refusal');
   const after = { ...(await snap()) };
   for (const key of Object.keys(before)) assert.ok(before[key] !== null && before[key] === after[key], `${key}: byte-identical`);
 });
