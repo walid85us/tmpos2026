@@ -15,6 +15,9 @@
 // M7B-PAYMENTS-P2C the reversal's two: GET …/invoices/{id}/payment-reversal-eligibility (action-only, target-blind, no recent
 // sign-in asked) and POST …/invoices/{id}/payments/{paymentId}/reversal (exactly `{ expectedTenant, reasonCode }` on a
 // recent sign-in; a 200 names the payment, the invoice and "reversed" only). Only `reversePayment` reverses a payment.
+// M7B-CREDITNOTES-CN-P2 adds six credit-note routes (docs/phase-4/17 §1.1; never the withdrawal): its commands keep every
+// refusal whole (status, word, sealed or not, replayed, Retry-After), a non-exact 2xx is `malformed`, and `evidenceOf` sorts
+// an answer into §2.6 item 4's classes so no caller derives them again.
 //
 //   - The server is the authority for everything: who may read, write or issue, which tenant a store belongs to, the
 //     amounts, the number and what was stored. This client reports what the server answered and decides nothing.
@@ -54,7 +57,7 @@
 //   - It keeps nothing: no cache, no storage, no cookie access, no log. Requests are same-origin with credentials, never
 //     redirected. No method ever rejects.
 
-import { INTENT_HEADER, JSON_TYPE_RE, REQUEST_TIMEOUT_MS, SESSION_CSRF_HEADER } from './tenantSessionClient';
+import { INTENT_HEADER, JSON_TYPE_RE, REQUEST_TIMEOUT_MS, SESSION_CSRF_HEADER, parseRetryAfter } from './tenantSessionClient';
 import { isCustomerId, normalizePlainText, retryAfterSeconds } from './customersClient';
 import { MAX_DRAFT_LINES, MAX_EXPECTED_VERSION, STORES_PATH, draftPathOf, isDraftCreatedAt, normalizeDraftDescription, type EligibilityResult } from './invoiceDraftsClient';
 
@@ -82,6 +85,15 @@ export const paymentAttemptsPathOf = (storeId: string): string => `${STORES_PATH
 /** The reversal (M7B-PAYMENTS-P2C, server/runtime/invoicePayments.ts): its eligibility under the invoice, its command under the payment. */
 export const paymentReversalEligibilityPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/payment-reversal-eligibility`;
 export const paymentReversalPathOf = (storeId: string, invoiceId: string, paymentId: string): string => `${paymentsPathOf(storeId, invoiceId)}/${paymentId}/reversal`;
+/** Credit notes (M7B-CREDITNOTES-CN-P2, docs/phase-4/17 §1.1; server/runtime/invoiceCreditNotes.ts): the issue POST and the list GET share `credit-notes`. */
+export const creditNoteRegistrationsPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-note-registrations`;
+export const creditNoteProofPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-note-registration-proof`;
+export const creditNotesPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-notes`;
+export const creditNoteSettlementPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-note-settlement`;
+/** The caller's own credit-note attempts at one store (every invoice), oldest registration first. */
+export const creditNoteAttemptsPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/credit-note-attempts`;
+/** The store-wide credit activity (docs/phase-4/18 §5.1; server STORE_CREDIT_ACTIVITY_PATH): no invoice segment. Read-only. */
+export const storeCreditActivityPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/credit-notes`;
 
 export const LEGAL_NAME_MAX_CHARACTERS = 200;
 export const ISSUING_STORE_NAME_MAX_CHARACTERS = 120;
@@ -148,6 +160,25 @@ export const PAYMENT_ATTEMPT_VERSIONS = Object.freeze({ open: 1, recorded: 2, wi
 export type PaymentAttemptState = keyof typeof PAYMENT_ATTEMPT_VERSIONS;
 /** Every recording body is at most 1 KiB (server: register, record and settle alike). */
 export const PAYMENT_BODY_MAX_BYTES = 1_024;
+/** The four credit-note issue reasons and their labels (doc 16, this order). */
+export const INVOICE_CREDIT_NOTE_REASONS = Object.freeze({
+  pricing_error: 'Pricing error', service_issue: 'Service issue', goodwill: 'Goodwill', billing_error: 'Billing error',
+} as const);
+export type InvoiceCreditNoteReason = keyof typeof INVOICE_CREDIT_NOTE_REASONS;
+/** The three withdrawal reasons and their labels (doc 16, this order): CN-P2 only shows them on a listed note. */
+export const INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS = Object.freeze({
+  entered_in_error: 'Entered by mistake', wrong_amount: 'Wrong amount', wrong_invoice: 'Wrong invoice',
+} as const);
+export type InvoiceCreditNoteWithdrawalReason = keyof typeof INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS;
+/** The credit-note list's and the attempts read's page: at most 50 (server INVOICE_CREDIT_NOTES_PAGE_SIZE, INVOICE_CREDIT_NOTE_ATTEMPTS_PAGE_SIZE). */
+export const CREDIT_NOTES_PAGE_SIZE = 50;
+export const CREDIT_NOTE_ATTEMPTS_PAGE_SIZE = 50;
+/** The four credit-note attempt states, each with its one lifecycle version (server STATE_VERSIONS, 038). */
+export const CREDIT_NOTE_ATTEMPT_VERSIONS = Object.freeze({ open: 1, issued: 2, released: 3, confirmed: 3 } as const);
+export type CreditNoteAttemptState = keyof typeof CREDIT_NOTE_ATTEMPT_VERSIONS;
+/** A staff name the list may carry (server INVOICE_CREDIT_NOTE_NAME_MAX_LENGTH, UTF-16 units). */
+export const CREDIT_NOTE_NAME_MAX_LENGTH = 1_000;
+const NAME_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const PROOF_RE = /^[0-9a-f]{64}$/;
 /** The server's Idempotency-Key grammar as this shop mints it: a canonical lowercase UUID version 4 (R1 S7). */
 const KEY_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -331,6 +362,72 @@ export type AttemptsResult = { readonly kind: 'ok'; readonly attempts: readonly 
 /** A typed payment amount: exact integer cents within 1..remaining, or what is wrong with it. */
 export type PaymentAmount = { readonly kind: 'ok'; readonly cents: number } | { readonly kind: 'format' | 'decimals' | 'zero' | 'over' };
 
+/**
+ * A credit-note command's or proof's refusal, kept whole (doc 17 §3.1 judges by all of it): the status and word, `sealed`
+ * (exactly `{ error }`, the key's recorded completion — only ever a 409, the only one replayed) or the chain's
+ * `{ error, requestId }`, whether `Idempotent-Replayed: true` came with it, and a 429's Retry-After in whole seconds (1..300;
+ * a 429 without one is `unknown`; null on any other status). Any 422 is one, whatever its body (its word '' when it has none).
+ */
+export interface CreditNoteRefusal {
+  readonly kind: 'refused'; readonly status: number; readonly error: string; readonly sealed: boolean; readonly replayed: boolean;
+  readonly retryAfterSeconds: number | null;
+}
+/**
+ * `malformed`: a 2xx that is not exactly the contract's or does not name what was sent (fail closed). `unknown`: an answer
+ * in no envelope this server writes (responded) or none at all — network, timeout. `not-sent`: refused here, nothing sent.
+ */
+type CreditNoteOther = { readonly kind: 'malformed' | 'not-sent' } | Unknown;
+/** A register answer: `registered` names the new registration (never a proof). */
+export type CreditNoteRegisterResult = { readonly kind: 'registered'; readonly registrationId: string; readonly replayed: boolean } | CreditNoteRefusal | CreditNoteOther;
+/** A proof answer: the 64-hex proof (memory only: never shown, logged or stored). */
+export type CreditNoteProofResult = { readonly kind: 'proof'; readonly proof: string } | CreditNoteRefusal | CreditNoteOther;
+/** An issue answer: `issued` names the credit note (the 201 carries no number: the list shows it). */
+export type CreditNoteIssueResult = { readonly kind: 'issued'; readonly creditNoteId: string; readonly replayed: boolean } | CreditNoteRefusal | CreditNoteOther;
+/** A settlement answer: released (version 1 sent) or confirmed (2) — the same 200 whether applied now or already so (038 `unchanged`). */
+export type CreditNoteSettleResult = { readonly kind: 'settled'; readonly state: 'released' | 'confirmed'; readonly replayed: boolean } | CreditNoteRefusal | CreditNoteOther;
+export type CreditNoteCommandResult = CreditNoteRegisterResult | CreditNoteIssueResult | CreditNoteSettleResult;
+/** One of the caller's own credit-note attempts as the attempts read answers it (never a registration id). */
+export interface CreditNoteAttempt {
+  readonly invoiceId: string; readonly invoiceNumber: number; readonly attemptId: string; readonly state: CreditNoteAttemptState; readonly version: 1 | 2 | 3;
+  readonly registeredAt: string; readonly settledAt: string | null; readonly grossCents: number; readonly reason: InvoiceCreditNoteReason;
+  readonly creditNote: { readonly id: string; readonly issuedAt: string; readonly withdrawnAt: string | null } | null;
+}
+/** One attempts page; `nextCursor` `<invoiceId>.<attemptId>` of its last row when more exist. `bad-cursor`: a 400 to a cursor (restart from page one). */
+export type CreditNoteAttemptsResult =
+  | { readonly kind: 'ok'; readonly attempts: readonly CreditNoteAttempt[]; readonly nextCursor: string | null }
+  | { readonly kind: 'bad-cursor' | 'malformed' }
+  | ReadRefusal;
+/**
+ * One credit note as the list answers it; its tax and net are checked, never kept (D-P2-7). The names exist only on a page
+ * the server named (the store owner's): a string, or null when never set; absent otherwise.
+ */
+export interface InvoiceCreditNote {
+  readonly id: string; readonly number: number; readonly grossCents: number; readonly reason: InvoiceCreditNoteReason; readonly issuedAt: string;
+  readonly issuedByName?: string | null;
+  readonly withdrawal: { readonly withdrawnAt: string; readonly reason: InvoiceCreditNoteWithdrawalReason; readonly withdrawnByName?: string | null } | null;
+}
+/** One list page: `named` whether its items carry the name keys (null for an empty page: it decides nothing). */
+export interface CreditNotesPage {
+  readonly invoiceId: string; readonly named: boolean | null; readonly creditNotes: readonly InvoiceCreditNote[]; readonly nextCursor: string | null;
+}
+export type CreditNotesResult =
+  | { readonly kind: 'ok'; readonly page: CreditNotesPage }
+  | { readonly kind: 'not-found' | 'bad-cursor' | 'malformed' }
+  | ReadRefusal;
+/** One credit note as the store-wide activity answers it (doc 18 §5.2): flat invoice id and number, names always present, no tax or net. */
+export interface StoreCreditNote {
+  readonly id: string; readonly number: number; readonly invoiceId: string; readonly invoiceNumber: number; readonly grossCents: number;
+  readonly reason: InvoiceCreditNoteReason; readonly issuedAt: string; readonly issuedByName: string | null;
+  readonly withdrawal: { readonly withdrawnAt: string; readonly reason: InvoiceCreditNoteWithdrawalReason; readonly withdrawnByName: string | null } | null;
+}
+/** One activity page for the store asked: at most 50 notes, strictly descending numbers; `nextCursor` the last note's id when more exist. */
+export interface StoreCreditActivityPage { readonly storeId: string; readonly creditNotes: readonly StoreCreditNote[]; readonly nextCursor: string | null }
+/** The activity's answers, as the invoice-level list's: a 400 to a cursor is `bad-cursor`; a 404 `not-found` (the route absent, doc 18 §4.3). */
+export type StoreCreditActivityResult =
+  | { readonly kind: 'ok'; readonly page: StoreCreditActivityPage }
+  | { readonly kind: 'not-found' | 'bad-cursor' | 'malformed' }
+  | ReadRefusal;
+
 // ---- text, rates and times ----
 
 /** A postal address as the server stores it — the whole value trimmed, 1-8 LF lines of 1-120 scalars, no CR anywhere — or null. */
@@ -486,6 +583,30 @@ const registerSentOf = (body: string) => sentOf(body, (p) => registerBodyOf(p.ex
 const recordSentOf = (body: string) => sentOf(body, (p) => recordBodyOf(p as unknown as RecordFields));
 const settleSentOf = (body: string) => sentOf(body, (p) => settleBodyOf(p.expectedTenant as string, p.attemptId as string, p.expectedVersion as 1 | 2));
 const reverseSentOf = (body: string) => sentOf(body, (p) => reverseBodyOf(p.expectedTenant as string, p.reasonCode as string));
+
+/**
+ * The credit-note register body, built ONCE: exactly `{"expectedTenant","attemptId","grossCents","reason"}` in that order —
+ * canonical uuids, a safe integer of at least 1 cent, one of the four reasons — or null. The settlement's is `settleBodyOf`.
+ */
+export function creditNoteRegisterBodyOf(expectedTenant: string, attemptId: string, grossCents: number, reason: string): string | null {
+  return isCustomerId(expectedTenant) && isCustomerId(attemptId) && isCount(grossCents, 1, MAX) && isKeyOf(INVOICE_CREDIT_NOTE_REASONS, reason)
+    ? JSON.stringify({ expectedTenant, attemptId, grossCents, reason }) : null;
+}
+/** What a credit-note issue carries, in the one key order the body is built in. */
+export interface CreditNoteIssueFields {
+  readonly expectedTenant: string; readonly registrationId: string; readonly attemptId: string;
+  readonly grossCents: number; readonly reason: InvoiceCreditNoteReason; readonly registrationProof: string;
+}
+/** The credit-note issue body, built ONCE in the fixed order expectedTenant, registrationId, attemptId, grossCents, reason, registrationProof — or null. */
+export function creditNoteIssueBodyOf(f: CreditNoteIssueFields): string | null {
+  const { expectedTenant, registrationId, attemptId, grossCents, reason, registrationProof } = f;
+  if (!isCustomerId(expectedTenant) || !isCustomerId(registrationId) || !isCustomerId(attemptId) || !isCount(grossCents, 1, MAX)
+    || !isKeyOf(INVOICE_CREDIT_NOTE_REASONS, reason) || typeof registrationProof !== 'string' || !PROOF_RE.test(registrationProof)) return null;
+  return JSON.stringify({ expectedTenant, registrationId, attemptId, grossCents, reason, registrationProof });
+}
+const creditRegisterSentOf = (body: string) =>
+  sentOf(body, (p) => creditNoteRegisterBodyOf(p.expectedTenant as string, p.attemptId as string, p.grossCents as number, p.reason as string));
+const creditIssueSentOf = (body: string) => sentOf(body, (p) => creditNoteIssueBodyOf(p as unknown as CreditNoteIssueFields));
 
 // ---- strict answer parsers ----
 
@@ -817,6 +938,205 @@ const isAttemptsCursor = (value: unknown): value is string => {
   return rest.length === 0 && isCustomerId(a) && isCustomerId(b);
 };
 
+// ---- credit notes (M7B-CREDITNOTES-CN-P2) ----
+
+const CREDIT_ATTEMPT_KEYS: readonly string[] = ['invoiceId', 'invoiceNumber', 'attemptId', 'state', 'version', 'registeredAt', 'settledAt', 'grossCents', 'reason', 'creditNote'];
+
+/** One credit-note attempt exactly (server attemptOf, restated): state, version, settlement time and credit note agree; times in order. */
+function creditAttemptOf(value: unknown): CreditNoteAttempt | null {
+  if (!isPlain(value) || !hasKeys(value, CREDIT_ATTEMPT_KEYS)) return null;
+  const { invoiceId, invoiceNumber, attemptId, state, version, registeredAt, settledAt, grossCents, reason, creditNote } = value;
+  if (!isCustomerId(invoiceId) || !isCount(invoiceNumber, 1, MAX) || !isCustomerId(attemptId) || !isDraftCreatedAt(registeredAt) || !isKeyOf(CREDIT_NOTE_ATTEMPT_VERSIONS, state)
+    || !isCount(grossCents, 1, MAX) || !isKeyOf(INVOICE_CREDIT_NOTE_REASONS, reason)) return null;
+  const settled = state === 'released' || state === 'confirmed';
+  const issued = state === 'issued' || state === 'confirmed';
+  if (version !== CREDIT_NOTE_ATTEMPT_VERSIONS[state] || (settledAt === null) === settled || (creditNote === null) === issued) return null;
+  if (settledAt !== null && (!isDraftCreatedAt(settledAt) || settledAt < registeredAt)) return null;
+  const base = { invoiceId, invoiceNumber, attemptId, state, version: CREDIT_NOTE_ATTEMPT_VERSIONS[state], registeredAt, settledAt: settledAt as string | null, grossCents, reason };
+  if (creditNote === null) return Object.freeze({ ...base, creditNote: null });
+  if (!isPlain(creditNote) || !hasKeys(creditNote, ['id', 'issuedAt', 'withdrawnAt'])) return null;
+  const { id, issuedAt, withdrawnAt } = creditNote;
+  // Same fixed-width UTC form throughout, so the string order is the time order.
+  if (!isCustomerId(id) || !isDraftCreatedAt(issuedAt) || issuedAt < registeredAt || (settledAt !== null && settledAt < issuedAt)) return null;
+  if (withdrawnAt !== null && (!isDraftCreatedAt(withdrawnAt) || withdrawnAt < issuedAt)) return null;
+  return Object.freeze({ ...base, creditNote: Object.freeze({ id, issuedAt, withdrawnAt: withdrawnAt as string | null }) });
+}
+
+/**
+ * `{ attempts, nextCursor }` exactly: at most 50 attempts, each (invoice, attempt) pair once and never the cursor's,
+ * strictly ordered by (registeredAt, invoiceId, attemptId); a cursor only behind a full page, naming its last row. Otherwise null.
+ */
+function creditAttemptsPageOf(body: unknown, after: string | null): { readonly attempts: readonly CreditNoteAttempt[]; readonly nextCursor: string | null } | null {
+  if (!isPlain(body) || !hasKeys(body, ['attempts', 'nextCursor']) || !Array.isArray(body.attempts) || body.attempts.length > CREDIT_NOTE_ATTEMPTS_PAGE_SIZE) return null;
+  const rows: CreditNoteAttempt[] = [];
+  for (const value of body.attempts as unknown[]) {
+    const a = creditAttemptOf(value);
+    if (a === null || `${a.invoiceId}.${a.attemptId}` === after || !attemptAfter(rows[rows.length - 1], a)) return null;
+    rows.push(a);
+  }
+  const last = rows[rows.length - 1];
+  const next = rows.length === CREDIT_NOTE_ATTEMPTS_PAGE_SIZE && last !== undefined ? `${last.invoiceId}.${last.attemptId}` : null;
+  if (body.nextCursor !== null && body.nextCursor !== next) return null;
+  return Object.freeze({ attempts: Object.freeze(rows), nextCursor: body.nextCursor === null ? null : next });
+}
+/** Strictly after `prev` by (registeredAt, invoiceId, attemptId) — so each pair at most once. */
+const attemptAfter = (prev: CreditNoteAttempt | undefined, a: CreditNoteAttempt): boolean => prev === undefined || prev.registeredAt < a.registeredAt
+  || (prev.registeredAt === a.registeredAt && (prev.invoiceId < a.invoiceId || (prev.invoiceId === a.invoiceId && prev.attemptId < a.attemptId)));
+
+/** A staff name as the list may carry it (server isName): null, or at most 1,000 UTF-16 units with no control character. */
+const isStaffName = (value: unknown): value is string | null =>
+  value === null || (typeof value === 'string' && value.length <= CREDIT_NOTE_NAME_MAX_LENGTH && !NAME_CONTROL_RE.test(value));
+const CREDIT_NOTE_KEYS: readonly string[] = ['id', 'number', 'grossCents', 'taxCents', 'netCents', 'reason', 'issuedAt', 'withdrawal'];
+
+/** One credit note exactly, with or without its name keys (`named`): gross = tax + net, known reasons, a withdrawal not before the issue. */
+function creditNoteOf(value: unknown): { readonly note: InvoiceCreditNote; readonly named: boolean } | null {
+  if (!isPlain(value)) return null;
+  const named = Object.prototype.hasOwnProperty.call(value, 'issuedByName');
+  if (!hasKeys(value, named ? [...CREDIT_NOTE_KEYS, 'issuedByName'] : CREDIT_NOTE_KEYS)) return null;
+  const { id, number, grossCents, taxCents, netCents, reason, issuedAt, issuedByName, withdrawal } = value;
+  if (!isCustomerId(id) || !isCount(number, 1, MAX) || !isCount(grossCents, 1, MAX) || !isCents(taxCents) || !isCents(netCents) || taxCents > grossCents
+    || netCents !== grossCents - taxCents || !isKeyOf(INVOICE_CREDIT_NOTE_REASONS, reason) || !isDraftCreatedAt(issuedAt) || (named && !isStaffName(issuedByName))) return null;
+  let lifted: InvoiceCreditNote['withdrawal'] = null;
+  if (withdrawal !== null) {
+    if (!isPlain(withdrawal) || !hasKeys(withdrawal, named ? ['withdrawnAt', 'reason', 'withdrawnByName'] : ['withdrawnAt', 'reason'])) return null;
+    const { withdrawnAt, reason: why, withdrawnByName } = withdrawal;
+    if (!isDraftCreatedAt(withdrawnAt) || withdrawnAt < issuedAt || !isKeyOf(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, why) || (named && !isStaffName(withdrawnByName))) return null;
+    lifted = Object.freeze(named ? { withdrawnAt, reason: why, withdrawnByName: withdrawnByName as string | null } : { withdrawnAt, reason: why });
+  }
+  const base = { id, number, grossCents, reason, issuedAt };
+  return { named, note: Object.freeze(named ? { ...base, issuedByName: issuedByName as string | null, withdrawal: lifted } : { ...base, withdrawal: lifted }) };
+}
+
+/**
+ * `{ invoice: { id }, creditNotes, nextCursor }` exactly, for the invoice asked: at most 50 notes, every one with the name
+ * keys or none (one view per page), ids and numbers distinct and never `after`, strictly ascending by (issuedAt, id); a
+ * cursor only behind a full page, naming its last note. Otherwise null.
+ */
+function creditNotesPageOf(body: unknown, invoiceId: string, after: string | null): CreditNotesPage | null {
+  if (!isPlain(body) || !hasKeys(body, ['invoice', 'creditNotes', 'nextCursor'])) return null;
+  const { invoice, creditNotes, nextCursor } = body;
+  if (!isPlain(invoice) || !hasKeys(invoice, ['id']) || invoice.id !== invoiceId || !Array.isArray(creditNotes) || creditNotes.length > CREDIT_NOTES_PAGE_SIZE) return null;
+  const rows: InvoiceCreditNote[] = [];
+  const numbers = new Set<number>();
+  let named: boolean | null = null;
+  for (const value of creditNotes as unknown[]) {
+    const got = creditNoteOf(value);
+    if (got === null || (named !== null && got.named !== named) || got.note.id === after || numbers.has(got.note.number) || !noteAfter(rows[rows.length - 1], got.note)) return null;
+    named = got.named;
+    numbers.add(got.note.number);
+    rows.push(got.note);
+  }
+  const next = rows.length === CREDIT_NOTES_PAGE_SIZE ? rows[rows.length - 1].id : null;
+  if (nextCursor !== null && nextCursor !== next) return null;
+  return Object.freeze({ invoiceId, named, creditNotes: Object.freeze(rows), nextCursor: nextCursor === null ? null : next });
+}
+/** Strictly after `prev` by (issuedAt, id) — so each id at most once. */
+const noteAfter = (prev: InvoiceCreditNote | undefined, n: InvoiceCreditNote): boolean =>
+  prev === undefined || prev.issuedAt < n.issuedAt || (prev.issuedAt === n.issuedAt && prev.id < n.id);
+
+/**
+ * Whether a list page may join the notes already loaded in one chain (doc 17 §4.1): `view-changed` when both carry a view
+ * and they differ (drop all, reload from page one once); `broken` when it does not sort strictly after the last loaded note
+ * (a repeated or non-advancing cursor: the error state); else `follows`.
+ */
+export function creditNotesFollow(loadedNamed: boolean | null, loaded: readonly InvoiceCreditNote[], page: CreditNotesPage): 'follows' | 'view-changed' | 'broken' {
+  if (loadedNamed !== null && page.named !== null && loadedNamed !== page.named) return 'view-changed';
+  const first = page.creditNotes[0];
+  if (first === undefined) return 'follows';
+  // A later issuedAt can carry an id or number already loaded: order alone does not prove them new.
+  const ids = new Set(loaded.map((n) => n.id));
+  const numbers = new Set(loaded.map((n) => n.number));
+  return noteAfter(loaded[loaded.length - 1], first) && page.creditNotes.every((n) => !ids.has(n.id) && !numbers.has(n.number)) ? 'follows' : 'broken';
+}
+const STORE_CREDIT_NOTE_KEYS: readonly string[] = ['id', 'number', 'invoiceId', 'invoiceNumber', 'grossCents', 'reason', 'issuedAt', 'issuedByName', 'withdrawal'];
+/** One activity note exactly (doc 18 §4.4): positive numbers, gross 1..2^53-1, known reasons, names always present, a withdrawal not before the issue. */
+function storeCreditNoteOf(value: unknown): StoreCreditNote | null {
+  if (!isPlain(value) || !hasKeys(value, STORE_CREDIT_NOTE_KEYS)) return null;
+  const { id, number, invoiceId, invoiceNumber, grossCents, reason, issuedAt, issuedByName, withdrawal } = value;
+  if (!isCustomerId(id) || !isCount(number, 1, MAX) || !isCustomerId(invoiceId) || !isCount(invoiceNumber, 1, MAX) || !isCount(grossCents, 1, MAX)
+    || !isKeyOf(INVOICE_CREDIT_NOTE_REASONS, reason) || !isDraftCreatedAt(issuedAt) || !isStaffName(issuedByName)) return null;
+  const base = { id, number, invoiceId, invoiceNumber, grossCents, reason, issuedAt, issuedByName };
+  if (withdrawal === null) return Object.freeze({ ...base, withdrawal: null });
+  if (!isPlain(withdrawal) || !hasKeys(withdrawal, ['withdrawnAt', 'reason', 'withdrawnByName'])) return null;
+  const { withdrawnAt, reason: why, withdrawnByName } = withdrawal;
+  if (!isDraftCreatedAt(withdrawnAt) || withdrawnAt < issuedAt || !isKeyOf(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, why) || !isStaffName(withdrawnByName)) return null;
+  return Object.freeze({ ...base, withdrawal: Object.freeze({ withdrawnAt, reason: why, withdrawnByName }) });
+}
+/**
+ * `{ store: { id }, creditNotes, nextCursor }` exactly, for the store asked (doc 18 §4.4): at most 50 notes, ids distinct and
+ * never `after`, numbers strictly descending; a cursor only behind a full page, naming its last note (so an empty page with
+ * a cursor is out). Otherwise null. Checks across pages belong to the caller.
+ */
+function storeCreditActivityPageOf(body: unknown, storeId: string, after: string | null): StoreCreditActivityPage | null {
+  if (!isPlain(body) || !hasKeys(body, ['store', 'creditNotes', 'nextCursor'])) return null;
+  const { store, creditNotes, nextCursor } = body;
+  if (!isPlain(store) || !hasKeys(store, ['id']) || store.id !== storeId || !Array.isArray(creditNotes) || creditNotes.length > CREDIT_NOTES_PAGE_SIZE) return null;
+  const rows: StoreCreditNote[] = [];
+  const ids = new Set<string>();
+  for (const value of creditNotes as unknown[]) {
+    const note = storeCreditNoteOf(value);
+    const prev = rows[rows.length - 1];
+    if (note === null || note.id === after || ids.has(note.id) || (prev !== undefined && !(prev.number > note.number))) return null;
+    ids.add(note.id);
+    rows.push(note);
+  }
+  const next = rows.length === CREDIT_NOTES_PAGE_SIZE ? rows[rows.length - 1].id : null;
+  if (nextCursor !== null && nextCursor !== next) return null;
+  return Object.freeze({ storeId, creditNotes: Object.freeze(rows), nextCursor: nextCursor === null ? null : next });
+}
+/**
+ * Whether an activity page may join the notes already loaded in one traversal (doc 18 §4.4, across pages): every id new,
+ * and its first number below the last loaded one (so strictly descending across pages). False: the error state.
+ */
+export function storeCreditActivityFollows(loaded: readonly StoreCreditNote[], page: StoreCreditActivityPage): boolean {
+  const last = loaded[loaded.length - 1];
+  const first = page.creditNotes[0];
+  if (first === undefined) return true;
+  const ids = new Set(loaded.map((n) => n.id));
+  return (last === undefined || last.number > first.number) && page.creditNotes.every((n) => !ids.has(n.id));
+}
+/** Whether a lookup page may join the attempts loaded in one scan (pass them ALL): strictly after the last, no (invoice, attempt) pair again (else lookupFailed). */
+export function creditNoteAttemptsFollow(loaded: readonly CreditNoteAttempt[], page: readonly CreditNoteAttempt[]): boolean {
+  const pairs = new Set(loaded.map((a) => `${a.invoiceId}.${a.attemptId}`));
+  return page.length === 0 || (attemptAfter(loaded[loaded.length - 1], page[0]) && page.every((a) => !pairs.has(`${a.invoiceId}.${a.attemptId}`)));
+}
+
+/** Doc 17 §2.6 item 4's classes for one command answer (stale is the hold's attribution, never the answer's). */
+export type CreditNoteEvidence = 'stored' | 'unstored' | 'provisional' | 'fail-closed';
+/**
+ * The class of one register, issue or settlement answer. `firstSend`: it answers the key's first send (else a Check again);
+ * `replaySent`: a Check again has been sent under that key. Stored: an exact success or any sealed 409, in either column.
+ * Unstored (final only while no Check again was sent): a first send's 400, 401, 403, 404, the chain's 409 write_conflict or
+ * a 429 — decided before the key or rolled back. Fail closed: a malformed 2xx, a first send's 422 while no Check again was
+ * sent. Everything else — 413/415, request_in_progress, 503, no answer, an unnamed answer, any non-stored answer once a
+ * Check again was sent — provisional.
+ */
+export function evidenceOf(result: CreditNoteCommandResult, sends: { readonly replaySent: boolean; readonly firstSend: boolean }): CreditNoteEvidence {
+  const early = sends.firstSend && !sends.replaySent;
+  switch (result.kind) {
+    case 'registered': case 'issued': case 'settled': return 'stored';
+    case 'malformed': return 'fail-closed';
+    case 'not-sent': return early ? 'unstored' : 'provisional';
+    case 'unknown': return 'provisional';
+    default: break;
+  }
+  const { status, error, sealed } = result;
+  if (status === 409 && sealed) return 'stored';
+  if (!early) return 'provisional'; // read from the Check-again column, a 422 included
+  if (status === 422) return 'fail-closed';
+  return [400, 401, 403, 404, 429].includes(status) || (status === 409 && error === 'write_conflict') ? 'unstored' : 'provisional';
+}
+/**
+ * The proof's class (doc 17 §2.6 item 4): it never decides an issue. `open`: an exact 200 (open now, this session); `neutral`:
+ * a 404 (one answer for issued, released, another session, a rotated key, an unknown id); `fail-closed`: a malformed 2xx;
+ * anything else `provisional`.
+ */
+export function proofEvidenceOf(result: CreditNoteProofResult): 'open' | 'neutral' | 'provisional' | 'fail-closed' {
+  if (result.kind === 'proof') return 'open';
+  if (result.kind === 'malformed') return 'fail-closed';
+  return result.kind === 'refused' && result.status === 404 && !result.sealed ? 'neutral' : 'provisional';
+}
+
 /**
  * What a settings body SENT, read from the caller's own string: its expected version and its values; null when it is not
  * one the server's planner takes (unreadable, over 8 KiB, not exactly the seven keys, a non-canonical tenant, a version
@@ -938,6 +1258,23 @@ export interface InvoiceIssuingClient {
    * or an id outside its grammar is `not-sent`, nothing sent. One fetch, never a retry. Never rejects.
    */
   reversePayment(storeId: string, invoiceId: string, paymentId: string, idempotencyKey: string, body: string, csrf: string): Promise<ReverseResult>;
+  /**
+   * The credit-note commands (M7B-CREDITNOTES-CN-P2): `body` exactly as its builder made it (settlement: `settleBodyOf`),
+   * under `idempotencyKey` (a canonical lowercase UUID v4); never aborted — no signal and no timeout of their own (the
+   * proof neither). A body not byte for byte its builder's, a bad key or an id outside its grammar is `not-sent`. One fetch,
+   * never a retry. Never rejects.
+   */
+  registerCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteRegisterResult>;
+  issueCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteIssueResult>;
+  settleCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteSettleResult>;
+  /** The open registration's proof (same session only), its answer naming that registration, `attemptId` and the invoice; no signal. Never rejects. */
+  creditNoteProof(storeId: string, invoiceId: string, registrationId: string, attemptId: string, csrf: string): Promise<CreditNoteProofResult>;
+  /** One page of the caller's own credit-note attempts at `storeId`: page one or the page after a `nextCursor` this client decoded. Never rejects. */
+  creditNoteAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<CreditNoteAttemptsResult>;
+  /** One page of an issued invoice's credit notes: page one or the page after a `nextCursor` this client decoded. Read-only. Never rejects. */
+  listCreditNotes(storeId: string, invoiceId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<CreditNotesResult>;
+  /** One page of the store's credit activity (doc 18): page one or the page after a `nextCursor` this client decoded. Read-only. Never rejects. */
+  storeCreditActivity(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<StoreCreditActivityResult>;
 }
 
 interface Answer { readonly status: number; readonly body: unknown; readonly header: (name: string) => string | null }
@@ -946,13 +1283,17 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
   const send = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  /** The answer's status, bounded JSON body and headers, or null when no answer arrived (network failure, timeout, abort). */
-  async function exchange(path: string, init: RequestInit, signal?: AbortSignal): Promise<Answer | null> {
+  /**
+   * The answer's status, bounded JSON body and headers, or null when no answer arrived (network failure, timeout, abort).
+   * `wait` 'none': no timeout of its own — the credit note's commands and proof (doc 17 §2.6 item 5: the original request
+   * is never aborted; the section's 30 s boundary only changes what the card shows, and a late answer is still judged).
+   */
+  async function exchange(path: string, init: RequestInit, signal?: AbortSignal, wait: number | 'none' = timeoutMs): Promise<Answer | null> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     if (signal?.aborted) return null;
     signal?.addEventListener('abort', abort, { once: true });
-    const timer = setTimeout(abort, timeoutMs);
+    const timer = wait === 'none' ? undefined : setTimeout(abort, wait);
     try {
       const res = await send(path, {
         ...init,
@@ -981,8 +1322,8 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
 
   const limited = (answer: Answer): RateLimited =>
     Object.freeze({ kind: 'rate-limited', retryAfterSeconds: retryAfterSeconds(answer.header('retry-after')) });
-  const read = (path: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
-    exchange(path, { method: 'GET', headers: { Accept: 'application/json', [SESSION_CSRF_HEADER]: csrf } }, signal);
+  const read = (path: string, csrf: string, signal?: AbortSignal, wait: number | 'none' = timeoutMs): Promise<Answer | null> =>
+    exchange(path, { method: 'GET', headers: { Accept: 'application/json', [SESSION_CSRF_HEADER]: csrf } }, signal, wait);
   const shapes = (answer: Answer) => {
     const refused = refusalOf(answer.body);
     return {
@@ -1011,7 +1352,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return null;
   }
   /** One command: the caller's exact body with the intent, session and key headers; null when no answer arrived. */
-  const command = (method: 'PUT' | 'POST', path: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal): Promise<Answer | null> =>
+  const command = (method: 'PUT' | 'POST', path: string, body: string, idempotencyKey: string, csrf: string, signal?: AbortSignal, wait: number | 'none' = timeoutMs): Promise<Answer | null> =>
     exchange(path, {
       method,
       headers: {
@@ -1019,7 +1360,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
         [INTENT_HEADER]: '1', [SESSION_CSRF_HEADER]: csrf, 'Idempotency-Key': idempotencyKey,
       },
       body, // the caller's exact string: a retry under the same key must send the same bytes
-    }, signal);
+    }, signal, wait);
   /** app.ts sendRecorded: the replay header is absent, or exactly "true" on a replay; anything else names no answer of this server. */
   const replayOf = (answer: Answer): boolean | null => {
     const replay = answer.header('idempotent-replayed');
@@ -1373,9 +1714,127 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return readRefusal(answer) ?? UNAVAILABLE; // a 400 (an unknown cursor among them) included
   }
 
+  // ---- credit notes (M7B-CREDITNOTES-CN-P2) ----
+
+  const MALFORMED = Object.freeze({ kind: 'malformed' as const });
+  /** A credit-note read's 429 counts only with the whole seconds this server always sends. */
+  const unnamedWait = (answer: Answer): boolean => answer.status === 429 && parseRetryAfter(answer.header('retry-after')) === null;
+  const isSuccess = (answer: Answer): boolean => answer.status >= 200 && answer.status < 300;
+  /** A refusal kept whole, only in the chain's envelope or (a 409 only) the sealed one, with a header this server writes; else unknown. */
+  function creditRefusal(answer: Answer): CreditNoteRefusal | Unknown {
+    const refused = refusalOf(answer.body);
+    const replayed = replayOf(answer);
+    // Any 422, whatever its body, is another request's under this key (as the payment commands read it): never undecided.
+    if (answer.status === 422) return Object.freeze({ kind: 'refused', status: 422, error: refused?.error ?? '', sealed: false, replayed: replayed === true, retryAfterSeconds: null });
+    // Only a key's sealed completion is ever replayed, and it is only ever a 409.
+    if (refused === undefined || replayed === null || answer.status < 400 || (refused.sealed ? answer.status !== 409 : replayed)) return ANSWERED;
+    const retryAfter = answer.status === 429 ? parseRetryAfter(answer.header('retry-after')) : null;
+    if (answer.status === 429 && retryAfter === null) return ANSWERED; // a wait this server always names: without it, undecided
+    return Object.freeze({ kind: 'refused', status: answer.status, error: refused.error, sealed: refused.sealed, replayed, retryAfterSeconds: retryAfter });
+  }
+  const creditCommand = (path: string, body: string, idempotencyKey: string, csrf: string): Promise<Answer | null> =>
+    command('POST', path, body, idempotencyKey, csrf, undefined, 'none');
+
+  async function registerCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteRegisterResult> {
+    const sent = creditRegisterSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await creditCommand(creditNoteRegistrationsPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (!isSuccess(answer)) return creditRefusal(answer);
+    const replayed = replayOf(answer);
+    const r = memberOf(answer.body, 'registration', ['id', 'invoiceId', 'attemptId', 'grossCents', 'reason', 'state']);
+    return answer.status === 201 && r !== undefined && isCustomerId(r.id) && r.invoiceId === invoiceId && r.attemptId === sent.attemptId
+      && r.grossCents === sent.grossCents && r.reason === sent.reason && r.state === 'open' && replayed !== null
+      ? Object.freeze({ kind: 'registered', registrationId: r.id, replayed }) : MALFORMED;
+  }
+
+  async function creditNoteProof(storeId: string, invoiceId: string, registrationId: string, attemptId: string, csrf: string): Promise<CreditNoteProofResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || !isCustomerId(registrationId) || !isCustomerId(attemptId)) return NOT_SENT;
+    // No caller's signal and no timeout: the proof belongs to the held chain, whose late answer is still attributed.
+    const answer = await read(`${creditNoteProofPathOf(storeId, invoiceId)}?registration=${registrationId}`, csrf, undefined, 'none');
+    if (answer === null) return NO_ANSWER;
+    if (!isSuccess(answer)) return creditRefusal(answer);
+    const got = answer.body;
+    const r = isPlain(got) && hasKeys(got, ['registration', 'proof']) && isPlain(got.registration) && hasKeys(got.registration, ['id', 'invoiceId', 'attemptId']) ? got.registration : undefined;
+    return answer.status === 200 && r !== undefined && isPlain(got) && r.id === registrationId && r.invoiceId === invoiceId && r.attemptId === attemptId
+      && typeof got.proof === 'string' && PROOF_RE.test(got.proof) ? Object.freeze({ kind: 'proof', proof: got.proof }) : MALFORMED;
+  }
+
+  async function issueCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteIssueResult> {
+    const sent = creditIssueSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await creditCommand(creditNotesPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (!isSuccess(answer)) return creditRefusal(answer);
+    const replayed = replayOf(answer);
+    const n = memberOf(answer.body, 'creditNote', ['id', 'invoiceId', 'attemptId', 'grossCents', 'reason']);
+    return answer.status === 201 && n !== undefined && isCustomerId(n.id) && n.invoiceId === invoiceId && n.attemptId === sent.attemptId
+      && n.grossCents === sent.grossCents && n.reason === sent.reason && replayed !== null
+      ? Object.freeze({ kind: 'issued', creditNoteId: n.id, replayed }) : MALFORMED;
+  }
+
+  async function settleCreditNote(storeId: string, invoiceId: string, idempotencyKey: string, body: string, csrf: string): Promise<CreditNoteSettleResult> {
+    const sent = settleSentOf(body);
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || sent === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await creditCommand(creditNoteSettlementPathOf(storeId, invoiceId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (!isSuccess(answer)) return creditRefusal(answer);
+    const replayed = replayOf(answer);
+    const s = memberOf(answer.body, 'settlement', ['invoiceId', 'attemptId', 'state']);
+    const state = sent.expectedVersion === 1 ? 'released' : 'confirmed';
+    return answer.status === 200 && s !== undefined && s.invoiceId === invoiceId && s.attemptId === sent.attemptId && s.state === state && replayed !== null
+      ? Object.freeze({ kind: 'settled', state, replayed }) : MALFORMED;
+  }
+
+  async function creditNoteAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<CreditNoteAttemptsResult> {
+    if (!isCustomerId(storeId)) return UNAVAILABLE; // nothing is sent; never `denied`, which reads as a loss of access
+    if (after !== null && !isAttemptsCursor(after)) return Object.freeze({ kind: 'bad-cursor' });
+    const answer = await read(`${creditNoteAttemptsPathOf(storeId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const page = creditAttemptsPageOf(answer.body, after);
+      return page === null ? MALFORMED : Object.freeze({ kind: 'ok', ...page });
+    }
+    if (isSuccess(answer)) return MALFORMED;
+    // The server's one answer to a cursor it does not know; without a cursor a 400 decides nothing.
+    if (after !== null && answer.status === 400 && shapes(answer).chain('invalid_request')) return Object.freeze({ kind: 'bad-cursor' });
+    return unnamedWait(answer) ? UNAVAILABLE : readRefusal(answer) ?? UNAVAILABLE;
+  }
+
+  async function listCreditNotes(storeId: string, invoiceId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<CreditNotesResult> {
+    if (!isCustomerId(storeId) || !isCustomerId(invoiceId)) return UNAVAILABLE; // nothing is sent
+    if (after !== null && !isCustomerId(after)) return Object.freeze({ kind: 'bad-cursor' });
+    const answer = await read(`${creditNotesPathOf(storeId, invoiceId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const page = creditNotesPageOf(answer.body, invoiceId, after);
+      return page === null ? MALFORMED : Object.freeze({ kind: 'ok', page });
+    }
+    if (isSuccess(answer)) return MALFORMED;
+    if (answer.status === 404 && shapes(answer).chain('not_found')) return Object.freeze({ kind: 'not-found' }); // missing, another store's or tenant's alike
+    if (after !== null && answer.status === 400 && shapes(answer).chain('invalid_request')) return Object.freeze({ kind: 'bad-cursor' });
+    return unnamedWait(answer) ? UNAVAILABLE : readRefusal(answer) ?? UNAVAILABLE;
+  }
+
+  async function storeCreditActivity(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<StoreCreditActivityResult> {
+    if (!isCustomerId(storeId)) return UNAVAILABLE; // nothing is sent; never `denied`, which reads as a loss of access
+    if (after !== null && !isCustomerId(after)) return Object.freeze({ kind: 'bad-cursor' });
+    const answer = await read(`${storeCreditActivityPathOf(storeId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
+    if (answer === null) return UNAVAILABLE;
+    if (answer.status === 200) {
+      const page = storeCreditActivityPageOf(answer.body, storeId, after);
+      return page === null ? MALFORMED : Object.freeze({ kind: 'ok', page });
+    }
+    if (isSuccess(answer)) return MALFORMED;
+    if (answer.status === 404 && shapes(answer).chain('not_found')) return Object.freeze({ kind: 'not-found' }); // the route absent (doc 18 §4.3)
+    if (after !== null && answer.status === 400 && shapes(answer).chain('invalid_request')) return Object.freeze({ kind: 'bad-cursor' });
+    return unnamedWait(answer) ? UNAVAILABLE : readRefusal(answer) ?? UNAVAILABLE;
+  }
+
   return Object.freeze({
     getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice,
     paymentEligibility, registerPayment, paymentProof, recordPayment, settlePayment, paymentAttempts, reversalEligibility, reversePayment,
+    registerCreditNote, creditNoteProof, issueCreditNote, settleCreditNote, creditNoteAttempts, listCreditNotes, storeCreditActivity,
   });
 }
 

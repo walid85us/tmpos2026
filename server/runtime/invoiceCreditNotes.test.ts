@@ -22,6 +22,7 @@ import {
   INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, createInvoiceCreditNoteAttemptsRoute, createInvoiceCreditNoteProofRoute, createInvoiceCreditNotesRoute,
   creditNoteProofOf, invoiceCreditNoteAttemptsOf, invoiceCreditNotesOf, parseCreditNoteAttemptsQuery, parseCreditNoteProofQuery,
   parseInvoiceCreditNotesQuery, planInvoiceCreditNoteIssue, planInvoiceCreditNoteRegister, planInvoiceCreditNoteSettle, planInvoiceCreditNoteWithdraw,
+  STORE_CREDIT_ACTIVITY_PATH, STORE_CREDIT_ACTIVITY_REQUIREMENT, StoreCreditActivityAnswerInvalid, createStoreCreditActivityRoute, storeCreditActivityOf,
 } from './invoiceCreditNotes.js';
 import type { InvoiceCreditNotesPort } from './invoiceCreditNotes.js';
 import { createMemorySessionStore } from './memorySessionStore.testkit.js';
@@ -87,7 +88,7 @@ test('ICN-01 the four contracts: the registration and the issue CREATEs opting i
   ]);
   assert.deepEqual([INVOICE_CREDIT_NOTE_ISSUE_REQUIREMENT, INVOICE_CREDIT_NOTE_WITHDRAW_REQUIREMENT, INVOICE_CREDIT_NOTE_RECOVER_REQUIREMENT, INVOICE_CREDIT_NOTES_VIEW_REQUIREMENT]
     .map((r) => r.permission), ['issue_invoice_credit_notes', 'withdraw_invoice_credit_notes', 'recover_invoice_credit_notes', 'view_issued_invoices']);
-  const port = { proof: () => null, attempts: () => null, list: () => null };
+  const port = { proof: () => null, attempts: () => null, list: () => null, storeActivity: () => null };
   const reads = [createInvoiceCreditNoteProofRoute({ invoiceCreditNotes: port }), createInvoiceCreditNoteAttemptsRoute({ invoiceCreditNotes: port }),
     createInvoiceCreditNotesRoute({ invoiceCreditNotes: port })];
   assert.deepEqual(reads.map((r) => [r.method, r.path, r.policy, r.idempotency, r.recentAuth, r.sessionBinding, r.trustedContext]), [
@@ -278,7 +279,8 @@ async function runHandler(route: RouteDefinition, path: string, opts: { url?: st
   return out;
 }
 const portWith = (over: Partial<InvoiceCreditNotesPort>): { invoiceCreditNotes: InvoiceCreditNotesPort } => ({
-  invoiceCreditNotes: { proof: () => { throw new Error('unused'); }, attempts: () => { throw new Error('unused'); }, list: () => { throw new Error('unused'); }, ...over },
+  invoiceCreditNotes: { proof: () => { throw new Error('unused'); }, attempts: () => { throw new Error('unused'); }, list: () => { throw new Error('unused'); },
+    storeActivity: () => { throw new Error('unused'); }, ...over },
 });
 const listPath = `/api/v1/stores/${STORE}/invoices/${INVOICE}/credit-notes`;
 
@@ -436,11 +438,12 @@ async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedA
     ? { ...route, command: { ...route.command, plan: (ctx) => { plans.push(ctx); return route.command.plan(ctx); } } } : route);
   const readiness = createReadinessState();
   readiness.setReady();
-  // The three reads over fixed synthetic answers, so the chain can show they stay available while writes are off (doc 18 §9.3.1).
+  // The four reads over fixed synthetic answers, so the chain can show they stay available while writes are off (doc 18 §9.3.1).
   const reads = portWith({
     proof: () => ({ outcome: 'proof', registrationId: REGISTRATION, invoiceId: INVOICE, attemptId: ATTEMPT, proof: PROOF }),
     attempts: () => ({ outcome: 'attempts', attempts: [] }),
     list: () => listOf([], true),
+    storeActivity: () => ({ outcome: 'credit_notes', storeId: STORE, creditNotes: [] }),
   });
   const app = createApp({
     readiness, sessions: { tenant: boundary },
@@ -448,7 +451,7 @@ async function withChain(fn: (h: Chain) => Promise<void>, opts: { authenticatedA
     log: { log: (line) => { if (opts.throwingWriteSink === true && line.includes('"event":"credit_note_write"')) throw new Error('sink down'); lines.push(line); } },
     routes: [capture(INVOICE_CREDIT_NOTE_REGISTER_ROUTE), capture(INVOICE_CREDIT_NOTE_ISSUE_ROUTE), capture(INVOICE_CREDIT_NOTE_SETTLE_ROUTE),
       capture(INVOICE_CREDIT_NOTE_WITHDRAW_ROUTE), createInvoiceCreditNoteProofRoute(reads), createInvoiceCreditNoteAttemptsRoute(reads),
-      createInvoiceCreditNotesRoute(reads)],
+      createInvoiceCreditNotesRoute(reads), createStoreCreditActivityRoute(reads)],
     events: [], limits: testRequestLimits(), idempotency: { store: counted, keySecret: TEST_IDEMPOTENCY_KEY }, transactions: { port },
     // Doc 18 §6.6: the write setting (on unless a case pauses it) and this process's instance id.
     creditNoteWrites: opts.writes ?? 'on', instanceId: INSTANCE,
@@ -561,7 +564,7 @@ const lineRecords = (lines: readonly string[]) => lines.map((l) => JSON.parse(l)
 const writeLines = (lines: readonly string[]) => lineRecords(lines).filter((r) => r.event === 'credit_note_write');
 const gatedWrites = () => [[registerAt, registerBody()], [issueAt, issueBody()], [withdrawAt(CREDIT_NOTE), withdrawBody()]] as const;
 
-test('ICN-10 CA-35 (U) (doc 18 §6.6, §9.3.1): with the write setting off, the registration, the issue and the withdrawal each answer 503 service_unavailable, logged credit_note_writes_disabled, before the body, the key and the commit — a malformed body, an unknown field, an empty key and a stale sign-in all still get that 503 — with no acquisition, no plan, no commit and no credit_note_write line; the settlement, the proof, the attempts lookup and the list answer as before', async () => {
+test('ICN-10 CA-35 (U) (doc 18 §6.6, §9.3.1): with the write setting off, the registration, the issue and the withdrawal each answer 503 service_unavailable, logged credit_note_writes_disabled, before the body, the key and the commit — a malformed body, an unknown field, an empty key and a stale sign-in all still get that 503 — with no acquisition, no plan, no commit and no credit_note_write line; the settlement, the proof, the attempts lookup, the list and the store activity answer as before', async () => {
   await withChain(async (h) => {
     for (const [path, body] of gatedWrites()) {
       for (const [payload, key] of [[JSON.stringify(body), randomUUID()], ['{not json', randomUUID()], [JSON.stringify({ ...body, extra: 1 }), randomUUID()],
@@ -582,7 +585,7 @@ test('ICN-10 CA-35 (U) (doc 18 §6.6, §9.3.1): with the write setting off, the 
     assert.deepEqual(writeLines(h.lines).map((l) => [l.outcome, l.kind, l.instanceId, l.requestId]),
       [['committed', 'settle', INSTANCE, settled.headers['x-request-id']]], 'the settlement\'s committed line');
     for (const path of [`${INVOICE_CREDIT_NOTE_PROOF_PATH.replace('{storeId}', STORE).replace('{id}', INVOICE)}?registration=${REGISTRATION}`,
-      `/api/v1/stores/${STORE}/credit-note-attempts`, listPath]) {
+      `/api/v1/stores/${STORE}/credit-note-attempts`, listPath, `/api/v1/stores/${STORE}/credit-notes`]) {
       const r = await h.get(path);
       assert.equal(r.status, 200, `${path}: ${r.body}`);
     }
@@ -597,7 +600,7 @@ test('ICN-10 CA-35 (U) (doc 18 §6.6, §9.3.1): with the write setting off, the 
   }, { writes: 'off', authenticatedAt: Date.now() - RECENT_AUTH_MAX_AGE_MS - 60_000 });
 });
 
-test('ICN-11 CA-46 (U) (doc 18 §9.3.1, §6.6): with the write setting off, every refusal of the session or of authorization answers before the setting — no session 401, a suspended tenant\'s session 401 session_admission_denied (the three writes), a wrong session CSRF token 403, a session without the grant 403 authz_denied — each with no acquisition, no plan and no commit', async () => {
+test('ICN-11 CA-46 (U) (doc 18 §9.3.1, §6.6): with the write setting off, every refusal of the session or of authorization answers before the setting — no session 401, a suspended tenant\'s session 401 session_admission_denied (the three writes and the activity read), a wrong session CSRF token 403, a session without the grant 403 authz_denied — each with no acquisition, no plan and no commit', async () => {
   const reasonOf = (h: Chain, reply: Reply) => lineRecords(h.lines).find((r) => r.event === 'request' && r.requestId === reply.headers['x-request-id'])?.reason;
   await withChain(async (h) => {
     for (const [path, body] of gatedWrites()) {
@@ -613,11 +616,11 @@ test('ICN-11 CA-46 (U) (doc 18 §9.3.1, §6.6): with the write setting off, ever
       assert.match(String(reasonOf(h, r)), /^csrf_session_/, `${path}: the session CSRF refusal, not the setting`);
     }
     // A suspended tenant: admission refuses the principal on its next protected request (sessions.ts:636-638), before the setting.
-    for (const [path, body] of gatedWrites()) {
+    for (const [path, body] of [...gatedWrites(), [`/api/v1/stores/${STORE}/credit-notes`, null]] as const) {
       h.admit(true);
       const send = await h.relogin();
       h.admit(false);
-      const r = await send(path, JSON.stringify(body), randomUUID());
+      const r = body === null ? await send.get(path) : await send(path, JSON.stringify(body), randomUUID());
       assert.deepEqual([r.status, reasonOf(h, r)], [401, 'session_admission_denied'], `suspended: ${path}`);
     }
     assert.deepEqual([h.acquires.length, h.plans.length, h.commits.length], [0, 0, 0]);
@@ -783,4 +786,173 @@ test('ICN-13 (doc 18 §6.6) the composition refuses a credit-note writer without
     ['a read gated', { ...createInvoiceCreditNotesRoute(portWith({})), writeGate: 'credit_note_write' }]] as const) {
     assert.throws(() => defineRoutes([def as unknown as RouteDefinition]), /route_write_gate_invalid/, label);
   }
+});
+
+// --- the store credit activity (docs/phase-4/18, migration 039) -----------------------------------------------------------
+// WRITTEN — NOT RUN (doc 18 implementation slice, local authoring only): these cases were authored without executing any test,
+// typecheck or build. Each title names the doc 18 §13 rows (U layer) it evidences.
+
+const activityNote = (n: number, over: Record<string, unknown> = {}) => ({
+  id: ID(n), number: n, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1000, reason: 'service_issue', issuedAt: TIME(1), issuedByName: null,
+  withdrawal: null, ...over,
+});
+const activityOf = (creditNotes: unknown[], over: Record<string, unknown> = {}) => ({ outcome: 'credit_notes', storeId: STORE, creditNotes, ...over });
+/** `n` notes numbered n..1, newest number first, as 039 orders them. */
+const descending = (n: number) => Array.from({ length: n }, (_, i) => activityNote(n - i));
+const activityPath = `/api/v1/stores/${STORE}/credit-notes`;
+
+test('SCA-U0 (doc 18 §5.1, D-CA-1 A): the activity route — GET /api/v1/stores/{storeId}/credit-notes, a session read under the owner-only view_store_credit_activity at store scope, session-bound, trusted context, no recent sign-in, no idempotency, no body', () => {
+  const route = createStoreCreditActivityRoute({ invoiceCreditNotes: { proof: () => null, attempts: () => null, list: () => null, storeActivity: () => null } });
+  assert.equal(STORE_CREDIT_ACTIVITY_PATH, '/api/v1/stores/{storeId}/credit-notes');
+  assert.deepEqual(STORE_CREDIT_ACTIVITY_REQUIREMENT, { scope: 'store', permission: 'view_store_credit_activity' });
+  assert.deepEqual([route.method, route.path, route.policy, route.body, route.idempotency, route.trustedContext, route.recentAuth, route.sessionBinding], [
+    'GET', STORE_CREDIT_ACTIVITY_PATH, { access: 'session', audience: 'tenant', authorization: STORE_CREDIT_ACTIVITY_REQUIREMENT }, { kind: 'none' }, 'none', 'required', 'none', 'required',
+  ]);
+  assert.doesNotThrow(() => defineRoutes([route, createInvoiceCreditNotesRoute({ invoiceCreditNotes: { proof: () => null, attempts: () => null, list: () => null, storeActivity: () => null } })]),
+    'the store template and the per-invoice list register side by side');
+  assert.throws(() => createStoreCreditActivityRoute({ invoiceCreditNotes: { proof: () => null, attempts: () => null, list: () => null } } as never), /route_handler_invalid/);
+  assert.throws(() => createStoreCreditActivityRoute(portWith({}), { deadlineMs: 0 }), /port_deadline_invalid/);
+});
+
+test('SCA-U1 (CA-10 U, CA-38 U): a bare `?`, an empty or uppercase or braced or non-uuid `after`, a second key, a repeated `after`, and any `limit`, `cursor` or `before` key → 400 invalid_request, logged store_credit_activity_query_invalid, before any port call; none or exactly `after=<canonical uuid>` reaches the port', async () => {
+  const calls: unknown[] = [];
+  const route = createStoreCreditActivityRoute(portWith({ storeActivity: (scope, key, after) => { calls.push([scope.store, key, after]); return activityOf([]); } }));
+  const id = ID(0xab); // hex letters, so its uppercase spelling differs
+  for (const query of [
+    '?', '?after=', `?after=${id.toUpperCase()}`, `?after=${id.slice(0, 35)}`, `?after=${id}0`, `?after={${id}}`, `?after=%7B${id}%7D`, '?after=CN-1',
+    `?after=${id}&x=1`, `?x=1&after=${id}`, `?after=${id}&after=${id}`, `?after=${id}&limit=50`, '?limit=50', '?limit=1', `?cursor=${id}`, `?before=${id}`,
+    `?after=${id}&`, `?&after=${id}`, `?after=${id}#`, `?AFTER=${id}`, `?after =${id}`,
+  ]) {
+    const out = await runHandler(route, activityPath, { url: `${activityPath}${query}` });
+    assert.deepEqual([out.status, out.body, out.locals.refusal], [400, { error: 'invalid_request', requestId: 'req-9' }, 'store_credit_activity_query_invalid'], query);
+  }
+  assert.deepEqual(calls, [], 'no malformed query reached the port');
+  for (const url of [activityPath, `${activityPath}?after=${id}`]) {
+    const out = await runHandler(route, activityPath, { url });
+    assert.equal(out.status, 200, url);
+  }
+  assert.deepEqual(calls, [[STORE, SESSION_KEY, null], [STORE, SESSION_KEY, id]], 'the trusted store, the session key and the cursor, nothing else');
+  // The family's one parser: the per-invoice list's grammar exactly (doc 18 §6.3, RT:668-676).
+  assert.deepEqual(parseInvoiceCreditNotesQuery(`${activityPath}?after=${id}`), { after: id });
+  assert.equal(parseInvoiceCreditNotesQuery(`${activityPath}?`), null);
+});
+
+test('SCA-U2 (CA-12 U): a null staff display name is served as null; a name of exactly 1,000 characters is served; a name over 1,000 characters or with a control character — issuer or withdrawer — fails the page with 503 store_credit_activity_answer_invalid', async () => {
+  let answer: unknown = activityOf([activityNote(2, { withdrawal: { withdrawnAt: TIME(3), reason: 'wrong_amount', withdrawnByName: null } }), activityNote(1)]);
+  const route = createStoreCreditActivityRoute(portWith({ storeActivity: () => answer }));
+  let out = await runHandler(route, activityPath);
+  assert.equal(out.status, 200);
+  const served = (out.body as { creditNotes: { issuedByName: unknown; withdrawal: { withdrawnByName: unknown } | null }[] }).creditNotes;
+  assert.deepEqual([served[0].issuedByName, served[0].withdrawal?.withdrawnByName, served[1].issuedByName], [null, null, null], 'null stays null, never absent');
+  assert.ok(served.every((n) => 'issuedByName' in n), 'the name field is always present (doc 18 §5.2)');
+  const longest = 'a'.repeat(1000);
+  answer = activityOf([activityNote(1, { issuedByName: longest, withdrawal: { withdrawnAt: TIME(2), reason: 'entered_in_error', withdrawnByName: longest } })]);
+  out = await runHandler(route, activityPath);
+  assert.equal(out.status, 200, 'exactly 1,000 characters');
+  for (const bad of ['a'.repeat(1001), 'Ana\u0007Bo', 'Ana\nBo', 'Ana\u0000', 'Ana\u007f', 'Ana\u0085', 'Ana ', 'Ana ', '\tAna']) {
+    for (const [where, note] of [
+      ['issuer', activityNote(1, { issuedByName: bad })],
+      ['withdrawer', activityNote(1, { withdrawal: { withdrawnAt: TIME(2), reason: 'entered_in_error', withdrawnByName: bad } })],
+    ] as const) {
+      // One bad name anywhere on the page fails the whole page, never a partial one.
+      answer = activityOf([activityNote(2), note]);
+      out = await runHandler(route, activityPath);
+      assert.deepEqual([out.status, out.body, out.locals.refusal], [503, { error: 'service_unavailable', requestId: 'req-9' }, 'store_credit_activity_answer_invalid'],
+        `${where} ${JSON.stringify(bad.length > 20 ? `${bad.length} characters` : bad)}`);
+    }
+  }
+  for (const bad of [7, undefined]) {
+    answer = activityOf([activityNote(1, { issuedByName: bad })]);
+    out = await runHandler(route, activityPath);
+    assert.equal(out.status, 503, `issuedByName ${String(bad)}`);
+  }
+});
+
+test('SCA-U3 (supports CA-01, CA-07, CA-09, CA-11 and CA-15b\'s permission-denial part — the route maps 039\'s denied to 403 store_credit_activity_denied; doc 18 lists no U layer for them): the exact 200 body, 50 of 51 with nextCursor the 50th id, the refusals in their order and words, and every out-of-shape answer the 503', async () => {
+  let answer: unknown = activityOf(descending(51));
+  const route = createStoreCreditActivityRoute(portWith({ storeActivity: () => answer }));
+  let out = await runHandler(route, activityPath);
+  assert.equal(out.status, 200);
+  const body = out.body as { store: unknown; creditNotes: Record<string, unknown>[]; nextCursor: unknown };
+  assert.deepEqual(Object.keys(body), ['store', 'creditNotes', 'nextCursor']);
+  assert.deepEqual(body.store, { id: STORE });
+  assert.equal(body.creditNotes.length, 50);
+  assert.deepEqual(body.creditNotes.map((n) => n.number), Array.from({ length: 50 }, (_, i) => 51 - i), 'newest number first, the 51st not served');
+  assert.equal(body.nextCursor, ID(2), 'the 50th served id');
+  assert.deepEqual(body.creditNotes[0], { id: ID(51), number: 51, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1000, reason: 'service_issue', issuedAt: TIME(1),
+    issuedByName: null, withdrawal: null }, 'exactly these keys: no tax, no net, never an actor id');
+  answer = activityOf(descending(50));
+  out = await runHandler(route, activityPath);
+  assert.equal((out.body as { nextCursor: unknown }).nextCursor, null, 'exactly 50: no cursor');
+  answer = activityOf([]);
+  out = await runHandler(route, activityPath);
+  assert.deepEqual([out.status, out.body], [200, { store: { id: STORE }, creditNotes: [], nextCursor: null }], 'the empty store');
+  answer = activityOf([activityNote(1, { withdrawal: { withdrawnAt: TIME(1), reason: 'wrong_invoice', withdrawnByName: 'Bo' } })]);
+  out = await runHandler(route, activityPath);
+  assert.deepEqual((out.body as { creditNotes: { withdrawal: unknown }[] }).creditNotes[0].withdrawal, { withdrawnAt: TIME(1), reason: 'wrong_invoice', withdrawnByName: 'Bo' },
+    'a withdrawal at its issue time is in contract');
+
+  for (const [label, raw, url, status, refusal] of [
+    ['denied', { outcome: 'denied' }, activityPath, 403, 'store_credit_activity_denied'],
+    ['cursor_unknown with a cursor', { outcome: 'cursor_unknown' }, `${activityPath}?after=${ID(9)}`, 400, 'store_credit_activity_cursor_unknown'],
+    ['cursor_unknown without one', { outcome: 'cursor_unknown' }, activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a refusal with a field', { outcome: 'denied', storeId: STORE }, activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['another store', activityOf([], { storeId: randomUUID() }), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['the list\'s outcome word shape', { outcome: 'credit_notes', invoiceId: INVOICE, namesVisible: true, creditNotes: [] }, activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['ascending numbers', activityOf([activityNote(1), activityNote(2)]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a number twice', activityOf([activityNote(2), activityNote(2, { id: ID(3) })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['an id twice', activityOf([activityNote(2), activityNote(1, { id: ID(2) })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['the cursor served', activityOf([activityNote(9)]), `${activityPath}?after=${ID(9)}`, 503, 'store_credit_activity_answer_invalid'],
+    ['over the ask', activityOf(descending(52)), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a tax key', activityOf([{ ...activityNote(1), taxCents: 0 }]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['no invoice number', activityOf([{ ...activityNote(1), invoiceNumber: undefined }]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a zero gross', activityOf([activityNote(1, { grossCents: 0 })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['an unsafe gross', activityOf([activityNote(1, { grossCents: MAX + 1 })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a gross as text', activityOf([activityNote(1, { grossCents: '1000' })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a zero invoice number', activityOf([activityNote(1, { invoiceNumber: 0 })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['an unknown reason', activityOf([activityNote(1, { reason: 'refund' })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a time without microseconds', activityOf([activityNote(1, { issuedAt: '2026-11-15T10:00:01Z' })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a time with an offset', activityOf([activityNote(1, { issuedAt: '2026-11-15T10:00:01.000000+00:00' })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a withdrawal before its issue', activityOf([activityNote(1, { issuedAt: TIME(5), withdrawal: { withdrawnAt: TIME(4), reason: 'wrong_amount', withdrawnByName: null } })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['an issue reason as a withdrawal reason', activityOf([activityNote(1, { withdrawal: { withdrawnAt: TIME(2), reason: 'goodwill', withdrawnByName: null } })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['a withdrawal without its name key', activityOf([activityNote(1, { withdrawal: { withdrawnAt: TIME(2), reason: 'wrong_amount' } })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['an uppercase id', activityOf([activityNote(1, { id: ID(10).toUpperCase() })]), activityPath, 503, 'store_credit_activity_answer_invalid'],
+    ['not a record', ['credit_notes'], activityPath, 503, 'store_credit_activity_answer_invalid'],
+  ] as const) {
+    answer = raw;
+    out = await runHandler(route, activityPath, { url });
+    assert.deepEqual([out.status, (out.body as { requestId?: unknown }).requestId, out.locals.refusal], [status, 'req-9', refusal], label);
+  }
+  // The handler's order (doc 18 §5.3): the query first, then the scope, then the port.
+  const calls: unknown[] = [];
+  const counted = createStoreCreditActivityRoute(portWith({ storeActivity: () => { calls.push(1); return activityOf([]); } }));
+  out = await runHandler(counted, activityPath, { url: `${activityPath}?x=1`, trusted: null });
+  assert.deepEqual([out.status, out.locals.refusal], [400, 'store_credit_activity_query_invalid'], 'the query before the scope');
+  out = await runHandler(counted, activityPath, { trusted: null });
+  assert.deepEqual([out.status, out.locals.refusal], [403, 'authz_context_missing'], 'no trusted scope');
+  out = await runHandler(counted, activityPath, { trusted: scopeAt(randomUUID()) });
+  assert.deepEqual([out.status, out.locals.refusal], [403, 'authz_context_missing'], 'another store than the path');
+  out = await runHandler(counted, activityPath, { trusted: { ...scopeAt(STORE), scope: 'tenant', store: null } });
+  assert.deepEqual([out.status, out.locals.refusal], [403, 'authz_context_missing'], 'a tenant scope');
+  assert.deepEqual(calls, [], 'no refused scope reached the port');
+  const failing = createStoreCreditActivityRoute(portWith({ storeActivity: () => { throw new Error('down'); } }));
+  out = await runHandler(failing, activityPath);
+  assert.deepEqual([out.status, out.locals.refusal], [503, 'store_credit_activity_unavailable'], 'a raise or an outage');
+  const outageBody = out.body;
+  assert.deepEqual(outageBody, { error: 'service_unavailable', requestId: 'req-9' }, 'the sealed 503');
+  // The port's typed refusal of the answer: the same sealed 503, logged as an invalid answer, not an outage.
+  out = await runHandler(createStoreCreditActivityRoute(portWith({ storeActivity: () => { throw new StoreCreditActivityAnswerInvalid(); } })), activityPath);
+  assert.deepEqual([out.status, out.locals.refusal, out.body], [503, 'store_credit_activity_answer_invalid', outageBody], 'a refused answer');
+  out = await runHandler(createStoreCreditActivityRoute(portWith({ storeActivity: async () => { throw new StoreCreditActivityAnswerInvalid(); } })), activityPath);
+  assert.deepEqual([out.status, out.locals.refusal], [503, 'store_credit_activity_answer_invalid'], 'a refused answer, rejected');
+  // Only the class counts, never its text; a hostile rejection value stays an outage.
+  out = await runHandler(createStoreCreditActivityRoute(portWith({ storeActivity: () => { throw new Error('store credit activity answer invalid'); } })), activityPath);
+  assert.deepEqual([out.status, out.locals.refusal, out.body], [503, 'store_credit_activity_unavailable', outageBody], 'the message alone is an outage');
+  const hostileRejection = new Proxy({}, { getPrototypeOf() { throw new Error('trap'); } });
+  out = await runHandler(createStoreCreditActivityRoute(portWith({ storeActivity: () => { throw hostileRejection; } })), activityPath);
+  assert.deepEqual([out.status, out.locals.refusal], [503, 'store_credit_activity_unavailable'], 'a hostile rejection');
+  // The decoder alone: never throws, a hostile getter is out of contract.
+  const hostile = Object.defineProperty({ storeId: STORE, creditNotes: [] }, 'outcome', { get() { throw new Error('boom'); }, enumerable: true });
+  assert.equal(storeCreditActivityOf(hostile, STORE, null), null);
+  assert.equal(storeCreditActivityOf({ outcome: 'cursor_unknown' }, STORE, ID(1)), 'cursor_unknown');
 });

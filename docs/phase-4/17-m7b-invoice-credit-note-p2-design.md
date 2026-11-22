@@ -1,6 +1,12 @@
 # 17 — M7B credit notes, CN-P2: the shop's issue control and recovery (design)
 
-**Status: ADOPTED — DESIGN ONLY (owner decisions of 2026-11-16; §7 records each choice). Implementation, push, CI, deployment and managed migrations each need separate approval.**
+**Status: ADOPTED; CN-P2 IMPLEMENTED IN CODE IN AN UNCOMMITTED LOCAL CANDIDATE — QA DEFERRED BY THE OWNER — RELEASE NOT AUTHORIZED (recorded 2026-11-18; §8 is the delivery record).**
+- **Development.** CN-P2 is implemented in code in an uncommitted local candidate on base `eb10f4c` (this document's adoption commit), under the owner's authorization of 2026-11-16 for local implementation and verification only (§8.1). It has no commit and no CI run; commit, push and CI each need separate owner approval. Development is not complete: the last full local verification ran on an earlier tree, and named test work remains (§8.4, §8.6).
+- **QA.** Deferred by the owner on 2026-11-18, until development across all phases is finished. The earlier synthetic runs were RAM-backed UI observations only, with no crash-durability evidence, and the durable run on Replit could not seed (§8.5). No QA result is claimed as acceptance.
+- **Release.** Not authorized. Under D-P2-13 A, CN-P2 is not deployed until the store-wide credit-activity read, built in its own slice, passes its gate; that slice has no contract yet and its migration 039 does not exist. How the cross-owner duplicate residual is handled in production (D-P2-14) is an open owner decision (§8.7).
+- **Gates unchanged.** 37 gates: 29 OPEN, 7 PARTIAL, 1 PASS. ICH-11 stays UNVERIFIED, CN-38 stays a deployment prerequisite, G-APPSEC stays PARTIAL and production-blocking, F-2 and F-5 stay missing inputs, and G-A11Y stays OPEN (the P2-61 screen-reader pass is deferred; the P2-52 automated scan is not established).
+
+**Status at adoption, 2026-11-16 (history): ADOPTED — DESIGN ONLY (owner decisions of 2026-11-16; §7 records each choice). Implementation, push, CI, deployment and managed migrations each need separate approval.**
 
 - **Baseline.** `main` at `8148eebb0cb7270cd96acdbed912f5afcb8818ee` (CN-P1 closeout records on top of CN-P1 at `064b5f1`). Push CI run 43778230600 on that commit passed, attempt 1.
 - **What this document is.** The design for CN-P2, the slice that [16](./16-m7b-invoice-credit-note-decision-pack.md) D-CN-11 A names "the shop's issue control and recovery" (D16:307). D16:810 says CN-P2 "is not started and needs its own approval". The owner adopted this design on 2026-11-16 with the choices in §7. Building it is a separate approval.
@@ -500,7 +506,7 @@ Buttons are `aria-disabled` while in flight, with an sr-only reason (T:3963). Th
   3. Discard: on any token adoption (a sign-in or Reconnect in this tab; a focus or pre-read session check that finds another token; the post-403 recheck finding another token), drop every loaded list row and every owner-only name, the lookup rows and their actions, all cursors and the baseline, before any new request; restart from page 1 under the new token. Holds whose token differs detach (unchanged); a detached card keeps its state text and the attempt, but any listed notes and staff names on it are removed. Within one generation, a view change (name keys present vs absent) still drops all and reloads once (§4.1, unchanged). The user's own sign-ins in this tab, `renew` and `renewKeepingView`, move the generation without `begin` (T:1260-1283), and `renewKeepingView` keeps the open dialog (only `renew` closes it, T:1267); the credit-note state must be dropped there by new code, not inherited.
   4. *What clears owner-only names and recovery actions, and when.*
      - *A known session change in this tab* (any token adoption, rule 3, or a sign-out): at once, before any new request, every list row and owner-only name, every lookup row and its actions, the cursors and the baseline are dropped, and every card loses its listed notes and names (anotherNoteFound's list included). Holds of another token detach: a detached card shows only "Look up attempt" and "Hide this attempt", and only to the same user (§3.2); another user sees no card.
-     - *Confirmed access loss with the same token* (a demotion or revocation). The session read cannot show it: it identifies the user and the token, not the role (TSC:284-292, :340-344). The first answer in the section that shows it does: a 403 `forbidden` to any read or command of the section (credit-note or shipped, for example the issued list's denied state, T:1475-1480) that the one fresh session check confirms with the same token, or a credit-note list page with at least one item and no name keys after a named view (an empty page decides nothing). At that answer every owner-only name and every lookup row is dropped, and every card loses its listed notes and names; the list reloads once in the new view, or shows its denied state; the action is hidden; every card keeps its last known state with no buttons (noAccess): no "Confirm credit note", "Release attempt", "Continue issuing", "Issue another credit note", "Check again" or "Look up attempt".
+     - *Confirmed access loss with the same token* (a demotion or revocation). The session read cannot show it: it identifies the user and the token, not the role (TSC:284-292, :340-344). The first answer in the section that shows it does: a 403 `forbidden` to any read or command of the section (credit-note or shipped, for example the issued list's denied state, T:2848-2855) that the one fresh session check confirms with the same token, **except a 403 from the store-wide credit-activity read of [18](./18-m7b-credit-activity-read-design.md), which clears only its own view unless 18 §8.4 classifies it as a verified store loss (B2), which applies this bullet**; or a credit-note list page with at least one item and no name keys after a named view (an empty page decides nothing). At that answer every owner-only name and every lookup row is dropped, and every card loses its listed notes and names; the list reloads once in the new view, or shows its denied state; the action is hidden; every card keeps its last known state with no buttons (noAccess): no "Confirm credit note", "Release attempt", "Continue issuing", "Issue another credit note", "Check again" or "Look up attempt".
      - *The delay (documented, not closed).* Until this tab detects the change, rows and names already loaded stay on screen. Another tab's session change is detected at this tab's next read, its focus or visibility session re-read, or a press's re-read. The focus re-read does nothing while the tab is hidden, while the void's sign-in wait runs, or without a token (T:2420-2421), and a press's re-read can reuse a read already in flight (rule 1). A same-token demotion is detected only by an answer in the section: the next list or lookup read (dialog open, "Show more", "Try again", a re-read after an answer), another shipped read's confirmed denial, or the next press, whose command is refused 403. Nothing is re-read on a timer. Names shown during the delay were read with the owner's rights in that session; no name read under one session is shown under another.
 - *Cases.*
   - **Owner → owner, identical response shapes.** Another tab signs in as a second owner. This tab's next read re-reads the session and finds another identity's session; the session client then signs this tab's own user in again with its own ID token, a new session with a new token (TSC:340-379). Where the shared sign-in provider instead switches this tab's user, AccessContext signs the old session out (`src/context/AccessContext.tsx:176-179`; inference, not run). Either path changes the token, so the rules hold. Existing shop behaviour, outside CN-P2: tabs of two different users take the shared session from each other on each re-sign-in (login limit 5 per 5 minutes, RL:84). The generation moves and everything is dropped; any page sent with the old token under the new cookie gets 403 → recheck → new token → dropped. No row read for the second owner can join the first owner's pages, and names are never carried across.
@@ -592,6 +598,8 @@ Buttons are `aria-disabled` while in flight, with an sr-only reason (T:3963). Th
 
 ## 5. Acceptance matrix (PROPOSED; every row PLANNED — NOT RUN)
 
+*(2026-11-18: the rows below keep their adopted, planned text as history. §8.3 maps each row to the evidence in the uncommitted CN-P2 candidate.)*
+
 Layers: component (C; the real section over a fake server), HTTP (H), DB, browser (B; real entry, disposable PostgreSQL), synthetic manual QA (Q; owner-directed, not UAT). Strings are the §2.7 keys. "New support" names harness work the row needs: **F** component fake credit-note routes; **BF** browser credit-note fixture and a durable target; **AG** a browser `ageSession` helper; **S2** a second browser session; **T2** a second page in the same browser context, sharing the cookie jar; **HG** HTTP request gating; **DB1k** a DB seed of ≥ 1,001 registrations; **DB51** a DB seed of 51+ credit notes; **KA** age an idempotency key past retention on the disposable DB; **QF** QA fault kinds; **AX** axe; **TS** a text-spacing style; **—** none.
 
 | ID | Criterion | Expected outcome | Layer(s) | Staging | New support |
@@ -682,7 +690,7 @@ Layers: component (C; the real section over a fake server), HTTP (H), DB, browse
 | P2-78 | Late proof vs Continue issuing | A proof times out, the owner presses "Continue issuing", then the first proof's 200 arrives: the late 200 is stale (not the attempt's latest proof, §3.6); only the Continue press's own proof 200 claims the key; exactly one issue key is claimed and one issue sent | C | `server.hold` + `release` | F |
 | P2-79 | Another note found (D-P2-15) | The continuation's list read holds a note not in the baseline, here one issued before A's row exists (A's register replayed after B's issue) → anotherNoteFound with the notes and their status (a withdrawn one with its time and reason), focus on "Look up attempt"; "Issue another credit note" sends the issue only on its own press, after E1-E3 and E5-E7 and a list re-read whose ids outside the baseline were all shown on the card | C, B | C list fake; B second session issues | F, BF, S2 |
 | P2-80 | List: target beyond 1,000 notes | The refresh stops at 20 pages; "Show more" continues the target search from its cursor; CN-<n> shows when the matching row loads | C | Fake 21+ pages | F |
-| P2-81 | Session isolation, owner → owner | A second page in the same browser context signs in as a second owner between list pages one and two (and between lookup pages): this page's next read adopts the new token, or gets 403 → recheck → new generation; every loaded row and name dropped; reload from page 1; no row from the second owner's session ever shown with the first's. C: a Check again or Continue issuing whose send leaves after the other page's sign-in → 403 → recheck → new token → detached, not noAccess; `renew` and `renewKeepingView` drop the credit-note state. H: a request with one session's cookie and another's token → 403 `forbidden`, body identical to an authorization 403. B (also P2-82, P2-83) asserts token-change outcomes (drop, detach, reload), not which user ends signed in. Coverage limit: each layer proves only its own behaviour. If the real browser cannot stage a case (for example, one browser context cannot hold two users stably), the row records that case's browser behaviour as not established; C and H results and the source trace do not stand in for it | C, B, H | Two pages, one cookie jar | F, BF, T2 |
+| P2-81 | Session isolation, owner → owner | A second page in the same browser context signs in as a second owner between list pages one and two (and between lookup pages): every page, the first and each later one, re-reads the session before its send (§3.6 rule 1), so this page's next read adopts the new token before sending; only a switch between that re-read and the send gets 403 → recheck → new generation; every loaded row and name dropped; reload from page 1; no row from the second owner's session ever shown with the first's. C: a Check again or Continue issuing whose send leaves after the other page's sign-in → 403 → recheck → new token → detached, not noAccess; `renew` and `renewKeepingView` drop the credit-note state. H: a request with one session's cookie and another's token → 403 `forbidden`, body identical to an authorization 403. B (also P2-82, P2-83) asserts token-change outcomes (drop, detach, reload), not which user ends signed in. Coverage limit: each layer proves only its own behaviour. If the real browser cannot stage a case (for example, one browser context cannot hold two users stably), the row records that case's browser behaviour as not established; C and H results and the source trace do not stand in for it | C, B, H | Two pages, one cookie jar | F, BF, T2 |
 | P2-82 | Session isolation, owner → non-owner | This page's session becomes a manager's (another user): new generation; the former owner's cards and holds are not shown; lookup 403, recheck confirms; action hidden; list reloads without names; no earlier name remains. Same user demoted, same token: before any credit-note answer shows it, the loaded names stay (the documented delay); the first one that does (a 403 to a read or command of the section that the session check confirms with the same token, or a list page with at least one item and no name keys after a named view) drops every owner-only name and lookup row, reloads the list in the new view, hides the action, and leaves each card with no buttons (noAccess) (§3.6 rule 4). Browser coverage limit as P2-81 | C, B | Two pages, one cookie jar; B `update user_membership` for the demotion | F, BF, T2 |
 | P2-83 | Session change while page two is in flight | Page two held while the other page switches session; three outcomes: old-session 200 accepted, then everything dropped on the next read; this page adopted first → answer stale, dropped; new cookie → 403 → recheck → dropped; never a mixed list. C: 401 → Reconnect (same generation number, new token) → credit-note state dropped, no row action until a fresh lookup. A 401 on page two signs the section out (T:1474) and the holds detach; Reconnect follows. B: the old-session 200 needs the answer held (`gate(…,'response')`); a request held (`'request'`) and released after the other page's sign-in reaches an ended session and answers 401. Browser coverage limit as P2-81: an outcome the browser gate cannot produce (for example, page two leaving with the new cookie) is recorded as not established in the browser | C, B | C `server.hold`; B holds page two's request or answer with the suite's gate (BR:1519) | F, BF, T2 |
 | P2-84 | Continuation eligibility | Each of E1-E7 failing alone shows its text and sends no register, issue or settlement (the press's reads may have gone out); a nonterminal row of this owner on this invoice other than this attempt → unfinished; this attempt's own open or unlisted row passes; a proof 200 from an earlier press does not satisfy E5; H: a forced fresh register while the row is open → sealed `write_conflict` | C, H | Script each | F |
@@ -801,6 +809,154 @@ Each row was decided on its own; the last column records the choice. How D-P2-2 
 
 ---
 
+## 8. CN-P2 delivery record (uncommitted candidate; recorded 2026-11-18)
+
+The three statuses are kept apart:
+
+| Status | Where it stands |
+|---|---|
+| Development | Implemented in code in an uncommitted local candidate (§8.1). No commit and no CI run. Not complete: the last full local green run was on an earlier tree (§8.4), and §8.6 names the test work that remains |
+| QA | Deferred by the owner on 2026-11-18, until development across all phases is finished (§8.5) |
+| Release | Not authorized (§8.7) |
+
+### 8.1 What was built, and where
+
+- **Authorization.** On 2026-11-16 the owner authorized local implementation and verification of CN-P2 in an isolated candidate worktree based on `eb10f4c21e289d6d88359f429661c4cf5b958c51`, left uncommitted. No commit, push, CI run, deployment or managed migration was authorized, and none was made.
+- **The candidate.** 17 modified tracked files and 2 new files, all uncommitted. Its fingerprint, computed before this record's documentation edits and before the 2026-11-18 additions to `src/tenant/ServerIssuedInvoices.test.tsx` (seven component tests, written and never run, §8.3), by the hand-off method (`git diff --binary eb10f4c`, then each untracked source file as `== path` and its content), is `39911874f063abaea46ef90f4ed0a9d9832506720acfaa711b937fb75289e9ea`; the Git-independent content fingerprint of the same 19 files is `1616e86398091faf83bda61a683386d124e0d3244861b9aea349184a8b1cef32`. This is therefore the fingerprint of the candidate before the 2026-11-18 test and documentation additions, not of the final tree. The test additions and the documentation edits both change the first value when included, and the second value no longer matches the 19 files either. No fingerprint has been recomputed for the final tree, and none is recorded here.
+- **Shop code** (the only production code changed):
+  - `src/tenant/ServerIssuedInvoices.tsx`: the "Issue credit note" action, form and confirmation with a recent sign-in; the result card with Check again, Continue issuing, Issue another credit note, Look up attempt, Confirm credit note, Release attempt and Hide this attempt; the invoice-level credit-note list; coordination with payment, reversal and void attempts (D-P2-10 A); the §2.7 wording as one frozen block; the live regions.
+  - `src/tenant/invoiceIssuingClient.ts`: the route helpers, body builders and exact decoders for register, proof, issue, lookup, settlement and list.
+  - `src/tenant/invoiceCreditNoteHold.ts` (new): the memory-only hold, with the D-P2-9 A windows (8 minutes for a first send, 9 minutes for a register or issue Check again, 23 hours for a settlement Check again).
+  - `src/tenant/ServerInvoiceDrafts.tsx`: the shared dialog frame (§8.2, item 1).
+- **Unchanged.** No server, migration, route, permission, CI workflow, package or lockfile file changed. Product behaviour changed in shop code only; the test, test-runner (`scripts/run-*.mjs` case floors) and QA-harness (`tests/qa/interactive`) paths changed too. The withdrawal route is not used.
+- **Tests.** `src/tenant/ServerIssuedInvoices.test.tsx` (rows named by their §5 id), `src/tenant/invoiceIssuingClient.test.ts` (IIC-51 to IIC-60), `src/tenant/invoiceCreditNoteHold.test.tsx` (new; CNH-01 to CNH-14), `tests/db/invoiceCreditNoteHttp.integration.test.mjs` (ICH-12 to ICH-22), `tests/browser/shopRoleLevels.browser.test.mjs` (SCN-01 to SCN-22, and DIS-16's narrow supersession of SII-153b), `tests/quality/qaInteractiveFront.test.mjs`.
+- **Runners.** `scripts/run-frontend-tests.mjs` makes the hold suite required and sets its floors to 31 files and 1,543 cases; `scripts/run-tests.mjs` adds the hold suite as a sentinel; `tests/quality/run-frontend-tests-contract.test.mjs` pins both. Without them a missing or skipped hold suite would pass both lanes.
+- **QA harness.** `tests/qa/interactive/cli.mjs`, `evidence.mjs`, `fixtures.mjs`, `front.mjs` and `supervisor.mjs`: the `held-credit-note` fault, the `inv-credit` and `inv-credit-list` fixtures, and the credit-note evidence (runbook [14](./14-interactive-qa-runbook.md) §2.4, §3.2 and §6).
+- **Not part of the candidate.** The QA-only overlay used for the QA runs (`durable: true` for the QA cluster and the seeder's retry of a `rate_limit_timeout`, in `tests/qa/interactive`) is not in the candidate and is never committed with it.
+- **Part A corrections (D-P2-11), landed with this record.** DIS-8, DIS-9, DIS-10 and DIS-12 in [16](./16-m7b-invoice-credit-note-decision-pack.md); DIS-6, DIS-11 and DIS-13 in [10](./10-architecture-decision-records.md) ADR-53; DIS-15 in [14](./14-interactive-qa-runbook.md). DIS-14 stays deferred to a later slice. The Part B decisions that change adopted text (D-P2-2 A, D-P2-13 A, D-P2-14, D-P2-16 A) are recorded in [16](./16-m7b-invoice-credit-note-decision-pack.md) §12.6 and the ADR-53 addendum.
+
+### 8.2 Deviations from §6
+
+1. **The shared dialog frame.** `src/tenant/ServerInvoiceDrafts.tsx` is not in §6. Its `DialogFrame` gained an opt-in `preferReturnFocus` (default unchanged), used once, so that closing the credit-note confirmation sends focus to the Payments heading (P2-46b). After the synthetic QA round of 2026-11-17, a second change made Tab from a heading the script had focused move to the next stop in document order. The frame is shared by the drafts, void, reversal and credit-note dialogs, so this second change also reaches shipped dialogs. The drafts suite passed after it (227 of 227); the browser suite, which covers those dialogs, has not run since (§8.4).
+2. **Runner scripts and their contract test** (§8.1), not in §6.
+3. **QA harness.** §6 names `front.mjs`, `fixtures.mjs` and `evidence.mjs`; `cli.mjs` and `supervisor.mjs` also changed (the scenario command), and `tests/quality/qaInteractiveFront.test.mjs` covers the new fault.
+4. **Support from §5 not built.** AX (an automated accessibility scan; no such tool is installed, so P2-52 is not established); in the browser, DB1k, DB51 and a second store-scope owner (S2 exists in the browser only as a second session of the same owner).
+
+### 8.3 Evidence map (the §5 rows against the candidate)
+
+Layers are §5's: component (C), HTTP (H), browser (B), and the owner's synthetic manual QA (Q). Test families: SII rows named by their §5 id; IIC-51 to IIC-60 (client); CNH-01 to CNH-14 (hold); ICH-12 to ICH-22 (HTTP); SCN-01 to SCN-22 (browser). **Q is deferred for every row that lists it** and is not repeated below.
+
+Status words:
+- **Covered.** A test that names or stages the row exists at every automated layer the row lists, and that suite's last recorded local run passed. For the browser suite and the full frontend lane, that run was on the earlier tree (§8.4).
+- **Work remains.** A named test is still to be written, or a run is still to be repeated (§8.6).
+- **Recorded limit.** The rest of the row cannot be produced or staged at that layer; another layer covers it, or nothing does, as stated.
+- **Not established.** No evidence at any layer.
+- **Deferred.** Q only.
+
+| Rows | Status | Evidence | Remaining or limit |
+|---|---|---|---|
+| CN-07b | Covered | SII lost register, issue and settlement tests; SCN-13 (lookup), SCN-17 (Check again) | — |
+| CN-27b | Covered | SII (P2-60, DIS-16 scans); SCN-08 | — |
+| P2-01, P2-02, P2-04 | Covered | SII; SCN-08, SCN-02, SCN-03 | — |
+| P2-03 | Work remains | SII (C) | B: no scenario sets a read-only or overdue tenant |
+| P2-05 to P2-08, P2-10, P2-11, P2-14 to P2-17, P2-19 to P2-36, P2-38 to P2-43 | Covered | SII; CNH where the row names the hold; ICH-13 and ICH-14 (P2-26, P2-33); SCN-08 to SCN-22 as each row stages | P2-17's B case is staged by owner SQL, not a second page |
+| P2-09 | Recorded limit | SII; SCN-11 | B cannot produce `lookupFailed` or the 20-page cap from the real entry (DB1k not built in B) |
+| P2-12 | Recorded limit | SII; SCN-08, SCN-09 | Real paste and password-manager autofill: headless Chromium has neither; Q only (deferred) |
+| P2-13 | Recorded limit | SII (the 30 s bound); SCN-09 (Stop waiting, Escape) | B does not wait the 30 s bound |
+| P2-18 | Recorded limit | SII; SCN-12 | B does not stage a failed re-read (`invalidStateUnknown`) |
+| P2-37 | Work remains | SII (403 at settlement and lookup) | C: a component test for a 503 at each stage ("503 clause, scripted") was written on 2026-11-18. It and a CA-35 case beside it (a completed issue's same-key retry gets 503, then "Look up attempt" shows the issued row) each ran locally on 2026-11-20, in separate runs, and passed; doc 18 §13 records both runs and the fixture limits (local source-level, not CI). B: not stageable (the shipped server ends the session on a role change) |
+| P2-44 | Work remains | ICH-15 (H) | B: needs a second store-scope owner |
+| P2-45, P2-47, P2-49 to P2-51, P2-53, P2-56 to P2-58 | Covered | SII; CNH-11 (P2-49); SCN-01 to SCN-06, SCN-14 (P2-47 on local fonts, P2-50), SCN-17 | P2-47: 400 % zoom is Q (deferred); CI fonts not verified (no CI run) |
+| P2-46a | Work remains | SII (focus on "Don't issue"); SCN-08 (page inert) | C: a component test that Tab and Shift+Tab stay inside the credit-note confirmation was written on 2026-11-18 and has never run; the row stays open until it runs |
+| P2-46b, P2-46d, P2-46e | Covered | SII (fix-list and QA-round tests; titles do not name P2-46b); SCN-08, SCN-09, SCN-13 | — |
+| P2-46c | Work remains | SII (password field focused) | C: a component test of the provider-button branch was written on 2026-11-18 and has never run; the row stays open until it runs |
+| P2-48 | Work remains | Full lanes green on the earlier tree | Every lane to re-run on the final tree (§8.4) |
+| P2-52 | Not established | — | No automated accessibility scan tool is installed; adding one is an owner decision (§8.6) |
+| P2-54 | Work remains (low) | SII (each stage); SCN-13 (issue stage) | B: Escape at the register and proof stages not staged |
+| P2-55 | Recorded limit | SII; SCN-01 | B: "no new item → list heading" is not producible by the real server |
+| P2-59 | Covered | IIC-57 to IIC-59 (titles do not name P2-59) | — |
+| P2-60 | Covered | SII pins the whole block; the browser mirrors the strings of every state it stages | Strings of unstaged states are pinned in C only |
+| P2-61 | Deferred | — | Screen-reader pass (Q); G-A11Y stays OPEN |
+| P2-62 to P2-80 | Covered | SII; ICH-16 to ICH-22 (P2-70 to P2-76); SCN-15, SCN-16, SCN-19, SCN-22 | — |
+| P2-81 | Work remains | SII; ICH-20 (every way round); SCN-04 | C: component tests for lookup page two across another page's sign-in (81.2), Continue issuing sent after it (81.6) and `renew` dropping the credit-note state (81.7) were written on 2026-11-18 and have never run; the row stays open until they run. B: the shared sign-in switching this tab first, and the old-token-with-new-cookie 403, are not stageable: not established in the browser |
+| P2-82 | Recorded limit | SII; SCN-05, SCN-06 | B: a same-token demotion is not stageable (the server ends the session on a role change): not established in the browser |
+| P2-83 | Recorded limit | SII; SCN-07 (2 of 4 outcomes) | B: "old-session 200 accepted, then dropped" and "page two leaves with the new cookie → 403" are not producible: not established in the browser |
+| P2-84, P2-85 | Covered | SII; ICH-14, ICH-19 | — |
+| P2-86 | Work remains | SII (a second session of the same owner); SCN-22 | C: a component test of the "other owner" variant was written on 2026-11-18 and has never run; the row stays open until it runs. B: not tested |
+| P2-87 | Work remains | SII (C) | B: no seed of 51+ notes with a later note past page one |
+| P2-88, P2-89 | Covered | SII; the P2-89 request-log check runs after every credit-note test and has its own self-check | — |
+
+Counts over the 95 rows: 76 covered, 10 with work remaining (P2-03, P2-37, P2-44, P2-46a, P2-46c, P2-48, P2-54, P2-81, P2-86, P2-87), 7 recorded limits (P2-09, P2-12, P2-13, P2-18, P2-55, P2-82, P2-83), 1 not established (P2-52) and 1 deferred (P2-61).
+
+### 8.4 Local verification record
+
+Node 20, `TMPDIR=/tmp`, all local; no CI run.
+
+**Last full run (2026-11-17), on the earlier candidate tree, fingerprint `648b109af36a4c01a968530e9a0c3fca057777cb4a59dbe41fa1852cbc53de7d`:**
+
+| Lane | Result |
+|---|---|
+| `ServerIssuedInvoices.test.tsx` (two full runs) | 503 of 503, twice |
+| `invoiceCreditNoteHold.test.tsx` | 14 of 14 |
+| `ServerInvoiceDrafts.test.tsx` | 226 of 226 |
+| `npm run test:frontend` | 31 files, 1,543 cases, ratchet passed at floor 1,543 |
+| Ratchet contract test | 15 of 15 |
+| `npm run typecheck`, `npm run typecheck:contract` | exit 0; OK |
+| `npm run test:existing` | 185 of 185 suites |
+| `qaInteractiveFront.test.mjs` | 40 of 40 |
+| Browser, full file | 126 of 126 (SCN-01 to SCN-22, SIS-09, SDB-01 to SDB-23) |
+| Database suites (last run on this candidate, not repeated in that pass because no server, migration or database test file changed) | credit-note HTTP 22 passed and 1 skipped (ICH-11, UNVERIFIED); routines 28 of 28; cutover 11 of 11; migration smoke 2 of 2; invoice issue HTTP 13 of 13 |
+
+Browser mode: a Firestore stub, a throwaway cluster with `fsync` on, on a Unix socket, in a private network namespace, a fresh snapshot for each run.
+
+**After that run.** The synthetic QA round of 2026-11-17 changed `ServerInvoiceDrafts.tsx` (the dialog frame's Tab handling, §8.2), `ServerInvoiceDrafts.test.tsx` and `ServerIssuedInvoices.test.tsx`, giving the candidate fingerprinted as `39911874…`. Only targeted component runs followed, on that candidate: `ServerIssuedInvoices.test.tsx` 506 of 506, `ServerInvoiceDrafts.test.tsx` 227 of 227 and `invoiceCreditNoteHold.test.tsx` 14 of 14.
+
+**After `39911874…` (2026-11-18).** Seven component tests were added to `ServerIssuedInvoices.test.tsx` (P2-37 "503 clause, scripted", P2-46a, P2-46c, P2-81 items 81.2, 81.6 and 81.7, and P2-86's other-owner variant). Six of them have never run. P2-37's ran once on 2026-11-20, by itself (log `component-p2-37-503-active-20261120.log`: 1 passed, 541 skipped), and a CA-35 case added beside it that day ran once in a separate run (log `component-p2-37-ca35-active-20261120.log`: 1 passed, 542 skipped); both passed, and doc 18 §13 records both runs and their fixture limits. Neither is a run of the suite: the full file has not run since (the owner paused QA on 2026-11-18). So "506 of 506" is a result for the candidate before these additions, not for the final tree; no full run of the final tree's `ServerIssuedInvoices.test.tsx` exists. Also on 2026-11-18, O6 (§8.6) changed one line of product code (the first-send issue 403 on a changed token now shows `ended`) and the 81.6 expectation; neither has run. The final tree has no recorded fingerprint.
+
+**Not re-run on the final tree:** the full frontend lane (whose floor of 1,543 is now below the real count by roughly 11 cases, from the cases added after the last full run, including the seven tests above), the typecheck, the typecheck contract, `test:existing`, the ratchet contract test, `qaInteractiveFront`, the full browser file (the shared dialog changed) and the database suites (their files did not change). So no full green run exists on the final tree, and six of the seven new tests have not run at all (P2-37's ran alone, above).
+
+### 8.5 QA status
+
+- **Deferred by the owner.** On 2026-11-18 the owner paused all QA until development across all phases is finished. The 39-item synthetic checklist for CN-P2 (owner-directed, not UAT) is not complete, and no QA result is claimed as acceptance. P2-61 and every Q column are not run.
+- **Earlier results, at their actual scope only.** A RAM-backed synthetic UI run, `qa-20261117t2012-26e3`, on the final candidate tree plus the QA-only overlay, recorded browser and UI observations for part of the checklist. Its cluster data lived in memory, so it is no evidence of crash durability. Several items stayed partial, pending, not reached, or blocked (no screen reader was available). It recorded one open finding, QA-CN-P2-LOGIN-01: once, a renewal after an aged owner sign-in showed "Not signed in" although the identity requests answered 200; no credit note was created by it, a retry succeeded, and the cause is unconfirmed. The checklist, observations and evidence are kept outside the repository.
+- **Crash durability: no evidence.** The durable run on Replit could not seed. The suspected cause, a commit's flush taking longer than the rate limiter's 500 ms deadline on that host, is not confirmed. A hand-off for a disk-backed run on another host exists outside the repository; it has not been run.
+
+### 8.6 Remaining development work and open owner decisions
+
+Remaining work, in order (nothing here is decided by this record):
+1. Re-run every local lane on the final tree, then set the frontend floor to the measured count and update its pinned literal.
+2. Component tests, written on 2026-11-18 and never run: P2-81 (81.2 lookup page two across another page's sign-in; 81.6 Continue issuing sent after that sign-in, which must detach, not show no access; 81.7 `renew` dropping the credit-note state); P2-86's other-owner variant; P2-46a (Tab and Shift+Tab stay in the confirmation); P2-46c (provider-only sign-in focuses the provider button). Each row stays open work until its test runs and passes; the status counts in §8.3 do not change. P2-37's component test (a 503 at each stage, "503 clause, scripted") and the CA-35 case beside it have each run once locally and passed (2026-11-20, doc 18 §13); P2-37 still stays open work, because its browser layer is not established (§8.3).
+3. Browser scenarios: P2-03 (read-only or overdue tenant), P2-44 and P2-86 (a second store-scope owner), P2-87 (51+ notes); optionally P2-54, P2-13 and P2-18.
+
+Owner decisions this record surfaces and does not make:
+- **O1.** Whether to add an automated accessibility scan tool (a dependency change) for P2-52, or to accept P2-52 as not established.
+- **O2.** Whether the local test lanes, the real-browser file included, count as paused QA or as development verification that may run now.
+- **O3.** Commit, push and CI, each separately.
+- **O4.** D-P2-14's production handling, and deployment (§8.7).
+- **O5.** Whether the browser rows in item 3 are built, or accepted as recorded limits as P2-82 and P2-83 are.
+- **O6 (closed 2026-11-18 on the owner's instruction; implemented, never run).** The first-send issue 403 with a changed sign-in used to show `replayGone` ("We can't check this attempt from this sign-in…"). §3.1 (the 401 and 403 `forbidden` rows, lines 363-364, and line 383) and §3.6 rule 1 agree with each other. A first send's 403 is decided before the key (line 199). A new token or a sign-out detaches the hold and takes the 401 texts; only the same token gives notAllowed. So the source confirmed the mismatch, and the design stays unchanged. The product now shows `ended` on that path, as the first-send 401 does (`ServerIssuedInvoices.tsx`, lines 2179 and 2185). It does so only when the section is still mounted and its token is no longer the one the request carried. Any other `'gone'` keeps `replayGone`: the section unmounted during the check, or a same-token denial whose hold had already detached or been replaced. `ended` says nothing about whether a note was issued, and nothing is resent. No `shut` is added: a detached card never offers Check again (line 4040), and the first-send 401 path does not shut either. A same-token denial is unchanged (notAllowed + noAccessShort, line 2182). The 81.6 test now expects `ended`. It has never run, and it does not show that "Look up attempt" returns after the store is chosen again (line 4044). Carried forward, unchanged and open: (a) on the new-token path the section is still signed in, so `ended`'s "Reconnect to see issued invoices" is the adopted wording but an instruction the user cannot follow there — an owner wording question; (b) the register stage's first-send 403 on a changed token still shows `regUnknown` (line 2103), although line 383 and §3.6 rule 1 apply to every command; (c) a first-send issue 403 whose check cannot answer (`'unchecked'`) still shows `unresolved` (lines 2191 and 2199).
+
+### 8.7 Release status
+
+- **Not authorized.** Nothing is deployed and no managed database is touched.
+- **D-P2-13 A.** CN-P2 is not deployed to production until the store-wide credit-activity read, built in its own slice (D-P2-2 A), passes its gate. That slice has no contract yet (§4.2 states its needs only); it needs a route and key, a definer routine in a new migration 039 (not created), a DA-132 direct-read entry and 038-style cutover steps.
+- **D-P2-14.** The cross-owner duplicate residual is accepted for building and synthetic verification only; its production handling is an open owner decision.
+- **Withdrawal.** CN-P3 is not built, so an extra or mistaken note cannot be withdrawn from the shop.
+- **Gates.** 37: 29 OPEN, 7 PARTIAL, 1 PASS; none changes. ICH-11 UNVERIFIED; CN-38 a deployment prerequisite; G-APPSEC PARTIAL and production-blocking; F-2 and F-5 missing inputs; G-A11Y OPEN.
+
+### 8.8 Residuals found and not changed
+
+- When a chain answer closes the confirmation, focus can rest on the Payments heading before it reaches the card heading (two moves; the final target is right).
+- In development builds only (React StrictMode), opening the confirmation can focus the Payments heading for a moment. The QA harness serves a production build.
+- Not staged by any test: a store switch during a denial's session check, a cross-store send after a denial, and an attempt switch with identical card words.
+- D-P2-10 A leaves other sign-ins (issuing settings, customer levels, other tabs) able to detach a credit-note attempt; recovery then goes through the lookup.
+
+### 8.9 Not claimed
+
+A commit, a push, a CI run, a full green run on the final tree, QA acceptance or UAT, crash durability of a QA run, the browser behaviour of P2-81 to P2-83 beyond what §8.3 records, P2-52, a screen-reader pass, deployment, production readiness, M7b completion, or any legal or tax meaning of a credit note (F-2).
+
+---
+
 ## Drafter's notes
 
 1. **D-P2-9 exists because the shop has no sign-in time.** No `authenticatedAt` reaches `src/tenant`. Without a shop-timed sign-in, Check again could not be offered with a known window. Option B keeps fewer sign-ins but makes Check again blind.
@@ -836,7 +992,7 @@ Adoption rescan (2026-11-16): 75 table rows, 107 strings, 1,412 checks, 3 trips;
 
 ## Not claimed
 
-- No implementation, test run, CI run, push, deployment or managed-database change; the only commit is this document's local, docs-only adoption commit. No row in §5 has run.
+- No implementation, test run, CI run, push, deployment or managed-database change; the only commit is this document's local, docs-only adoption commit. No row in §5 has run. *(As at adoption, 2026-11-16. §8 records the implementation in an uncommitted candidate and its local runs; there is still no commit, push, CI run or deployment.)*
 - The browser behaviour of P2-81 to P2-83 is not established by the source trace in §3.6 or by any component or HTTP row.
 - The baseline was confirmed before drafting and again at adoption (2026-11-16): remote `main` at `8148eebb0cb7270cd96acdbed912f5afcb8818ee`, and run 43778230600 (push to `main`, attempt 1) completed with success on that commit.
 - No gate changes status: 37 gates, 29 OPEN, 7 PARTIAL, 1 PASS. ICH-11 stays UNVERIFIED. CN-38 stays a deployment prerequisite. G-APPSEC stays PARTIAL and production-blocking. F-2 and F-5 stay missing inputs. G-A11Y stays OPEN.

@@ -780,10 +780,12 @@ export interface DialogFrameProps {
   readonly initialFocus?: RefObject<HTMLElement | null>;
   /** Where focus goes when the dialog closes, when the element that had it before is gone. */
   readonly returnFocus?: RefObject<HTMLElement | null>;
+  /** Close: `returnFocus` first — at once when usable, else after the commit — the element that had focus before only after it. Default false: unchanged. */
+  readonly preferReturnFocus?: boolean;
   readonly children: ReactNode;
 }
 
-export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, children }: DialogFrameProps) {
+export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, anchor = 'center', busy = false, onClose, initialFocus, returnFocus, preferReturnFocus = false, children }: DialogFrameProps) {
   const overlay = useRef<HTMLDivElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
   const opener = useRef<HTMLElement | null>(null);
@@ -807,14 +809,18 @@ export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, 
     const before = opener.current;
     (initialFocus?.current ?? dialog.current)?.focus();
     return () => {
+      const usable = (node: HTMLElement | null | undefined): node is HTMLElement =>
+        node != null && node.isConnected && node !== document.body && !(node as HTMLButtonElement).disabled && node.closest('[inert]') === null;
+      // `preferReturnFocus`: straight to `returnFocus` now (its inert marks went in the layout cleanup), so no other
+      // recovery moves focus first; else, and by default, as below.
+      const now = preferReturnFocus ? returnFocus?.current : null;
+      if (usable(now)) { now.focus(); return; }
       // After the commit that removed the dialog (and its inert marks): what had focus before, unless it is gone or
       // disabled meanwhile (New server draft while an attempt is unconfirmed), else `returnFocus`.
       setTimeout(() => {
         // Never into an inert page: when another dialog has opened in this one's place (Edit, a confirmed save), focus
         // is that dialog's.
-        const usable = (node: HTMLElement | null | undefined): node is HTMLElement =>
-          node != null && node.isConnected && node !== document.body && !(node as HTMLButtonElement).disabled && node.closest('[inert]') === null;
-        const target = usable(before) ? before : returnFocus?.current;
+        const target = preferReturnFocus ? (usable(returnFocus?.current) ? returnFocus?.current : before) : usable(before) ? before : returnFocus?.current;
         if (usable(target)) target.focus();
       }, 0);
     };
@@ -865,7 +871,14 @@ export function DialogFrame({ labelledBy, role = 'dialog', describedBy, testId, 
     const first = stops[0];
     const last = stops[stops.length - 1];
     const at = document.activeElement;
-    if (!stops.some((stop) => stop === at)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+    if (!stops.some((stop) => stop === at)) {
+      e.preventDefault();
+      // From a non-stop inside (a heading focused by script): on from it in document order, as the browser would (QA r2 items 12, 16).
+      const inside = at !== null && at !== dialog.current && dialog.current.contains(at);
+      const next = inside ? stops.find((stop) => (at.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) : undefined;
+      const prev = inside ? [...stops].reverse().find((stop) => (at.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_PRECEDING) !== 0) : undefined;
+      (e.shiftKey ? prev ?? last : next ?? first).focus();
+    }
     else if (e.shiftKey && at === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
   }

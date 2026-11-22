@@ -84,6 +84,8 @@
 // second id segment, {creditNoteId}, matched by the same last rule), GET …/invoices/{id}/credit-note-registration-proof, GET
 // /api/v1/stores/{storeId}/credit-note-attempts and GET …/invoices/{id}/credit-notes — thirty-one store templates, thirteen of
 // them commands. The credit-note registration and issue join the SESSION_BOUND_STORE_COMMANDS (four).
+// M7B credit activity (docs/phase-4/18 §5.1, migration 039) adds one: GET /api/v1/stores/{storeId}/credit-notes, the
+// store-wide credit-activity read beside the attempts read — thirty-two store templates, thirteen of them commands.
 // M7B-INVOICES-P1 — ONE CLOSED SESSION-ROUTE EXCEPTION, THE STORE DIRECTORY: GET /api/v1/stores is the only session route
 // beside the current-session and logout endpoints that declares no authorization. It must declare the session binding (its
 // handler receives the presenting session's session key, RouteContext.sessionKey, and nothing else that names authority,
@@ -531,6 +533,8 @@ const STORE_TEMPLATED_ROUTES: ReadonlySet<string> = new Set([
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-note-settlement`,
   `POST ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes${CREDIT_NOTE_ID_SEGMENT}/withdrawal`,
   `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/invoices${PATH_ID_SEGMENT}/credit-notes`,
+  // M7B credit activity (doc 18, migration 039): the store-wide credit-activity read (no invoice segment).
+  `GET ${STORE_DIRECTORY_PATH}${STORE_SEGMENT}/credit-notes`,
 ]);
 /**
  * The store templates that are idempotency-required COMMANDS: a closed set of exactly the draft create, the draft edit,
@@ -798,7 +802,7 @@ function parseDefinition(raw: unknown): RouteDefinition {
   if (typeof method !== 'string' || !METHODS.has(method)) throw new EnforcementSetupError('route_method_invalid');
   if (typeof path !== 'string' || path.length > MAX_PATH_LENGTH) throw new EnforcementSetupError('route_path_invalid');
   // A template registers only as itself — one declared (method, path) — and a literal path never anywhere below one. A
-  // store template (M7B-INVOICES-P1) is one of exactly thirty-one declared strings (M7B-CREDITNOTES-P1), so its grammar is that set's.
+  // store template (M7B-INVOICES-P1) is one of exactly thirty-two declared strings (doc 18's credit activity), so its grammar is that set's.
   const key = `${method} ${path}`;
   const storeTemplated = path.includes(STORE_SEGMENT);
   const templated = !storeTemplated && path.includes(PATH_ID_SEGMENT);
