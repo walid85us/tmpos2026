@@ -89,6 +89,10 @@ jobs:
       - name: Typecheck contract (selected config + React types must be explicit)
         run: npm run typecheck:contract
       - name: Typecheck (ratchet — must be zero)
+        # CN-P2 — the root typecheck needs ~2.16 GB of heap (observed), just over Node 20's ~2.1 GB default limit: N''' passed
+        # narrowly and the next candidate ran out of memory. This step only gets 3.5 GB; peak RSS measured ~2.3 GB.
+        env:
+          NODE_OPTIONS: --max-old-space-size=3584
         run: npm run typecheck
       - name: Deterministic tests (existing suites)
         run: npm run test:existing
@@ -623,6 +627,22 @@ jobs:
           TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
           TM_POS_TEST_DATABASE_KIND: ci-disposable-service
         run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteHttp.integration.test.mjs
+      # M7B credit activity read (doc 18) — migration 039's store credit activity routine, then the read over real loopback HTTP
+      # on the tenant entry, against the SAME disposable service. They run AFTER the credit-note steps above (whose teardowns leave
+      # no credit-note evidence, which 038's down needs) and BEFORE the proof-durability and browser steps. The routine suite rolls
+      # 039 back and re-applies it itself (CA-18), so it runs BEFORE the HTTP suite, which needs 039 applied and installs its own
+      # proof key; both leave 001-039 applied, no credit-note evidence and no proof key. Each checks the durability settings itself.
+      # Synthetic data and keys made at run time only. Same binding, no new service, no secret, no permission change.
+      - name: Store credit activity routine against disposable PostgreSQL (M7B credit activity read)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/storeCreditActivityRoutine.integration.test.mjs
+      - name: Store credit activity over HTTP against the tenant entry and disposable PostgreSQL (M7B credit activity read)
+        env:
+          TM_POS_TEST_DATABASE_URL: postgres://tmpos_s1b_owner@127.0.0.1:5432/tmpos_s1b_ci
+          TM_POS_TEST_DATABASE_KIND: ci-disposable-service
+        run: node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/storeCreditActivityHttp.integration.test.mjs
       # M7B-PAYMENTS-P2 (PRQ-1) — the proof-durability suite: the registration's commit flushed to disk before a proof is issued,
       # measured with pg_walinspect on one 16 MB-segment cluster and one 64 MB-segment cluster. A WAL segment size is fixed by initdb
       # and the harness never reconfigures a supplied target (it refuses a segment size on one), so this step names NO

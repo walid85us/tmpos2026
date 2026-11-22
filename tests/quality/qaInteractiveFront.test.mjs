@@ -40,7 +40,13 @@ const API_ROUTES = [
   { method: 'GET', path: '/api/v1/customers' },
   { method: 'POST', path: '/api/v1/customers' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/void' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement' },
+  { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal' },
 ];
+const CN_BASE = `/api/v1/stores/${STORE}/invoices/${INVOICE}`;
+const CN_STEPS = { register: ['credit-note-registrations', 201], issue: ['credit-notes', 201], settlement: ['credit-note-settlement', 200] };
 
 let tmp;
 let staticDir;
@@ -141,6 +147,10 @@ test.before(async () => {
 
   api = fakeUpstream((req, res) => {
     if (req.url.startsWith(VOID_PATH)) return json(200, { voided: true })(req, res);
+    if (req.url.startsWith(CN_BASE) && req.method === 'POST') {
+      const hit = Object.values(CN_STEPS).find(([seg]) => req.url === `${CN_BASE}/${seg}`);
+      return json(hit ? hit[1] : 200, { cn: true })(req, res);
+    }
     if (req.url.endsWith('?hop=1')) {
       return json(200, { ok: true }, { connection: 'x-foo', 'x-foo': 'listed', 'keep-alive': 'timeout=77', 'set-cookie': ['a=1; Path=/'] })(req, res);
     }
@@ -475,6 +485,66 @@ test('fault held-void: the upstream commits, the browser socket is destroyed, th
   const second = await send({ method: 'POST', target: VOID_PATH, headers: { host: HOST, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(second.status, 200);
   assert.deepEqual(JSON.parse(second.body), { voided: true });
+});
+
+for (const [step, [segment, status]] of Object.entries(CN_STEPS)) {
+  test(`fault held-credit-note ${step}: the upstream commits (${status}), the browser socket is destroyed, then one shot only`, async () => {
+    faults.arm({ kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step, label: `cn-${step}` });
+    assert.throws(() => faults.arm({ kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step, label: 'again' }));
+    const before = api.received.length;
+    const first = await send({ method: 'POST', target: `${CN_BASE}/${segment}`, headers: { host: HOST, 'content-type': 'application/json' }, body: '{"x":1}' });
+    assert.ok(first.error, 'no response at all');
+    assert.equal(first.status, undefined);
+    assert.equal(api.received.length, before + 1);
+    assert.equal(api.received[before].body, '{"x":1}');
+    const snap = faults.snapshot();
+    assert.equal(snap.armed, null);
+    const entry = snap.entries.at(-1);
+    assert.equal(entry.kind, 'held-credit-note');
+    assert.equal(entry.label, `cn-${step}`);
+    assert.equal(entry.step, step);
+    assert.equal(entry.upstreamStatus, status);
+    assert.equal(entry.committed, true);
+    const second = await send({ method: 'POST', target: `${CN_BASE}/${segment}`, headers: { host: HOST, 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(second.status, status);
+  });
+}
+
+test('fault held-credit-note: only the armed step is taken; other steps, withdrawal, void and GETs pass through and leave it armed', async () => {
+  faults.arm({ kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step: 'issue', label: 'cn-only-issue' });
+  const post = (target) => send({ method: 'POST', target, headers: { host: HOST, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal((await post(`${CN_BASE}/credit-note-registrations`)).status, 201);
+  assert.equal((await post(`${CN_BASE}/credit-note-settlement`)).status, 200);
+  assert.equal((await post(`${CN_BASE}/credit-notes/cn-1/withdrawal`)).status, 200);
+  assert.equal((await post(VOID_PATH)).status, 200);
+  assert.equal((await post(`/api/v1/stores/other-store/invoices/${INVOICE}/credit-notes`)).status, 200, 'another store is not the armed one');
+  assert.equal((await post(`/api/v1/stores/${STORE}/invoices/other-inv/credit-notes`)).status, 200, 'another invoice is not the armed one');
+  assert.equal((await send({ target: `${CN_BASE}/credit-notes` })).status, 404, 'GET is not a listed route here');
+  assert.deepEqual(faults.snapshot().armed, { kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step: 'issue', label: 'cn-only-issue' });
+  await faults.disarm();
+});
+
+test('fault held-credit-note: a withdrawal or unknown step is refused at arm time, as are bad ids and labels', () => {
+  const base = { kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, label: 'x' };
+  for (const step of ['withdrawal', 'withdraw', 'void', '', undefined, 'toString', '__proto__']) {
+    assert.throws(() => faults.arm({ ...base, step }), TypeError, String(step));
+  }
+  assert.throws(() => faults.arm({ ...base, step: 'issue', invoiceId: '../x' }), TypeError);
+  assert.throws(() => faults.arm({ ...base, step: 'issue', storeId: undefined }), TypeError);
+  assert.throws(() => faults.arm({ ...base, step: 'issue', label: '' }), TypeError);
+  assert.equal(faults.snapshot().armed, null, 'a refused arm leaves nothing armed');
+});
+
+test('fault held-credit-note: an upstream that answers another status is recorded committed false; no answer is committed null', async () => {
+  const hooks = Object.getOwnPropertySymbols(faults).map((k) => faults[k]).find((h) => h && typeof h.takeCreditNote === 'function');
+  assert.ok(hooks, 'hooks reachable for a direct shape check');
+  faults.arm({ kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step: 'register', label: 'cn-rec' });
+  assert.equal(hooks.takeCreditNote('GET', `${CN_BASE}/credit-note-registrations`), null, 'only POST');
+  hooks.takeCreditNote('POST', `${CN_BASE}/credit-note-registrations`).record(409);
+  assert.equal(faults.snapshot().entries.at(-1).committed, false);
+  faults.arm({ kind: 'held-credit-note', storeId: STORE, invoiceId: INVOICE, step: 'settlement', label: 'cn-rec2' });
+  hooks.takeCreditNote('POST', `${CN_BASE}/credit-note-settlement`).record(null, 'x');
+  assert.equal(faults.snapshot().entries.at(-1).committed, null);
 });
 
 const signIn = (email) => send({

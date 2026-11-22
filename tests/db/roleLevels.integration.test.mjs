@@ -50,7 +50,7 @@
 //            for a create holding the role row FOR SHARE; the create commits (201), the edit is refused on the database clock
 //            after the routine answered (503, level unchanged, no edit audit record, no completion, its lease kept: 409 for
 //            the same key within it); M7RLH-09b the same shape with the deadline far off commits both (201, 200);
-//   M7RLH-C1 the compiled tenant artifact serves exactly its forty-seven routes (the customer detail read since P4, the profile read
+//   M7RLH-C1 the compiled tenant artifact serves exactly its forty-eight routes (the customer detail read since P4, the profile read
 //            since P6, the customer edit since P7, the Invoices read-back since M5-INVOICES-AUTH-P1, the store directory and the three invoice-draft routes since
 //            M7B-INVOICES-P1, the drafts' creation eligibility since M7B-INVOICES-P1-R2, the draft edit and its edit eligibility
 //            since M7B-INVOICES-P2, the draft discard and its discard eligibility since M7B-INVOICES-DISCARD-P1, the issuing-settings read and
@@ -924,7 +924,7 @@ const EDIT_AUDIT = `new.action_id = '${EDIT_ACTION}'`;
 /** A route inventory as comparable lines. */
 const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.access} ${r.body} ${r.idempotency}`).sort();
 /**
- * The tenant artifact's forty-seven intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
+ * The tenant artifact's forty-eight intended routes, stated here once (M7A-CUSTOMERS-P3-R2: the owner's read-back; P4: the detail
  * read; P6: the profile read; P7: the customer edit; M5-INVOICES-AUTH-P1: the Invoices read-back; M7B-INVOICES-P1: the store
  * directory and the invoice drafts' list, read and save; M7B-INVOICES-P1-R2: the drafts' creation eligibility;
  * M7B-INVOICES-P2: the draft edit and its edit eligibility; M7B-INVOICES-DISCARD-P1: the draft discard and its discard eligibility;
@@ -932,9 +932,10 @@ const canonical = (routes) => [...routes].map((r) => `${r.method} ${r.path} ${r.
  * list and read; M7B-INVOICES-VOID-P1: the invoice void's eligibility read and the void itself; M7B-PAYMENTS-P1: the payment
  * eligibility, record, reversal eligibility, reversal and payments read; M7B-PAYMENTS-P2: the payment registration, its proof read, the settlement
  * and the staff member's attempts read; M7B-CREDITNOTES-P1: the credit-note registration, its proof read, the issue, the settlement, the
- * withdrawal, the list and the staff member's attempts read — seven more).
+ * withdrawal, the list and the staff member's attempts read — seven more; doc 18 (migration 039): the store-wide credit-activity
+ * read — one more).
  */
-const TENANT_FORTY_SEVEN = Object.freeze([
+const TENANT_FORTY_EIGHT = Object.freeze([
   // The seven M7B-INVOICES-ISSUE-P1 rows, the two M7B-INVOICES-VOID-P1 rows and the five M7B-PAYMENTS-P1 rows sit in canonical() sort order (the comparison sorts both sides, so the order here is not a shipping-order claim).
   'GET /api/v1/customers session none none',
   'GET /api/v1/customers/{id} session none none',
@@ -945,6 +946,7 @@ const TENANT_FORTY_SEVEN = Object.freeze([
   'GET /api/v1/session session none none',
   'GET /api/v1/stores session none none',
   'GET /api/v1/stores/{storeId}/credit-note-attempts session none none',
+  'GET /api/v1/stores/{storeId}/credit-notes session none none',
   'GET /api/v1/stores/{storeId}/invoice-drafts session none none',
   'GET /api/v1/stores/{storeId}/invoice-drafts/eligibility session none none',
   'GET /api/v1/stores/{storeId}/invoice-drafts/{id} session none none',
@@ -1915,8 +1917,8 @@ test('M7RLH-10: a stale version or another tenant\'s id is an UNSEALED 409 write
 // M7RLH-C1: the COMPILED tenant entry
 // ===========================================================================
 
-test('M7RLH-C1: the compiled tenant entry serves exactly its forty-seven routes — the owner\'s PUT, its read-back and the Invoices read-back among them — applies an owner\'s edit, reads it back, reads the Invoices defaults back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
-  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_FORTY_SEVEN], 'the source tenant inventory');
+test('M7RLH-C1: the compiled tenant entry serves exactly its forty-eight routes — the owner\'s PUT, its read-back and the Invoices read-back among them — applies an owner\'s edit, reads it back, reads the Invoices defaults back, and refuses the narrowed role\'s POST; the administrative inventory is still its eight routes', async () => {
+  assert.deepEqual(canonical(TENANT_SHIPPING_ROUTES), [...TENANT_FORTY_EIGHT], 'the source tenant inventory');
   // The administrative artifact is compiled from productionEntry.ts's SHIPPING_ROUTES: unchanged by this correction.
   assert.deepEqual(canonical(SHIPPING_ROUTES), [
     'GET /admin/v1/session session none none',
@@ -1942,13 +1944,13 @@ test('M7RLH-C1: the compiled tenant entry serves exactly its forty-seven routes 
     const kernel = await compiled('server/persistence/supervisedPgClient.js');
     const { runtimeClientOptions: compiledClientOptions } = await compiled('server/platform-identity/db.js');
     assert.notEqual(entry.startTenantEntry, startTenantEntry, 'the compiled module, not the source');
-    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_FORTY_SEVEN], 'the compiled inventory');
+    assert.deepEqual(canonical(entry.TENANT_SHIPPING_ROUTES), [...TENANT_FORTY_EIGHT], 'the compiled inventory');
 
     const { tenant, boss } = await shop('m7rlh-c1');
     const sales = await actor('m7rlh-c1-sales', [tenantGrant(tenant, 'sales_staff')]);
     const kernelModule = { createSupervisedPgClient: kernel.createSupervisedPgClient, MAX_POOLS: kernel.MAX_POOLS, runtimeClientOptions: compiledClientOptions };
     await withEntry({ start: entry.startTenantEntry, kernelModule }, async (ctx) => {
-      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_FORTY_SEVEN], 'the compiled entry serves exactly the forty-seven');
+      assert.deepEqual(canonical(ctx.result.routes), [...TENANT_FORTY_EIGHT], 'the compiled entry serves exactly the forty-eight');
       const s = await signIn(ctx, sales);
       const o = await signIn(ctx, boss);
       const name = nameOf('m7rlh-c1 default');

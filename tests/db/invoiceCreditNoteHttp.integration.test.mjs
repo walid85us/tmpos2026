@@ -37,6 +37,27 @@
 //          the voided invoice → invalid_state; the voided payments read is all zero;
 //   ICH-11 (CN-34 HTTP seam) NOT ATTEMPTED: the stale-call cutover variant over HTTP stays UNVERIFIED per doc 16 §8 (CN-34s2).
 //
+// M7B-CREDITNOTES-P2 (doc 17 §5, the H and DB clauses; the shop's own behaviour is the component and browser layers'):
+//   ICH-13 (P2-26) a settlement reply lost: same session, key and bytes replay it; a new sign-in's lookup shows the row's state;
+//          another owner sees no row of it and its settlement is 404;
+//   ICH-14 (P2-84, P2-33) a forced fresh register while the owner's row is open → sealed write_conflict; lookup → open
+//          version 1 → release → released; a later issue → sealed invalid_state; the slot then admits a new register;
+//   ICH-15 (P2-44) owner A's issue reply lost, owner B issues for the same intent: two notes, both listed, both in Remaining;
+//   ICH-16 (P2-70, HG) two registers of one owner held at the invoice header, both orders: the first 201, the second sealed
+//          write_conflict; the lookup during the hold lists neither; release of the winner admits a new register;
+//   ICH-17 (P2-71, P2-72, HG) release and issue of one attempt held at the header: release first → released, the late issue
+//          sealed invalid_state, no credit note; issue first → 201, the late release sealed write_conflict, then confirm;
+//   ICH-18 (P2-73, HG, DB audit count) two keys settling one attempt held at the header, both orders, release and confirm:
+//          both 200 with the same body, ONE transition and ONE audit row; a third key → unchanged, nothing but its completion;
+//   ICH-19 (P2-85, KA) a settlement key aged past its retention runs fresh → unchanged (no audit), not a replay;
+//   ICH-20 (P2-81) one session's cookie with another session's CSRF token → 403 forbidden, its body an authorization 403's;
+//   ICH-21 (P2-74, P2-75, DB51) list paging over seeded notes: 50 per page, nextCursor only with more, the new note on the
+//          last page by id and number, withdrawn notes listed, names per role (also when the viewer changes between pages),
+//          a demotion between pages → 401 (the session ended), cursor 400s;
+//   ICH-22 (P2-76, DB1k) lookup paging over 1,001 seeded rows: 20 full pages then one, keyset order, cursor 400s.
+//   HG = the OWNER holds the invoice's issued header FOR UPDATE while requests queue behind it (IVH's lever); KA = the OWNER
+//   ages a key's record past retention; DB51/DB1k = owner bulk seeds with 038's guards lifted, removed by cleanAll.
+//
 // It never touches a managed or remote database. Cleanup lifts 038's guards inside one owner transaction and removes every
 // credit note, withdrawal, registration and credit-note audit row it created, so 038's down can still run afterwards.
 // Run: flock <lock> env TMPDIR=/tmp node_modules/.bin/tsx scripts/run-db-tests.mjs tests/db/invoiceCreditNoteHttp.integration.test.mjs
@@ -273,7 +294,7 @@ async function teardown() {
         (select max(version) from public.schema_migrations) as latest,
         (select checksum from public.schema_migrations where version = '038')
           = ${REQUIRED_MIGRATIONS.find((m) => m.version === '038').checksum}::text as ledger_restored`;
-      assert.deepEqual({ ...state }, { notes: 0, withdrawals: 0, registrations: 0, cn_audits: 0, audits: 0, keys: 0, latest: '038', ledger_restored: true },
+      assert.deepEqual({ ...state }, { notes: 0, withdrawals: 0, registrations: 0, cn_audits: 0, audits: 0, keys: 0, latest: '039', ledger_restored: true },
         'no credit-note evidence anywhere (038\'s down can run), nothing of this suite left');
     });
   } finally {
@@ -319,7 +340,7 @@ await setupStep(async () => {
     await handle.dispose();
   }
   const [{ latest }] = await owner`select max(version) as latest from public.schema_migrations`;
-  assert.equal(latest, '038', 'migrations through 038 are applied');
+  assert.equal(latest, '039', 'migrations through 039 are applied');
   await owner.unsafe(DROP_RUNTIME_LOGIN);
   await owner.unsafe(`create role ${RUNTIME_LOGIN} login nosuperuser nocreatedb nocreaterole noreplication nobypassrls inherit`);
   await owner.unsafe(`grant tmpos_app to ${RUNTIME_LOGIN}`);
@@ -387,6 +408,19 @@ function send(port, method, path, headers, body) {
     });
     request.on('error', reject);
     request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy(new Error(`no reply within ${SEND_TIMEOUT_MS} ms: ${method} ${path.split('?')[0]}`)));
+    request.end(payload);
+  });
+}
+/** Sends a request and closes the connection as its reply begins, the body unread: the reply is lost (resolves on the close).
+ * The entry answers a command only after its COMMIT, so the reply is lost after the work is done. */
+function sendLosingReply(port, method, path, headers, body) {
+  const payload = Buffer.from(body, 'utf8');
+  return new Promise((resolve) => {
+    const request = http.request({ host: '127.0.0.1', port, method, path, headers: { 'content-length': String(payload.length), ...headers }, agent: false,
+      localAddress: randomLoopback() }, (res) => { res.destroy(); request.destroy(); });
+    request.on('error', () => {});
+    request.on('close', () => resolve(null));
+    request.setTimeout(SEND_TIMEOUT_MS, () => request.destroy());
     request.end(payload);
   });
 }
@@ -538,15 +572,15 @@ async function withEntry(fn, { env = {} } = {}) {
   });
   assert.equal(result.outcome, 'listening', JSON.stringify(result));
   const port = result.address.port;
-  /** A POST: `drop` removes named headers, `headers` overrides them (the CSRF cases). */
-  const unsafe = (s, path, body, key, { headers = {}, drop = [] } = {}) => {
+  /** A POST: `drop` removes named headers, `headers` overrides them (the CSRF cases); `lost` drops the connection unread. */
+  const unsafe = (s, path, body, key, { headers = {}, drop = [], lost = false } = {}) => {
     USED_KEYS.push({ key, principal: s.principal });
     const all = {
       host: TENANT_HOST, origin: TENANT_ORIGIN, 'sec-fetch-site': 'same-origin', [CSRF_HEADER]: CSRF_HEADER_VALUE, 'content-type': 'application/json',
       cookie: s.cookie, [SESSION_CSRF_HEADER]: s.csrf, 'idempotency-key': key, ...headers,
     };
     for (const name of drop) delete all[name];
-    return send(port, 'POST', path, all, typeof body === 'string' ? body : JSON.stringify(body));
+    return (lost ? sendLosingReply : send)(port, 'POST', path, all, typeof body === 'string' ? body : JSON.stringify(body));
   };
   const inv = (w, invoice) => `/api/v1/stores/${w.S}/invoices/${invoice}`;
   const ctx = {
@@ -695,26 +729,31 @@ function withdrawnOf(reply, invoice, cn, label, { replayed = false } = {}) {
   assert.equal(reply.headers['idempotent-replayed'], replayed ? 'true' : undefined, `${label}: replayed=${replayed}`);
   assertBaseline(reply, label);
 }
-/** The list's 200 for `invoice`: its notes (keys checked by the caller). */
-function notesOf(reply, invoice, label) {
+/** One page of the list's 200 for `invoice`: { invoice, creditNotes, nextCursor } (item keys checked by the caller). */
+function pageOf(reply, invoice, label) {
   assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
   assertBaseline(reply, label);
   const body = parseBody(reply, label);
   assert.deepEqual(Object.keys(body), ['invoice', 'creditNotes', 'nextCursor'], `${label}: the answer's keys`);
   assert.deepEqual(body.invoice, { id: invoice }, label);
-  assert.equal(body.nextCursor, null, label);
   for (const n of body.creditNotes) {
     assert.match(n.issuedAt, TIME_RE, `${label}: issuedAt`);
     assert.equal(n.grossCents, n.taxCents + n.netCents, `${label}: gross = tax + net`);
     if (n.withdrawal !== null) assert.match(n.withdrawal.withdrawnAt, TIME_RE, `${label}: withdrawnAt`);
   }
+  return body;
+}
+/** The list's 200 for `invoice`, one page only: its notes (keys checked by the caller). */
+function notesOf(reply, invoice, label) {
+  const body = pageOf(reply, invoice, label);
+  assert.equal(body.nextCursor, null, label);
   return body.creditNotes;
 }
 const OWNER_NOTE_KEYS = ['id', 'number', 'grossCents', 'taxCents', 'netCents', 'reason', 'issuedAt', 'issuedByName', 'withdrawal'];
 const OTHER_NOTE_KEYS = ['id', 'number', 'grossCents', 'taxCents', 'netCents', 'reason', 'issuedAt', 'withdrawal'];
-/** The caller's attempts at `w`'s store (the 200's exact keys). */
-async function attemptsOf(ctx, s, w, label) {
-  const reply = await ctx.attempts(s, w);
+/** One page of the caller's attempts at `w`'s store: { attempts, nextCursor } (the 200's exact keys). */
+async function attemptsPage(ctx, s, w, query, label) {
+  const reply = await ctx.attempts(s, w, query);
   assert.equal(reply.status, 200, `${label}: ${replyNote(reply)}`);
   assertBaseline(reply, label);
   const body = parseBody(reply, label);
@@ -724,8 +763,10 @@ async function attemptsOf(ctx, s, w, label) {
     assert.match(a.registeredAt, TIME_RE, label);
   }
   assert.ok(![...PROOFS].some((p) => reply.body.includes(p)), `${label}: never a proof`);
-  return body.attempts;
+  return body;
 }
+/** The caller's attempts at `w`'s store, first page (the 200's exact keys). */
+const attemptsOf = async (ctx, s, w, label) => (await attemptsPage(ctx, s, w, '', label)).attempts;
 /** The payments read's amounts and word (WIRE §8, the exact key order). */
 async function amountsOf(ctx, s, w, invoice, label) {
   const reply = await ctx.payments(s, w, invoice);
@@ -1418,14 +1459,21 @@ test('ICH-11 (CN-34s1/CN-34s2 HTTP variant): the stale payment or void call at t
 }, () => {});
 
 // ===========================================================================
-// ICH-23 / ICH-24: the write setting and the write log line (docs/phase-4/18 §6.6, §9.3.1, §9.3.4; D-CA-14 A, D-CA-18 C)
-// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only): authored without executing any test, typecheck or build.
+// M7B-CREDITNOTES-P2 (doc 17 §5): the H and DB clauses
 // ===========================================================================
 
-const recordsOf = (lines) => lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } });
-/** The credit_note_write lines of the request that `reply` answered. */
-const writeLinesOf = (ctx, reply) => recordsOf(ctx.lines).filter((r) => r.event === 'credit_note_write' && r.requestId === reply.headers['x-request-id']);
-const INSTANCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// --- HG: requests held at the invoice's issued header (IVH's lever, tests/db/invoiceVoidHttp.integration.test.mjs:948-1042) ---
+const WAIT_MS = 10_000;
+/** A command's lock_timeout and the margin a lever releases before it (IIH's and IVH's constants). */
+const COMMAND_LOCK_BOUND_MS = 1_400;
+const RELEASE_MARGIN_MS = 300;
+const ISSUED_TABLE = 'tmpos_invoice_issue.issued_invoice';
+/** Where a command waits: its credit-note routine (038 locks the issued header FOR UPDATE first), or its owner's standing. */
+const AT = Object.freeze({
+  register: /m7b_invoice_credit_note_register\(/, issue: /m7b_invoice_credit_note_issue\(/, settle: /m7b_invoice_credit_note_settle\(/,
+  hold: /m5_hold_tenant_standing\(/,
+});
+const quietly = (p) => { p.catch(() => {}); return p; };
 /** The OWNER takes `invoice`'s issued header FOR UPDATE and keeps it until `release()`. */
 async function holdHeader(invoice) {
   let taken;
@@ -1442,6 +1490,503 @@ async function holdHeader(invoice) {
   assert.ok(!('early' in first), 'the header hold was taken');
   return { pid: first.pid, release: () => { go(); return done; } };
 }
+/** The runtime backend running `at` once it waits for a lock `by` holds (fails at once if `pending` answers instead). */
+async function waitingPid(pending, by, at, label) {
+  let answered = null;
+  pending.then((r) => { answered = replyNote(r); }, () => { answered = 'no reply'; });
+  for (const end = Date.now() + WAIT_MS; Date.now() < end; await delay(5)) {
+    assert.ok(answered === null, `${label}: answered instead of waiting (${answered})`);
+    const rows = await owner`select pid, query from pg_catalog.pg_stat_activity
+      where usename = ${RUNTIME_LOGIN} and wait_event_type = 'Lock' and ${by}::int = any(pg_catalog.pg_blocking_pids(pid))`;
+    const hit = rows.find((r) => at.test(r.query));
+    if (hit !== undefined) return hit.pid;
+  }
+  return assert.fail(`${label}: not waiting within ${WAIT_MS} ms`);
+}
+const waitsOf = async (pid) => (await owner`select l.locktype, l.mode, l.transactionid::text as xid, l.relation::regclass::text as relation
+  from pg_catalog.pg_locks l where l.pid = ${pid} and not l.granted`).map((r) => ({ ...r }));
+/** `waiter` waits for exactly `holder`'s transaction: it goes on only once `holder` has ended. */
+async function assertWaitsFor(waiter, holder, label) {
+  const [{ xid }] = await owner`select backend_xid::text as xid from pg_catalog.pg_stat_activity where pid = ${holder}`;
+  assert.ok(xid !== null, `${label}: the transaction it waits for has an id`);
+  assert.deepEqual(await waitsOf(waiter), [{ locktype: 'transactionid', mode: 'ShareLock', xid, relation: null }], `${label}: waits for exactly that transaction`);
+}
+/** `first` then `second` (the same owner's) sent while the OWNER holds `invoice`'s header — first waiting at the header, second
+ * waiting for first — `during()` runs while both wait; then the hold ends: [first's reply, second's reply]. */
+async function raced(invoice, first, second, during = async () => {}) {
+  const h = await holdHeader(invoice);
+  let one;
+  let two;
+  try {
+    one = quietly(first.send());
+    const onePid = await waitingPid(one, h.pid, first.at, first.label);
+    await assertWaitsFor(onePid, h.pid, `${first.label} (behind the hold)`);
+    const [{ n }] = await owner`select count(*)::int as n from pg_catalog.pg_locks l where l.pid = ${onePid} and l.granted
+      and l.locktype = 'tuple' and l.mode = 'AccessExclusiveLock' and l.relation = ${ISSUED_TABLE}::regclass`;
+    assert.equal(n, 1, `${first.label}: first in the issued header's queue (its tuple lock)`);
+    two = quietly(second.send());
+    // A command holds its owner's standing (016's m5_hold_tenant_standing: app_user FOR UPDATE) before its routine, so the same
+    // owner's second request waits there, for the first's transaction.
+    await assertWaitsFor(await waitingPid(two, onePid, AT.hold, second.label), onePid, `${second.label} (behind the first)`);
+    await during();
+    const [{ left }] = await owner`select (extract(epoch from l.waitstart + ${COMMAND_LOCK_BOUND_MS}::int * interval '1 millisecond'
+      - pg_catalog.clock_timestamp()) * 1000)::float8 as left from pg_catalog.pg_locks l where l.pid = ${onePid} and not l.granted`;
+    assert.ok(left > RELEASE_MARGIN_MS, `${first.label}: released ${Math.round(left)} ms before its lock bound (database clock)`);
+  } finally {
+    await h.release();
+  }
+  return [await one, await two];
+}
+
+// --- KA: a key's record aged past its retention (IVH's lever, tests/db/invoiceVoidHttp.integration.test.mjs:1046-1048) ---
+async function expireRetention(key, principal) {
+  const rows = await owner`update tmpos_internal.idempotency_record
+    set lease_expires_at = pg_catalog.clock_timestamp() - interval '2 seconds', expires_at = pg_catalog.clock_timestamp() - interval '1 second'
+    where scope = ${scopeOf(key, principal)} returning 1 as one`;
+  assert.equal(rows.length, 1, 'the key\'s record aged past its retention');
+}
+
+// --- DB51 / DB1k: owner bulk seeds inside one transaction with 038's guards lifted (cleanAll removes them with the tenant) ---
+/** DB51: `n` confirmed credit notes of `who` on `invoice` (gross 1 = tax 0 + net 1), numbered on from the store's counter,
+ * issued 1..n microseconds after the invoice (so before any later issue); the `withdrawn` (1-based) withdrawn by `who`. */
+async function seedNotes(w, invoice, who, n, withdrawn = []) {
+  const regs = Array.from({ length: n }, () => randomUUID());
+  const attempts = Array.from({ length: n }, () => randomUUID());
+  const notes = Array.from({ length: n }, () => randomUUID());
+  await owner.begin(async (sql) => withTriggersLifted(sql, CN_GUARDS, async () => {
+    const [{ last }] = await sql`select coalesce((select c.last_number from tmpos_invoice_credit_note.invoice_credit_note_counter c
+      where c.tenant_id = ${w.T} and c.store_id = ${w.S}), 0)::int as last`;
+    await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_registration (registration_id, tenant_id, store_id, invoice_id,
+        registered_by, attempt_id, gross_cents, reason_code, session_digest, key_generation, registered_xact, registered_at, acknowledged_at)
+      select s.r, ${w.T}, ${w.S}, ${invoice}, ${who.id}, s.a, 1, 'goodwill', pg_catalog.sha256(pg_catalog.convert_to(s.r::text, 'UTF8')),
+        (select k.generation from tmpos_invoice_payment.payment_proof_key k where k.singleton), pg_catalog.pg_current_xact_id(),
+        i.issued_at + s.n * interval '1 microsecond', i.issued_at + s.n * interval '1 microsecond'
+      from unnest(${regs}::uuid[], ${attempts}::uuid[]) with ordinality as s(r, a, n)
+      join tmpos_invoice_issue.issued_invoice i on i.invoice_id = ${invoice}`;
+    await sql`insert into tmpos_invoice_credit_note.invoice_credit_note (credit_note_id, tenant_id, store_id, invoice_id, attempt_id, registration_id,
+        credit_note_number, gross_cents, tax_cents, net_cents, reason_code, issued_at, issued_by)
+      select s.c, g.tenant_id, g.store_id, g.invoice_id, g.attempt_id, g.registration_id, ${last}::bigint + s.n, 1, 0, 1, g.reason_code,
+        g.registered_at, g.registered_by
+      from unnest(${regs}::uuid[], ${notes}::uuid[]) with ordinality as s(r, c, n)
+      join tmpos_invoice_credit_note.invoice_credit_note_registration g on g.registration_id = s.r`;
+    await sql`update tmpos_invoice_credit_note.invoice_credit_note_registration g set credit_note_id = c.credit_note_id
+      from tmpos_invoice_credit_note.invoice_credit_note c where c.registration_id = g.registration_id and g.registration_id = any(${regs}::uuid[])`;
+    await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_withdrawal (credit_note_id, tenant_id, store_id, invoice_id, reason_code,
+        withdrawn_at, withdrawn_by)
+      select c.credit_note_id, c.tenant_id, c.store_id, c.invoice_id, 'entered_in_error', c.issued_at, c.issued_by
+      from tmpos_invoice_credit_note.invoice_credit_note c where c.credit_note_id = any(${withdrawn.map((k) => notes[k - 1])}::uuid[])`;
+    await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_counter (tenant_id, store_id, last_number) values (${w.T}, ${w.S}, ${last + n})
+      on conflict (tenant_id, store_id) do update set last_number = excluded.last_number`;
+  }));
+  return notes;
+}
+/** DB1k: `n` released registrations of `who` on `invoice` (no credit note), registered and settled 1..n microseconds after the
+ * invoice — inside the lookup's 24-hour window, in this keyset order. */
+async function seedAttempts(w, invoice, who, n) {
+  const attempts = Array.from({ length: n }, () => randomUUID());
+  await owner.begin(async (sql) => withTriggersLifted(sql, CN_GUARDS, () => sql`insert into tmpos_invoice_credit_note.invoice_credit_note_registration
+      (registration_id, tenant_id, store_id, invoice_id, registered_by, attempt_id, gross_cents, reason_code, session_digest, key_generation,
+       registered_xact, registered_at, acknowledged_at)
+    select pg_catalog.gen_random_uuid(), ${w.T}, ${w.S}, ${invoice}, ${who.id}, s.a, 1, 'goodwill', pg_catalog.sha256(pg_catalog.convert_to(s.a::text, 'UTF8')),
+      (select k.generation from tmpos_invoice_payment.payment_proof_key k where k.singleton), pg_catalog.pg_current_xact_id(),
+      i.issued_at + s.n * interval '1 microsecond', i.issued_at + s.n * interval '1 microsecond'
+    from unnest(${attempts}::uuid[]) with ordinality as s(a, n) join tmpos_invoice_issue.issued_invoice i on i.invoice_id = ${invoice}`));
+  return attempts;
+}
+
+const lookupRow = async (ctx, s, w, attempt, label) => (await attemptsOf(ctx, s, w, label)).find((a) => a.attemptId === attempt);
+const stateOf = (a) => [a?.state, a?.version, a?.settledAt === null, a?.creditNote?.id ?? null];
+
+// ===========================================================================
+// ICH-13: P2-26
+// ===========================================================================
+
+test('ICH-13 (P2-26 H): a settlement whose reply is lost — release and confirm — is answered by a Check again in the same session with the same key and bytes (the stored 200, Idempotent-Replayed: true, nothing written); after a new sign-in of the same owner the lookup shows the row\'s settled state; another store-scope owner sees no row of it and its settlement of that attempt is 404; a manager\'s lookup is 403', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich13');
+    const o = await storeOwner(w, 'o');
+    const s1 = await signIn(ctx, o);
+    const x = await issueOne(ctx, w.sm, w, 'ich13 x');
+    const subjects = [];
+    for (const [label, version, target] of [['release', 1, 'released'], ['confirm', 2, 'confirmed']]) {
+      const r = version === 1 ? await registeredWithProof(ctx, s1, w, x, 600, `P2-26 ${label}`) : await credited(ctx, s1, w, x, 400, `P2-26 ${label}`);
+      const bytes = JSON.stringify(settleBody(w, r.attempt, version));
+      const k = randomUUID();
+      // The first send commits; the connection closes as its reply begins (lost).
+      await writes([w.T], keyOf(s1, k), { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 1 }, `P2-26 ${label}: the lost send`,
+        () => ctx.settle(s1, w, x, bytes, k, { lost: true }));
+      await writes([w.T], keyOf(s1, k), NOTHING, `P2-26 ${label}: Check again`, async () => {
+        settledOf(await ctx.settle(s1, w, x, bytes, k), x, r.attempt, target, `P2-26 ${label}: Check again replays the stored 200`, { replayed: true });
+      });
+      subjects.push({ r, target, version });
+    }
+    // A new sign-in of the same owner: "Look up attempt" shows each row's settled state.
+    const s2 = await signIn(ctx, o);
+    assert.ok(s2.key !== s1.key, 'a new session (values withheld)');
+    for (const { r, target } of subjects) {
+      assert.deepEqual(stateOf(await lookupRow(ctx, s2, w, r.attempt, `P2-26 ${target}: the new session's lookup`)),
+        [target, 3, false, r.creditNote ?? null], `P2-26 ${target}: the row's settled state, version 3`);
+    }
+    // Another principal: no row, no action.
+    const o2 = await storeOwner(w, 'o2');
+    const s3 = await signIn(ctx, o2);
+    const theirs = await attemptsOf(ctx, s3, w, 'P2-26 the other owner\'s lookup');
+    assert.ok(!theirs.some((a) => subjects.some(({ r }) => r.attempt === a.attemptId)), 'P2-26: the other owner\'s lookup lists no row of the first');
+    for (const { r, version } of subjects) {
+      const k = randomUUID();
+      await writes([w.T], keyOf(s3, k), LEASE_ONLY, 'P2-26 the other owner settles the first one\'s attempt',
+        async () => assertRefusal(await ctx.settle(s3, w, x, settleBody(w, r.attempt, version), k), 404, 'not_found', 'P2-26 another owner\'s settlement'));
+    }
+    assertRefusal(await ctx.attempts(w.sm, w), 403, 'forbidden', 'P2-26 the manager\'s lookup');
+  });
+});
+
+// ===========================================================================
+// ICH-14: P2-84 and P2-33
+// ===========================================================================
+
+test('ICH-14 (P2-84 H, P2-33 H): a forced fresh register (new key, new attempt) while the owner\'s registration on the invoice is open → sealed write_conflict, replayed under its key; the lookup shows the open row at version 1; a release with that version → released (version 3, no credit note); a later issue of that registration → sealed invalid_state; the freed slot admits a new register', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich14');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+    const x = await issueOne(ctx, w.sm, w, 'ich14 x');
+    const r = await registeredWithProof(ctx, s, w, x, 900, 'ich14 the open attempt');
+    const k1 = randomUUID();
+    const forced = JSON.stringify(regBody(w, randomUUID(), 900));
+    await writes([w.T], keyOf(s, k1), COMPLETION_ONLY, 'P2-84 the forced fresh register',
+      async () => sealedOf(await ctx.register(s, w, x, forced, k1), 'write_conflict', 'P2-84 a fresh register while the row is open'));
+    sealedOf(await ctx.register(s, w, x, forced, k1), 'write_conflict', 'P2-84 its replay', { replayed: true });
+    // P2-33: Look up attempt → the open row → Release attempt with the row's version.
+    const open = await lookupRow(ctx, s, w, r.attempt, 'P2-33 lookup');
+    assert.deepEqual(stateOf(open), ['open', 1, true, null], 'P2-33: the open row, version 1');
+    await writes([w.T], [], { ...NOTHING, RS: 1, SA: 1, AA: 1 }, 'P2-33 release',
+      async () => settledOf(await ctx.settle(s, w, x, settleBody(w, r.attempt, open.version)), x, r.attempt, 'released', 'P2-33 Release attempt'));
+    assert.deepEqual(stateOf(await lookupRow(ctx, s, w, r.attempt, 'P2-33 lookup after')), ['released', 3, false, null], 'P2-33: released, no credit note');
+    const k2 = randomUUID();
+    await writes([w.T], keyOf(s, k2), COMPLETION_ONLY, 'P2-33 a later issue',
+      async () => sealedOf(await ctx.issue(s, w, x, issueBody(w, r), k2), 'invalid_state', 'P2-33 the released registration issued later'));
+    const fresh = randomUUID();
+    registeredOf(await ctx.register(s, w, x, regBody(w, fresh, 900)), x, fresh, 900, 'pricing_error', 'P2-33 the freed slot admits a new register');
+  });
+});
+
+// ===========================================================================
+// ICH-15: P2-44
+// ===========================================================================
+
+test('ICH-15 (P2-44 H): owner A\'s issue commits with its reply lost; owner B issues for the same intent under its own attempt: two credit notes exist; both are listed for A, B and a manager (the owners see both issuers\' names); A\'s lookup finds A\'s note; Remaining counts both', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich15');
+    const oa = await storeOwner(w, 'oa');
+    const ob = await storeOwner(w, 'ob');
+    const sa = await signIn(ctx, oa);
+    const sb = await signIn(ctx, ob);
+    const x = await issueOne(ctx, w.sm, w, 'ich15 x');
+    const ra = await registeredWithProof(ctx, sa, w, x, 1200, 'P2-44 owner A');
+    const ka = randomUUID();
+    await writes([w.T], keyOf(sa, ka), { ...NOTHING, CN: 1, NB: 1, IA: 1, AA: 1, K: 1 }, 'P2-44 owner A\'s issue (reply lost on the wire)',
+      () => ctx.issue(sa, w, x, issueBody(w, ra), ka, { lost: true }));
+    const rb = await credited(ctx, sb, w, x, 1200, 'P2-44 owner B');
+    const [aRow] = (await attemptsOf(ctx, sa, w, 'P2-44 A\'s lookup')).filter((a) => a.attemptId === ra.attempt);
+    assert.deepEqual([aRow?.state, aRow?.version], ['issued', 2], 'P2-44: A\'s lookup finds A\'s attempt issued');
+    const ids = [aRow.creditNote.id, rb.creditNote];
+    assert.ok(ids[0] !== ids[1], 'two distinct credit notes');
+    for (const [who, sess, names] of [['owner A', sa, true], ['owner B', sb, true], ['the manager', w.sm, false]]) {
+      const notes = notesOf(await ctx.list(sess, w, x), x, `P2-44 ${who}'s list`);
+      assert.deepEqual(notes.map((n) => n.id).sort(), [...ids].sort(), `P2-44 ${who}: both notes listed`);
+      assert.deepEqual(notes.map((n) => n.grossCents), [1200, 1200], `P2-44 ${who}: both amounts`);
+      assert.deepEqual(notes.map((n) => n.issuedByName).sort(), names ? [oa.displayName, ob.displayName].sort() : [undefined, undefined], `P2-44 ${who}: issuer names per role`);
+    }
+    assert.deepEqual(await amountsOf(ctx, w.sm, w, x, 'P2-44 Remaining'),
+      { currency: 'USD', due: TOTAL, credited: 2400, applied: 0, remaining: TOTAL - 2400, status: 'no_payment_recorded' }, 'P2-44: Remaining counts both credits');
+  });
+});
+
+// ===========================================================================
+// ICH-16: P2-70 (HG)
+// ===========================================================================
+
+test('ICH-16 (P2-70 H, HG): an old and a new register of one owner on one invoice, queued behind the OWNER\'s lock of the invoice\'s issued header, in both orders: the first is the 201, the second the sealed write_conflict (one registration, one audit row); the lookup made while both wait lists no row for the invoice; the re-read shows only the winner open; releasing it admits a new register', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich16');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+    for (const [round, first, second] of [['(a) the old register first', 'old', 'new'], ['(b) the new register first', 'new', 'old']]) {
+      const x = await issueOne(ctx, w.sm, w, `ich16 ${round}`);
+      const attempt = { old: randomUUID(), new: randomUUID() };
+      const key = { old: randomUUID(), new: randomUUID() };
+      const send = (who) => ({ at: AT.register, label: `${round}: the ${who} register`, send: () => ctx.register(s, w, x, regBody(w, attempt[who], 700), key[who]) });
+      let during;
+      const [won, lost] = await writes([w.T], [...keyOf(s, key.old), ...keyOf(s, key.new)], { ...NOTHING, RG: 1, RA: 1, AA: 1, K: 2 }, round,
+        () => raced(x, send(first), send(second), async () => { during = (await attemptsOf(ctx, s, w, `${round}: lookup`)).filter((a) => a.invoiceId === x); }));
+      assert.deepEqual(during, [], `${round}: the lookup while the registers wait lists no row for the invoice`);
+      registeredOf(won, x, attempt[first], 700, 'pricing_error', `${round}: the ${first} register`);
+      sealedOf(lost, 'write_conflict', `${round}: the ${second} register (the slot is held)`);
+      const rows = (await attemptsOf(ctx, s, w, `${round}: the lookup re-read`)).filter((a) => a.invoiceId === x);
+      assert.deepEqual(rows.map((a) => [a.attemptId === attempt[first], a.state, a.version]), [[true, 'open', 1]], `${round}: only the ${first} row, open`);
+      settledOf(await ctx.settle(s, w, x, settleBody(w, attempt[first], 1)), x, attempt[first], 'released', `${round}: Release attempt`);
+      const next = randomUUID();
+      registeredOf(await ctx.register(s, w, x, regBody(w, next, 700)), x, next, 700, 'pricing_error', `${round}: a new register once released`);
+    }
+  });
+});
+
+// ===========================================================================
+// ICH-17: P2-71 and P2-72 (HG)
+// ===========================================================================
+
+test('ICH-17 (P2-71 H, P2-72 H, HG): a release and an issue of one open registration queued behind the OWNER\'s lock of the issued header — release first: 200 released, the in-flight issue sealed invalid_state, no credit note, the list and Remaining unchanged; issue first: 201, the in-flight release sealed write_conflict, the lookup shows it issued and Confirm → confirmed', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich17');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+    const release = (x, r, k) => ({ at: AT.settle, label: 'the release', send: () => ctx.settle(s, w, x, settleBody(w, r.attempt, 1), k) });
+    const issue = (x, r, k) => ({ at: AT.issue, label: 'the issue', send: () => ctx.issue(s, w, x, issueBody(w, r), k) });
+
+    // P2-71: the release reaches the header first.
+    const x = await issueOne(ctx, w.sm, w, 'ich17 x');
+    const r1 = await registeredWithProof(ctx, s, w, x, 800, 'P2-71');
+    const before = { notes: notesOf(await ctx.list(s, w, x), x, 'P2-71 list before'), amounts: await amountsOf(ctx, s, w, x, 'P2-71 amounts before') };
+    const k1 = { rel: randomUUID(), iss: randomUUID() };
+    const [rel1, iss1] = await writes([w.T], [...keyOf(s, k1.rel), ...keyOf(s, k1.iss)], { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 2 }, 'P2-71',
+      () => raced(x, release(x, r1, k1.rel), issue(x, r1, k1.iss)));
+    settledOf(rel1, x, r1.attempt, 'released', 'P2-71 the release answers 200 released');
+    sealedOf(iss1, 'invalid_state', 'P2-71 the late issue');
+    assert.deepEqual(stateOf(await lookupRow(ctx, s, w, r1.attempt, 'P2-71 lookup')), ['released', 3, false, null], 'P2-71: this attempt issued no credit note');
+    assert.deepEqual(notesOf(await ctx.list(s, w, x), x, 'P2-71 list after'), before.notes, 'P2-71: the list unchanged');
+    assert.deepEqual(await amountsOf(ctx, s, w, x, 'P2-71 amounts after'), before.amounts, 'P2-71: Remaining unchanged');
+
+    // P2-72: the issue reaches the header first.
+    const y = await issueOne(ctx, w.sm, w, 'ich17 y');
+    const r2 = await registeredWithProof(ctx, s, w, y, 800, 'P2-72');
+    const k2 = { rel: randomUUID(), iss: randomUUID() };
+    const [iss2, rel2] = await writes([w.T], [...keyOf(s, k2.rel), ...keyOf(s, k2.iss)], { ...NOTHING, CN: 1, NB: 1, IA: 1, AA: 1, K: 2 }, 'P2-72',
+      () => raced(y, issue(y, r2, k2.iss), release(y, r2, k2.rel)));
+    const cn = issuedOf(iss2, y, r2, 'P2-72 the issue');
+    sealedOf(rel2, 'write_conflict', 'P2-72 the late release');
+    const row = await lookupRow(ctx, s, w, r2.attempt, 'P2-72 lookup');
+    assert.deepEqual(stateOf(row), ['issued', 2, true, cn], 'P2-72: the lookup shows it issued');
+    settledOf(await ctx.settle(s, w, y, settleBody(w, r2.attempt, row.version)), y, r2.attempt, 'confirmed', 'P2-72 Confirm');
+  });
+});
+
+// ===========================================================================
+// ICH-18: P2-73 (HG, DB audit count)
+// ===========================================================================
+
+test('ICH-18 (P2-73 H and DB, HG): two settlements of one attempt under different keys, queued behind the OWNER\'s lock of the issued header, in both orders and for both targets (release, confirm): the lookup while they wait shows the old state; both answer 200 with the same exact body; exactly ONE transition and ONE audit row (the first in the queue applies, the second finds it settled: unchanged); a third fresh key → 200 unchanged with nothing but its completion', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich18');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+    const x = await issueOne(ctx, w.sm, w, 'ich18 x');
+    for (const [target, version, old] of [['released', 1, ['open', 1, true, null]], ['confirmed', 2, ['issued', 2, true]]]) {
+      for (const [order, first, second] of [['the in-flight key first', 'old', 'new'], ['the reloaded page\'s key first', 'new', 'old']]) {
+        const label = `P2-73 ${target}, ${order}`;
+        const r = version === 1 ? await registeredWithProof(ctx, s, w, x, 100, label) : await credited(ctx, s, w, x, 100, label);
+        const bytes = JSON.stringify(settleBody(w, r.attempt, version));
+        const key = { old: randomUUID(), new: randomUUID() };
+        const send = (who) => ({ at: AT.settle, label: `${label}: the ${who} key`, send: () => ctx.settle(s, w, x, bytes, key[who]) });
+        let during;
+        const replies = await writes([w.T], [...keyOf(s, key.old), ...keyOf(s, key.new)], { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 2 }, label,
+          () => raced(x, send(first), send(second), async () => { during = await lookupRow(ctx, s, w, r.attempt, `${label}: the fresh lookup`); }));
+        assert.deepEqual(stateOf(during), version === 1 ? old : [...old, r.creditNote], `${label}: the fresh lookup shows the old state`);
+        for (const [i, who] of [first, second].entries()) settledOf(replies[i], x, r.attempt, target, `${label}: the ${who} key → 200`);
+        assert.ok(replies[0].body === replies[1].body, `${label}: the transition and unchanged answer the same body`);
+        assert.equal((await auditsOf(w.T, A.settle, { reg: r.registration })).length, 1, `${label}: exactly one settle audit row (DB)`);
+        const k3 = randomUUID();
+        await writes([w.T], keyOf(s, k3), COMPLETION_ONLY, `${label}: a second fresh request`,
+          async () => settledOf(await ctx.settle(s, w, x, bytes, k3), x, r.attempt, target, `${label}: a third key → 200 unchanged`));
+        assert.equal((await auditsOf(w.T, A.settle, { reg: r.registration })).length, 1, `${label}: still one settle audit row`);
+      }
+    }
+  });
+});
+
+// ===========================================================================
+// ICH-19: P2-85 (KA)
+// ===========================================================================
+
+test('ICH-19 (P2-85 H, KA): a settlement replays under its key while retained; once the key\'s record is aged past its retention the same key and bytes run fresh — 200 unchanged, not a replay, no transition or audit row — and are retained again', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich19');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+    const x = await issueOne(ctx, w.sm, w, 'ich19 x');
+    const r = await registeredWithProof(ctx, s, w, x, 500, 'P2-85');
+    const bytes = JSON.stringify(settleBody(w, r.attempt, 1));
+    const k = randomUUID();
+    const first = await writes([w.T], keyOf(s, k), { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 1 }, 'P2-85 the settlement', async () => {
+      const reply = await ctx.settle(s, w, x, bytes, k);
+      settledOf(reply, x, r.attempt, 'released', 'P2-85 the settlement applies');
+      return reply;
+    });
+    settledOf(await ctx.settle(s, w, x, bytes, k), x, r.attempt, 'released', 'P2-85 within retention: a replay', { replayed: true });
+    await expireRetention(k, s.principal);
+    await writes([w.T], keyOf(s, k), NOTHING, 'P2-85 past retention', async () => {
+      const fresh = await ctx.settle(s, w, x, bytes, k);
+      settledOf(fresh, x, r.attempt, 'released', 'P2-85 past retention: runs fresh, unchanged');
+      assert.ok(fresh.body === first.body, 'P2-85: the same body as the applied settlement');
+    });
+    assert.equal((await auditsOf(w.T, A.settle, { reg: r.registration })).length, 1, 'P2-85: one settle audit row');
+    settledOf(await ctx.settle(s, w, x, bytes, k), x, r.attempt, 'released', 'P2-85 retained again: a replay', { replayed: true });
+  });
+});
+
+// ===========================================================================
+// ICH-20: P2-81
+// ===========================================================================
+
+test('ICH-20 (P2-81 H): two store-scope owners signed in; a request carrying one session\'s cookie and the other session\'s CSRF token — the lookup, the list and a settlement, each way round — is 403 forbidden with the CSRF reason, nothing written, its body identical to an authorization 403 but for the requestId', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich20');
+    const o1 = await storeOwner(w, 'o1');
+    const o2 = await storeOwner(w, 'o2');
+    const s1 = await signIn(ctx, o1);
+    const s2 = await signIn(ctx, o2);
+    const x = await issueOne(ctx, w.sm, w, 'ich20 x');
+    const r = await registeredWithProof(ctx, s1, w, x, 300, 'P2-81 subject');
+    const authz = await ctx.attempts(w.sm, w);
+    assertRefusal(authz, 403, 'forbidden', 'P2-81 an authorization 403 (the manager\'s lookup)');
+    assert.equal(ctx.reason(authz), 'authz_denied', 'P2-81: the authorizer\'s refusal');
+    const shape = (reply) => JSON.stringify({ ...parseBody(reply, 'shape'), requestId: '-' });
+    for (const [mix, mixed] of [['owner 1\'s cookie, owner 2\'s token', { ...s1, csrf: s2.csrf }], ['owner 2\'s cookie, owner 1\'s token', { ...s2, csrf: s1.csrf }]]) {
+      for (const [route, call] of [
+        ['lookup', () => ctx.attempts(mixed, w)],
+        ['list', () => ctx.list(mixed, w, x)],
+        ['settlement', (k) => ctx.settle(mixed, w, x, settleBody(w, r.attempt, 1), k)],
+      ]) {
+        const k = randomUUID();
+        await writes([w.T], keyOf(mixed, k), NOTHING, `P2-81 ${mix} ${route}`, async () => {
+          const reply = await call(k);
+          assertRefusal(reply, 403, 'forbidden', `P2-81 ${mix}, ${route}`);
+          assert.ok(shape(reply) === shape(authz) && reply.headers['content-type'] === authz.headers['content-type'],
+            `P2-81 ${mix}, ${route}: the body and type of an authorization 403`);
+          assert.equal(ctx.reason(reply), 'csrf_session_invalid', `P2-81 ${mix}, ${route}: the session CSRF check`);
+        });
+      }
+    }
+    assert.deepEqual(stateOf(await lookupRow(ctx, s1, w, r.attempt, 'P2-81 lookup')), ['open', 1, true, null], 'P2-81: the attempt untouched');
+  });
+});
+
+// ===========================================================================
+// ICH-21: P2-74 and P2-75 (DB51)
+// ===========================================================================
+
+test('ICH-21 (P2-74 H, P2-75 H, DB51): list paging over seeded credit notes — exactly 50 notes is one page with no cursor; 51 (two withdrawn) are 50 + 1 with nextCursor the 50th id, the new note alone on page 2 numbered 51, withdrawn notes listed, names for the owner and none for the manager; 101 are three pages with the new note last, page 2 read by the manager with the owner\'s cursor answering without names; a cursor naming no note of the invoice or malformed → 400; a demotion between pages → 401 session_version_mismatch', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich21');
+    const o = await storeOwner(w, 'o');
+    const s = await signIn(ctx, o);
+
+    // P2-74: 50 seeded, then the 51st issued over HTTP.
+    const x = await issueOne(ctx, w.sm, w, 'ich21 x');
+    const seeded = await seedNotes(w, x, o, 50, [2, 49]);
+    const full = pageOf(await ctx.list(s, w, x), x, 'P2-74 fifty notes');
+    assert.deepEqual([full.creditNotes.length, full.nextCursor], [50, null], 'P2-74: a full page with nothing after it carries no cursor');
+    const r = await credited(ctx, s, w, x, 500, 'P2-74 the 51st note');
+    for (const [who, sess, keys, wkeys] of [['the owner', s, OWNER_NOTE_KEYS, ['withdrawnAt', 'reason', 'withdrawnByName']], ['the manager', w.sm, OTHER_NOTE_KEYS, ['withdrawnAt', 'reason']]]) {
+      const one = pageOf(await ctx.list(sess, w, x), x, `P2-74 ${who} page 1`);
+      assert.deepEqual([one.creditNotes.length, one.nextCursor], [50, one.creditNotes[49]?.id], `P2-74 ${who}: 50 and the cursor of the 50th`);
+      const two = pageOf(await ctx.list(sess, w, x, `?after=${one.nextCursor}`), x, `P2-74 ${who} page 2`);
+      assert.equal(two.nextCursor, null, `P2-74 ${who}: page 2 is the last`);
+      const all = [...one.creditNotes, ...two.creditNotes];
+      assert.deepEqual(all.map((n) => n.id), [...seeded, r.creditNote], `P2-74 ${who}: oldest first, the new note alone on page 2`);
+      assert.deepEqual(all.map((n) => n.number), Array.from({ length: 51 }, (_, i) => i + 1), `P2-74 ${who}: CN-51 on the row whose id is the issue's`);
+      assert.deepEqual(all.filter((n) => n.withdrawal !== null).map((n) => n.number), [2, 49], `P2-74 ${who}: the withdrawn notes stay listed`);
+      for (const n of all) {
+        assert.deepEqual(Object.keys(n), keys, `P2-74 ${who}: the item's keys`);
+        if (n.withdrawal !== null) assert.deepEqual(Object.keys(n.withdrawal), wkeys, `P2-74 ${who}: the withdrawal's keys`);
+      }
+      if (sess === s) {
+        assert.ok(all.every((n) => n.issuedByName === o.displayName), 'P2-74 the owner: every issuer named');
+        assert.ok(all.every((n) => n.withdrawal === null || n.withdrawal.withdrawnByName === o.displayName), 'P2-74 the owner: every withdrawer named');
+      }
+    }
+
+    // P2-75: 100 seeded, then the 101st issued over HTTP; between pages 1 and 2 the view changes (the manager's session reads on).
+    const y = await issueOne(ctx, w.sm, w, 'ich21 y');
+    const ySeeded = await seedNotes(w, y, o, 100);
+    const r2 = await credited(ctx, s, w, y, 300, 'P2-75 the new note');
+    const p1 = pageOf(await ctx.list(s, w, y), y, 'P2-75 page 1 (owner)');
+    assert.deepEqual([p1.creditNotes.length, p1.nextCursor], [50, p1.creditNotes[49]?.id], 'P2-75 page 1: 50 and a cursor');
+    const p2 = pageOf(await ctx.list(w.sm, w, y, `?after=${p1.nextCursor}`), y, 'P2-75 page 2 (the manager, the owner\'s cursor)');
+    assert.deepEqual([p2.creditNotes.length, p2.nextCursor], [50, p2.creditNotes[49]?.id], 'P2-75 page 2: 50 and a cursor');
+    const p3 = pageOf(await ctx.list(s, w, y, `?after=${p2.nextCursor}`), y, 'P2-75 page 3 (owner)');
+    assert.equal(p3.nextCursor, null, 'P2-75: three page requests in total');
+    assert.deepEqual([...p1.creditNotes, ...p2.creditNotes, ...p3.creditNotes].map((n) => n.id), [...ySeeded, r2.creditNote], 'P2-75: the new note last');
+    assert.deepEqual(p3.creditNotes.map((n) => [n.id, n.number]), [[r2.creditNote, 152]], 'P2-75: CN-152 (the store\'s series) on page 3');
+    for (const [label, page, keys] of [['page 1 (owner): names', p1, OWNER_NOTE_KEYS], ['page 2 (manager): no name keys, one view per page', p2, OTHER_NOTE_KEYS],
+      ['page 3 (owner): names', p3, OWNER_NOTE_KEYS]]) {
+      assert.ok(page.creditNotes.every((n) => Object.keys(n).join() === keys.join() && (keys === OTHER_NOTE_KEYS || n.issuedByName === o.displayName)),
+        `P2-75 ${label}`);
+    }
+    for (const [label, query] of [['a cursor naming no credit note', `?after=${randomUUID()}`], ['a note of another invoice', `?after=${seeded[0]}`],
+      ['a malformed cursor', '?after=CN-1']]) {
+      assertRefusal(await ctx.list(s, w, y, query), 400, 'invalid_request', `P2-75 ${label}`);
+    }
+    // A role change between pages ends the session (its security version moved): the next page is the 401.
+    await owner`update user_membership set role_id = 'manager' where internal_user_id = ${o.id}`;
+    try {
+      const reply = await ctx.list(s, w, y, `?after=${p1.nextCursor}`);
+      assertRefusal(reply, 401, 'unauthenticated', 'P2-75 the next page after a demotion');
+      assert.equal(ctx.reason(reply), 'session_version_mismatch', 'P2-75: the demoted session is ended, not narrowed');
+    } finally {
+      await owner`update user_membership set role_id = 'store_owner' where internal_user_id = ${o.id}`;
+    }
+  });
+});
+
+// ===========================================================================
+// ICH-22: P2-76 (DB1k)
+// ===========================================================================
+
+test('ICH-22 (P2-76 H, DB1k): the lookup over 1,001 seeded rows of one owner — 20 full pages each with the cursor of its last row, then one row and no cursor; every row once, in keyset order, no cursor repeated, never another owner\'s row; a cursor naming no row of the caller (another owner\'s real row included) or malformed → 400', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich22');
+    const o = await storeOwner(w, 'o');
+    const other = await storeOwner(w, 'other');
+    const s = await signIn(ctx, o);
+    const x = await issueOne(ctx, w.sm, w, 'ich22 x');
+    const mine = await seedAttempts(w, x, o, 1001);
+    const [theirs] = await seedAttempts(w, x, other, 1);
+    const seen = [];
+    const cursors = [];
+    let query = '';
+    for (let page = 1; ; page += 1) {
+      assert.ok(page <= 21, 'P2-76: the walk ends by page 21');
+      const body = await attemptsPage(ctx, s, w, query, `P2-76 page ${page}`);
+      seen.push(...body.attempts);
+      if (body.nextCursor === null) {
+        assert.deepEqual([page, body.attempts.length], [21, 1], 'P2-76: page 21 holds the 1,001st row and no cursor');
+        break;
+      }
+      const last = body.attempts.at(-1);
+      assert.deepEqual([body.attempts.length, body.nextCursor], [50, `${last.invoiceId}.${last.attemptId}`], `P2-76 page ${page}: 50 and its last row's cursor`);
+      cursors.push(body.nextCursor);
+      query = `?after=${body.nextCursor}`;
+    }
+    assert.deepEqual(seen.map((a) => a.attemptId), mine, 'P2-76: every row once, in keyset order, never another owner\'s');
+    assert.equal(new Set(cursors).size, 20, 'P2-76: twenty distinct cursors');
+    assert.ok(seen.every((a) => a.invoiceId === x && a.state === 'released' && a.version === 3 && a.creditNote === null), 'P2-76: the seeded released rows');
+    for (const [label, q] of [['a cursor naming no row', `?after=${x}.${randomUUID()}`], ['another owner\'s real row', `?after=${x}.${theirs}`],
+      ['a malformed cursor', `?after=${x}`]]) {
+      assertRefusal(await ctx.attempts(s, w, q), 400, 'invalid_request', `P2-76 ${label}`);
+    }
+  });
+});
+
+// ===========================================================================
+// ICH-23 / ICH-24 / ICH-25: the write setting and the write log line (docs/phase-4/18 §6.6, §9.3.1, §9.3.4; D-CA-14 A, D-CA-18 C)
+// WRITTEN — NOT RUN (doc 18 write setting slice, local authoring only): authored without executing any test, typecheck or build.
+// ===========================================================================
+
+const recordsOf = (lines) => lines.map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+/** The credit_note_write lines of the request that `reply` answered. */
+const writeLinesOf = (ctx, reply) => recordsOf(ctx.lines).filter((r) => r.event === 'credit_note_write' && r.requestId === reply.headers['x-request-id']);
+const INSTANCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 test('ICH-23 (CA-35 H, CA-46 H): with TMPOS_CREDIT_NOTE_WRITES=off a real store-scope store_owner\'s register, issue and withdrawal each answer 503 service_unavailable (credit_note_writes_disabled) with no idempotency row, no lease and no credit-note row — a malformed body and an older tab\'s retry of a completed issue too; the lookup shows the issued row, the proof, the list and the settlement answer as before; a manager without the grant gets 403 and no session 401 first; the startup line shows off', async () => {
   // Writes on: an issued credit note (its issue key kept for the retry) and an open registration for the settlement under off.
@@ -1492,8 +2037,10 @@ test('ICH-23 (CA-35 H, CA-46 H): with TMPOS_CREDIT_NOTE_WRITES=off a real store-
     // session — still live, as a new sign-in ends no other session — against this off entry.
     proofOf(await ctx.proof(openSession, w, x, open.registration), open, x, 'CA-35 proof');
     assert.equal(notesOf(await ctx.list(s, w, x), x, 'CA-35 list').length, 1, 'CA-35: the list');
-    // This build serves no store-wide credit-note read: that path is unregistered, 404 not_found even with a session.
-    assertRefusal(await ctx.read(s, `/api/v1/stores/${w.S}/credit-notes`), 404, 'not_found', 'CA-35 no store-wide activity read');
+    // The store-wide activity read (doc 18 §5) answers 200 under off and lists the issued note.
+    const activity = await ctx.read(s, `/api/v1/stores/${w.S}/credit-notes`);
+    assert.equal(activity.status, 200, `CA-35 activity read: ${replyNote(activity)}`);
+    assert.ok(parseBody(activity, 'CA-35 activity read').creditNotes.some((n) => n.id === r.creditNote), 'CA-35: the activity read lists the issued note');
     const k = randomUUID();
     const settledReply = await writes([w.T], keyOf(s, k), { ...NOTHING, RS: 1, SA: 1, AA: 1, K: 1 }, 'CA-35 settlement under off', async () => {
       const reply = await ctx.settle(s, w, x, settleBody(w, open.attempt, 1), k);
@@ -1520,13 +2067,14 @@ test('ICH-23 (CA-35 H, CA-46 H): with TMPOS_CREDIT_NOTE_WRITES=off a real store-
       assert.equal(badCsrf.status, 403, `CA-46 ${label}: wrong session CSRF`);
       assert.match(ctx.reason(badCsrf), /^csrf_session_/, `CA-46 ${label}: the CSRF refusal, not the setting`);
     }
-    // CA-46's main case: a suspended tenant's sessions end at admission (401) on the three writes, before the setting; one fresh
-    // owner per request, since a denial ends every session of its principal.
+    // CA-46's main case: a suspended tenant's sessions end at admission (401) on the three writes and the activity read, before the
+    // setting; one fresh owner per request, since a denial ends every session of its principal.
     const owners = [];
-    for (const label of ['susp-reg', 'susp-iss', 'susp-wd']) owners.push(await signIn(ctx, await storeOwner(w, label)));
+    for (const label of ['susp-reg', 'susp-iss', 'susp-wd', 'susp-read']) owners.push(await signIn(ctx, await storeOwner(w, label)));
     await owner`update tenant set status = 'suspended' where tenant_id = ${w.T}`;
     try {
-      const sends = writeSends.map(([label, send]) => [label, (sess) => send(sess, randomUUID())]);
+      const sends = [...writeSends.map(([label, send]) => [label, (sess) => send(sess, randomUUID())]),
+        ['activity read', (sess) => ctx.read(sess, `/api/v1/stores/${w.S}/credit-notes`)]];
       for (const [i, [label, send]] of sends.entries()) {
         // Nothing of the credit-note, idempotency or outbox data moves (AA, every audit row, is left out: ending the principal's
         // sessions is the session store's own business, not a credit-note write).
@@ -1538,10 +2086,9 @@ test('ICH-23 (CA-35 H, CA-46 H): with TMPOS_CREDIT_NOTE_WRITES=off a real store-
         assertRefusal(reply, 401, 'unauthenticated', `CA-46 suspended: ${label}`);
         assert.ok(['session_admission_denied', 'session_version_mismatch'].includes(ctx.reason(reply)), `CA-46 suspended: ${label}: ${ctx.reason(reply)}`);
       }
-      // The surface an apply window relies on: an unregistered route is 404 with no session — the store-wide credit-notes path too,
-      // which this build does not serve.
+      // The surface an apply window relies on: an unregistered route is 404 with no session; the served route, sessionless, 401.
       assertRefusal(await send(ctx.port, 'GET', `/api/v1/stores/${w.S}/credit-activity`, { host: TENANT_HOST }), 404, 'not_found', 'CA-46 unregistered route');
-      assertRefusal(await send(ctx.port, 'GET', `/api/v1/stores/${w.S}/credit-notes`, { host: TENANT_HOST }), 404, 'not_found', 'CA-46 store-wide credit-notes, unregistered');
+      assertRefusal(await send(ctx.port, 'GET', `/api/v1/stores/${w.S}/credit-notes`, { host: TENANT_HOST }), 401, 'unauthenticated', 'CA-46 served route, no session');
     } finally {
       await owner`update tenant set status = 'active' where tenant_id = ${w.T}`;
     }
@@ -1658,5 +2205,95 @@ test('ICH-24 (CA-47 (a), (b), (g) H): each committed register, issue, settlement
       () => ctx.register(s, w, y, regBody(w, stalledAttempt, 400)));
     assert.equal(twice.status, 409, `CA-47 (b) a second register: ${replyNote(twice)}`);
     assert.deepEqual(writeLinesOf(ctx, twice), [], 'CA-47 (b): a refused second register writes no line');
+  });
+});
+
+// WRITTEN — NOT RUN (doc 18 §9.3.4 as amended 2026-11-19; local authoring only): authored without executing any test, typecheck or build.
+test('ICH-25 CA-47 (p) (H; doc 18 §9.3.4, amended 2026-11-19): a register that answered 503 with one unconfirmed line is retried under the SAME key and bytes once its lease lapsed; the retry reclaims, its fence finds the record held under another lease, and it answers 503 service_unavailable with the request log reason transaction_lease_lost, writes no credit_note_write line, no row, no audit row and no completion, and leaves the first\'s unconfirmed line the only line of its correlation id', async () => {
+  await withEntry(async (ctx) => {
+    const w = await world(ctx, 'ich25');
+    const s = await signIn(ctx, await storeOwner(w, 'so'));
+    const y = await issueOne(ctx, w.sm, w, 'ich25 y');
+    const key = randomUUID();
+    const scope = scopeOf(key, s.principal);
+    const body = regBody(w, randomUUID(), 400); // one object: both sends carry the same bytes, so the same fingerprint
+    const writeLines = () => recordsOf(ctx.lines).filter((l) => l.event === 'credit_note_write');
+
+    // 1. The first invocation waits at the OWNER's hold of y's issued header (038 locks it FOR UPDATE first) until the runtime gives
+    //    up. The transaction-local lock bound, COMMAND_LOCK_BOUND_MS (1,400 ms = 0.7 x the 2,000 ms port deadline,
+    //    postgresTransactionalStore.ts:396-400), usually fires first (transaction_unavailable); the deadline answers
+    //    transaction_timeout. Either is the final 503 that writes `unconfirmed` (ICH-24 (g)).
+    const h = await holdHeader(y);
+    let first;
+    let firstPid;
+    try {
+      first = await writes([w.T], keyOf(s, key), LEASE_ONLY, 'CA-47 (p) first', async () => {
+        const pending = quietly(ctx.register(s, w, y, body, key));
+        firstPid = await waitingPid(pending, h.pid, AT.register, 'CA-47 (p) first');
+        await assertWaitsFor(firstPid, h.pid, 'CA-47 (p) first (behind the hold)');
+        return pending;
+      });
+    } finally {
+      await h.release();
+    }
+    // Whichever bound fired, the first's database transaction must have ENDED (rolled back, or its retired session gone) before the
+    // lease is touched: the deadline answers the client before the kernel's cancel settles, so this waits for it instead of racing it.
+    for (const end = Date.now() + WAIT_MS; ; await delay(5)) {
+      const [{ open }] = await owner`select count(*)::int as open from pg_catalog.pg_stat_activity where pid = ${firstPid} and state <> 'idle'`;
+      if (open === 0) break;
+      assert.ok(Date.now() < end, `CA-47 (p) first: its transaction still open after ${WAIT_MS} ms`);
+    }
+    assertRefusal(first, 503, 'service_unavailable', 'CA-47 (p) first');
+    assert.ok(['transaction_timeout', 'transaction_unavailable'].includes(ctx.reason(first)), `CA-47 (p) first: ${ctx.reason(first)}`);
+    const unconfirmed = writeLinesOf(ctx, first);
+    assert.deepEqual(unconfirmed.map((l) => [l.outcome, l.kind, l.invoiceId]), [['unconfirmed', 'register', y]], 'CA-47 (p) first: one unconfirmed line');
+    const firstCorrelation = unconfirmed[0].correlationId;
+
+    // 2. The first's lease lapses (the OWNER's lever, tests/db/invoiceIssueHttp.integration.test.mjs:876-877). Its record stays in
+    //    progress, so the same-key retry reclaims it rather than answering 409 request_in_progress.
+    const lapsed = await owner`update tmpos_internal.idempotency_record set lease_expires_at = pg_catalog.clock_timestamp() - interval '1 second'
+      where scope = ${scope} and response is null returning 1 as one`;
+    assert.equal(lapsed.length, 1, 'CA-47 (p): the first\'s record is still in progress, its lease now lapsed');
+
+    // 3. The retry. Nothing awaited lies between its acquisition (app.ts:1137) and its fence (postgresTransactionalStore.ts:836): plan
+    //    and prepare are synchronous, and the kernel sends only BEGIN and set_config first (supervisedPgClient.ts:512-513). So the
+    //    record moves to another lease INSIDE the reclaim: an OWNER trigger (the lever of
+    //    tests/db/invoiceDraftCreateAuthorityHttp.integration.test.mjs:101) rewrites the lease the reclaim writes. 006's acquire answers
+    //    'reclaimed' without reading it back (006:352-357), and the fence finds the record held under a lease not the retry's (006:427).
+    //    No lock is waited for, so the 1,400 ms bound plays no part.
+    const foreign = randomBytes(32).toString('base64url');
+    let retry;
+    await owner.unsafe('drop schema if exists ich_proof cascade');
+    await owner.unsafe('create schema ich_proof');
+    try {
+      await owner.unsafe(`create function ich_proof.steal() returns trigger language plpgsql security definer
+        set search_path = pg_catalog, pg_temp as $$ begin new.lease := '${foreign}'; return new; end $$`);
+      await owner.unsafe('revoke all on function ich_proof.steal() from public');
+      await owner.unsafe(`create trigger ich_steal before update on tmpos_internal.idempotency_record for each row
+        when (old.scope = '${scope}' and new.response is null and new.lease is distinct from old.lease) execute function ich_proof.steal()`);
+      retry = await writes([w.T], keyOf(s, key), NOTHING, 'CA-47 (p) retry', () => ctx.register(s, w, y, body, key));
+    } finally {
+      await owner.unsafe('drop trigger if exists ich_steal on tmpos_internal.idempotency_record');
+      await owner.unsafe('drop schema if exists ich_proof cascade');
+    }
+    assertRefusal(retry, 503, 'service_unavailable', 'CA-47 (p) retry'); // never a replay (assertRefusal)
+    // Correlated separately: the retry is its own request (its own request log and reclaim lines); having committed nothing, it
+    // logs no correlation id of its own, so the first's correlation id below can only be the first's.
+    assert.notEqual(retry.headers['x-request-id'], first.headers['x-request-id'], 'CA-47 (p): two requests, correlated separately');
+    assert.equal(ctx.reason(retry), 'transaction_lease_lost', 'CA-47 (p) retry: the request log reason is unchanged');
+    assert.equal(recordsOf(ctx.lines).filter((l) => l.event === 'idempotency_reclaimed' && l.requestId === retry.headers['x-request-id']).length, 1,
+      'CA-47 (p) retry: it reclaimed the lapsed lease, so it reached the commit');
+    assert.deepEqual(writeLinesOf(ctx, retry), [], 'CA-47 (p) retry: a lost lease writes no credit_note_write line');
+
+    // 4. The retry resolves nothing of the first: its unconfirmed line is still the only line of its correlation id and of y, no
+    //    committed line, nothing committed under its correlation id (the counts above: no row, audit or completion), and the record
+    //    is not answered — still in progress, under the other lease.
+    assert.deepEqual(writeLines().filter((l) => l.correlationId === firstCorrelation || l.invoiceId === y).map((l) => [l.outcome, l.requestId]),
+      [['unconfirmed', first.headers['x-request-id']]], 'CA-47 (p): the first\'s unconfirmed line stands alone');
+    assert.deepEqual(writeLines().filter((l) => l.outcome === 'committed' && l.invoiceId === y), [], 'CA-47 (p): no committed line');
+    const [{ n }] = await owner`select count(*)::int as n from public.audit_event where request_id = ${firstCorrelation}`;
+    assert.equal(n, 0, 'CA-47 (p): nothing committed under the first\'s correlation id');
+    const [record] = await owner`select response is null as open, lease = ${foreign} as foreign from tmpos_internal.idempotency_record where scope = ${scope}`;
+    assert.deepEqual({ ...record }, { open: true, foreign: true }, 'CA-47 (p): the retry answered no record; it stays in progress under the other lease');
   });
 });

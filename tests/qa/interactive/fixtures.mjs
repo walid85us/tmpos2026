@@ -158,6 +158,10 @@ export async function seedWorld({ owner, client, projectId, apiKey, generation, 
     ['inv-stall', 'QA camera module (synthetic)'], ['inv-probe', 'QA diagnostics (synthetic)'], ['inv-voided', 'QA data transfer (synthetic)']]) {
     await issue(a, 'tenant-a', mainA, label, 'cust-ada', [LINE(desc, 5000)]);
   }
+  // CN-P2 (QF): issued, untouched, full balance. inv-credit is for registering and issuing credit notes by hand;
+  // inv-credit-list is left to be given several credit notes (one withdrawn once CN-P3 exists) by the operator, for the list.
+  await issue(a, 'tenant-a', mainA, 'inv-credit', 'cust-ada', [LINE('QA phone screen (synthetic)', 8000), LINE('QA labour (synthetic)', 2000)]);
+  await issue(a, 'tenant-a', mainA, 'inv-credit-list', 'cust-ben', [LINE('QA board repair (synthetic)', 12000), LINE('QA parts (synthetic)', 3000)]);
   ok(await client.call('POST', `/api/v1/stores/${mainA}/invoices/${reg.invoices['inv-voided'].id}/void`, {
     session: a, key: randomUUID(), body: { expectedTenant: tA, reasonCode: 'issued_in_error' },
   }), 200, 'void inv-voided');
