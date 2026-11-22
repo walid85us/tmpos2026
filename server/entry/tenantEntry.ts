@@ -94,7 +94,9 @@
 // …/invoices/{id}/credit-notes (view_issued_invoices), POST …/invoices/{id}/credit-note-registrations and POST
 // …/invoices/{id}/credit-notes (session-bound, recent sign-in), POST …/invoices/{id}/credit-note-settlement and POST
 // …/invoices/{id}/credit-notes/{creditNoteId}/withdrawal (recent sign-in); the payments read gains creditedCents and the void
-// refuses an invoice with an active credit note (sealed 409 credit_notes_recorded). They need 037's proof key (8b): no new key;
+// refuses an invoice with an active credit note (sealed 409 credit_notes_recorded); docs/phase-4/18 (migration 039): GET
+// /api/v1/stores/{storeId}/credit-notes, the store owner's store-wide credit-activity read (view_store_credit_activity,
+// D-CA-1 A), after the list. They need 037's proof key (8b): no new key;
 // each store route authorized only through the actor's own store grant at exactly that store — then the bounded 404.
 // No administrative route, no other store-scoped route, no DEV, witness, diagnostic, bootstrap or migration route. Only the tenant host is
 // served: every request but the probes must name SESSION_TENANT_ORIGINS's one authority in Host, or it gets that bounded
@@ -180,6 +182,8 @@ export const TENANT_SHIPPING_ROUTES: readonly ServedRoute[] = Object.freeze([
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/credit-note-attempts', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
+  // Doc 18 (migration 039): the store-wide credit-activity read, last among the reads in composition order.
+  { method: 'GET', path: '/api/v1/stores/{storeId}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'json', idempotency: 'required' },
   { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement', access: 'session', body: 'json', idempotency: 'required' },

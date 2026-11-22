@@ -212,7 +212,7 @@ test('M7TU-04 validateTenantEntryConfig: opens no handle, reads only the documen
 //    declarations (server/composition/tenantTransactions.ts), over testkits: no database, ever.
 // ===========================================================================================================
 
-test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 47 frozen tenant routes (36 + M7B-PAYMENTS-P2\'s four + M7B-CREDITNOTES-P1\'s seven)', () => {
+test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 48 frozen tenant routes (36 + M7B-PAYMENTS-P2\'s four + M7B-CREDITNOTES-P1\'s seven + doc 18\'s credit activity)', () => {
   assert.deepEqual(TENANT_SHIPPING_ROUTES, [
     { method: 'GET', path: '/health', access: 'public', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/readiness', access: 'public', body: 'none', idempotency: 'none' },
@@ -271,12 +271,14 @@ test('M7TU-05 TENANT_SHIPPING_ROUTES is exactly the 47 frozen tenant routes (36 
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registration-proof', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/credit-note-attempts', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'GET', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
+    // Doc 18 (migration 039): the store-wide credit-activity read, after the list.
+    { method: 'GET', path: '/api/v1/stores/{storeId}/credit-notes', access: 'session', body: 'none', idempotency: 'none' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-registrations', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-note-settlement', access: 'session', body: 'json', idempotency: 'required' },
     { method: 'POST', path: '/api/v1/stores/{storeId}/invoices/{id}/credit-notes/{creditNoteId}/withdrawal', access: 'session', body: 'json', idempotency: 'required' },
   ]);
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 47);
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 48);
   assert.ok(Object.isFrozen(TENANT_SHIPPING_ROUTES) && TENANT_SHIPPING_ROUTES.every((r) => Object.isFrozen(r)));
   assert.ok(!TENANT_SHIPPING_ROUTES.some((r) => r.path.startsWith('/admin/') || r.path.includes('/harness/')), 'no administrative or witness route');
 });

@@ -39,9 +39,10 @@
 //   ICR-27 (§4, CN-18)      an issued invoice with Total 0: a credit is amount_exceeds_remaining, nothing written, nothing_due.
 //   ICR-28 (CN-18 E15)      option B's net-entered rounding (pure) against option A through the routine.
 //
-// DISPOSABLE ONLY, DURABLE (proofs need fsync on). Leaves 001-038 applied and no credit note, withdrawal, credit-note
-// registration, credit-note audit row, payment, session, login or proof key of its own. Failure output never carries a
-// proof, key or database error text: only outcome words, numbers, booleans and validated SQLSTATEs.
+// DISPOSABLE ONLY, DURABLE (proofs need fsync on). Rolls back anything applied above 038 (039) at setup, runs on 001-038, and
+// re-applies it at teardown, so the ledger ends as it began; leaves no credit note, withdrawal, credit-note registration,
+// credit-note audit row, payment, session, login or proof key of its own. Failure output never carries a proof, key or database
+// error text: only outcome words, numbers, booleans and validated SQLSTATEs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

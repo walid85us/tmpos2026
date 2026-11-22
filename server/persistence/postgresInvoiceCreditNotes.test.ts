@@ -8,9 +8,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   INVOICE_CREDIT_NOTE_ISSUE_MUTATOR, INVOICE_CREDIT_NOTE_REGISTER_MUTATOR, INVOICE_CREDIT_NOTE_SETTLE_MUTATOR, INVOICE_CREDIT_NOTE_WITHDRAW_MUTATOR,
-  createPostgresInvoiceCreditNotes, creditNoteAttemptsAnswerOf, creditNoteProofAnswerOf, creditNotesListAnswerOf,
+  createPostgresInvoiceCreditNotes, creditNoteAttemptsAnswerOf, creditNoteProofAnswerOf, creditNotesListAnswerOf, storeCreditActivityAnswerOf,
 } from './postgresInvoiceCreditNotes.js';
 import { INVOICE_DRAFT_READ_BOUNDS } from './postgresInvoiceDrafts.js';
+import { StoreCreditActivityAnswerInvalid } from '../runtime/invoiceCreditNotes.js';
 import { createPostgresTransactionalStore } from './postgresTransactionalStore.js';
 import type { MutationAuthority, PgStatement } from './postgresTransactionalStore.js';
 import type { PgTransactionScope, SupervisedPgClient, TransactionBounds } from './supervisedPgClient.js';
@@ -306,4 +307,80 @@ test('ICP-05 the read adapter: the three fixed calls under the read bounds; the 
   await assert.rejects(async () => port.proof(STORE_SCOPE, KEY, INVOICE, REGISTRATION, signal, 0), /answer invalid/);
   assert.equal(f.seen.texts.length, 0, 'nothing sent');
   assert.throws(() => createPostgresInvoiceCreditNotes({} as never), /options invalid/);
+});
+
+// --- the store credit activity (docs/phase-4/18, migration 039) ---------------------------------------------------------
+// WRITTEN — NOT RUN (doc 18 implementation slice, local authoring only).
+
+const ACTIVITY_COLUMNS = ['o_tenant_id', 'o_store_id', 'o_credit_note_id', 'o_credit_note_number', 'o_invoice_id', 'o_invoice_number', 'o_gross_cents',
+  'o_reason_code', 'o_issued_at', 'o_issued_by_name', 'o_withdrawn_at', 'o_withdrawal_reason_code', 'o_withdrawn_by_name'];
+const activityRow = (n: number, over: Record<string, unknown> = {}) => ({ o_outcome: 'credit_note', o_tenant_id: TENANT, o_store_id: STORE,
+  o_credit_note_id: `${n.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`, o_credit_note_number: String(n), o_invoice_id: INVOICE,
+  o_invoice_number: '7', o_gross_cents: '1100', o_reason_code: 'pricing_error', o_issued_at: TIME(2), o_issued_by_name: null, o_withdrawn_at: null,
+  o_withdrawal_reason_code: null, o_withdrawn_by_name: null, ...over });
+
+test('ICP-06 (doc 18 §6.6; supports CA-01, CA-11, CA-12): the activity row decoder — every row this scope\'s tenant and store, exact bigints, a withdrawal only with its time, the empty page as no row, the refusals as one all-null row, every fault one bounded message; the adapter\'s ONE fixed call under the read bounds, refused before any statement for a malformed scope, key or cursor', async () => {
+  assert.deepEqual(storeCreditActivityAnswerOf([activityRow(2, { o_issued_by_name: 'Ana', o_withdrawn_at: TIME(5), o_withdrawal_reason_code: 'wrong_invoice', o_withdrawn_by_name: null }),
+    activityRow(1)], STORE_SCOPE, null), { outcome: 'credit_notes', storeId: STORE, creditNotes: [
+    { id: activityRow(2).o_credit_note_id, number: 2, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1100, reason: 'pricing_error', issuedAt: TIME(2), issuedByName: 'Ana',
+      withdrawal: { withdrawnAt: TIME(5), reason: 'wrong_invoice', withdrawnByName: null } },
+    { id: activityRow(1).o_credit_note_id, number: 1, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1100, reason: 'pricing_error', issuedAt: TIME(2), issuedByName: null,
+      withdrawal: null },
+  ] });
+  assert.deepEqual(storeCreditActivityAnswerOf([], STORE_SCOPE, null), { outcome: 'credit_notes', storeId: STORE, creditNotes: [] }, 'no row is the empty page');
+  assert.deepEqual(storeCreditActivityAnswerOf([{ o_outcome: 'denied', ...nulls(ACTIVITY_COLUMNS) }], STORE_SCOPE, null), { outcome: 'denied' });
+  assert.deepEqual(storeCreditActivityAnswerOf([{ o_outcome: 'cursor_unknown', ...nulls(ACTIVITY_COLUMNS) }], STORE_SCOPE, CREDIT_NOTE), { outcome: 'cursor_unknown' });
+  for (const [label, rows, after] of [
+    ['cursor_unknown without a cursor', [{ o_outcome: 'cursor_unknown', ...nulls(ACTIVITY_COLUMNS) }], null],
+    ['a refusal naming a note', [{ o_outcome: 'denied', ...nulls(ACTIVITY_COLUMNS), o_credit_note_id: CREDIT_NOTE }], null],
+    ['a refusal beside a row', [{ o_outcome: 'denied', ...nulls(ACTIVITY_COLUMNS) }, activityRow(1)], null],
+    ['a row after a refusal word', [activityRow(1), { o_outcome: 'denied', ...nulls(ACTIVITY_COLUMNS) }], null],
+    ['another store', [activityRow(1, { o_store_id: randomUUID() })], null], ['another tenant', [activityRow(1, { o_tenant_id: randomUUID() })], null],
+    ['a gross as a number', [activityRow(1, { o_gross_cents: 1100 })], null], ['a number over 2^53 - 1', [activityRow(1, { o_credit_note_number: '9007199254740992' })], null],
+    ['a withdrawal reason with no withdrawal', [activityRow(1, { o_withdrawal_reason_code: 'wrong_amount' })], null],
+    ['a withdrawer named with no withdrawal', [activityRow(1, { o_withdrawn_by_name: 'Bo' })], null],
+    ['ascending numbers', [activityRow(1), activityRow(2)], null], ['a name over 1,000 characters', [activityRow(1, { o_issued_by_name: 'a'.repeat(1001) })], null],
+    ['a control character', [activityRow(1, { o_issued_by_name: 'A\u0007' })], null], ['the cursor served', [activityRow(1)], activityRow(1).o_credit_note_id],
+    ['a tax column', [{ ...activityRow(1), o_tax_cents: '0' }], null], ['an actor id column', [{ ...activityRow(1), o_issued_by: ACTOR }], null],
+    ['over the ask', Array.from({ length: 52 }, (_, i) => activityRow(52 - i)), null], ['not an array', 'rows', null],
+  ] as const) {
+    assert.throws(() => storeCreditActivityAnswerOf(rows, STORE_SCOPE, after), StoreCreditActivityAnswerInvalid, label);
+  }
+  try {
+    storeCreditActivityAnswerOf([activityRow(1, { o_issued_by_name: 'a'.repeat(1001) })], STORE_SCOPE, null);
+    assert.fail('a name over 1,000 characters is refused');
+  } catch (err) {
+    assert.ok(err instanceof StoreCreditActivityAnswerInvalid);
+    assert.deepEqual([err.message, Object.keys(err), 'cause' in err], ['store credit activity answer invalid', ['name'], false], 'no row, name or detail carried (only its class name)');
+  }
+  // A defect inside the checks (not their own fault()) is not a refused answer: it stays an outage.
+  const defect = Object.defineProperty({ ...activityRow(1) }, 'o_outcome', { get() { throw new RangeError('defect'); }, enumerable: true });
+  assert.throws(() => storeCreditActivityAnswerOf([defect], STORE_SCOPE, null), (err) => err instanceof RangeError);
+
+  const signal = new AbortController().signal;
+  let f = fakeClient([activityRow(1)]);
+  let port = createPostgresInvoiceCreditNotes({ client: f.client });
+  await port.storeActivity(STORE_SCOPE, KEY, CREDIT_NOTE, signal);
+  assert.equal(squash(f.seen.texts[0]), 'select o_outcome, o_tenant_id, o_store_id, o_credit_note_id, o_credit_note_number, o_invoice_id, o_invoice_number, o_gross_cents, '
+    + 'o_reason_code, o_issued_at, o_issued_by_name, o_withdrawn_at, o_withdrawal_reason_code, o_withdrawn_by_name '
+    + 'from tmpos_invoice_credit_note.m7b_store_credit_activity(?::text, ?::uuid, ?::uuid, ?::uuid, ?::integer)');
+  assert.deepEqual(f.seen.values[0], [KEY, TENANT, STORE, CREDIT_NOTE, 51], 'the session key, the trusted tenant and store, the cursor and 51');
+  assert.deepEqual(f.seen.bounds, [INVOICE_DRAFT_READ_BOUNDS]);
+  f = fakeClient([activityRow(1)]);
+  port = createPostgresInvoiceCreditNotes({ client: f.client });
+  // The caller's own faults are not a refused answer.
+  await assert.rejects(async () => port.storeActivity({ ...STORE_SCOPE, scope: 'tenant', store: null } as TrustedScope, KEY, null, signal), (err) => err instanceof Error && !(err instanceof StoreCreditActivityAnswerInvalid));
+  await assert.rejects(async () => port.storeActivity(STORE_SCOPE, 'short', null, signal), (err) => err instanceof Error && !(err instanceof StoreCreditActivityAnswerInvalid));
+  await assert.rejects(async () => port.storeActivity(STORE_SCOPE, KEY, `${CREDIT_NOTE}x`, signal), (err) => err instanceof Error && !(err instanceof StoreCreditActivityAnswerInvalid));
+  assert.equal(f.seen.texts.length, 0, 'nothing sent');
+  // Through the port: a malformed page is the typed refusal.
+  port = createPostgresInvoiceCreditNotes({ client: fakeClient([activityRow(1, { o_issued_by_name: 'A\u0007' })]).client });
+  await assert.rejects(async () => port.storeActivity(STORE_SCOPE, KEY, null, signal), StoreCreditActivityAnswerInvalid);
+  // The database's own failures stay operational: the routine call rejecting inside the transaction body, and the transaction itself.
+  const down = new Error('connection lost');
+  const rejectingSql = { transaction: async (_s: AbortSignal, _b: TransactionBounds, body: (sql: PgTransactionScope) => Promise<unknown>) =>
+    body((() => Promise.reject(down)) as unknown as PgTransactionScope), end: async () => undefined } as unknown as SupervisedPgClient;
+  await assert.rejects(async () => createPostgresInvoiceCreditNotes({ client: rejectingSql }).storeActivity(STORE_SCOPE, KEY, null, signal), (err) => err === down);
+  const failing = { transaction: async () => { throw down; }, end: async () => undefined } as unknown as SupervisedPgClient;
+  await assert.rejects(async () => createPostgresInvoiceCreditNotes({ client: failing }).storeActivity(STORE_SCOPE, KEY, null, signal), (err) => err === down);
 });

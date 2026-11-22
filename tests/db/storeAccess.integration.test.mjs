@@ -3,7 +3,7 @@
 // login, and GET /api/v1/stores through the REAL tenant entry over loopback HTTP.
 //
 // WHAT IS PROVEN.
-//   STA-01 001-038 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
+//   STA-01 001-039 applied clean, every ledger checksum the pinned one; 027's postcondition re-proven over the applied state
 //          and refusing every widening it names (tmpos_app made a member of the owner among them); a second apply refused,
 //          and an apply over a chain missing 026's routine, 016's admission read or 002's membership table refused.
 //   STA-02 the inventory and ACL: one STABLE plpgsql SECURITY DEFINER routine pinned to pg_catalog, pg_temp with
@@ -43,7 +43,7 @@
 // DISPOSABLE ONLY. The harness's resolved target: a supplied CI service when one is bound, otherwise a cluster this file
 // creates and destroys; assertDisposableTestDsn refuses anything else before a statement runs. Every fixture is synthetic
 // and randomly suffixed; every key is random bytes made here. It leaves the shared service with 027 and 028 applied, the
-// ledger 001-038, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its
+// ledger 001-039, the issuer key row and limiter fingerprint it found, no session or mint-ledger row of its own and its
 // login dropped; its synthetically named identities, tenants, stores and memberships stay, as every suite's do. It writes no
 // invoice draft; STA-08 rolls 028 back with 027 (refused while a draft exists), so on a shared service it runs before every
 // step that stores one.
@@ -98,9 +98,13 @@ const UP_037 = readFileSync(`${MIG_DIR}/037_m7b_invoice_payment_registration.up.
 /** M7B-CREDITNOTES-P1: 038 (credit notes, in its own schema) sits above 037: it rolls back before it and is re-applied after it. */
 const DOWN_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.down.sql`, 'utf8');
 const UP_038 = readFileSync(`${MIG_DIR}/038_m7b_invoice_credit_note.up.sql`, 'utf8');
+/** M7B-CREDITACTIVITY: 039 (the store credit-activity read, in 038's schema) sits above 038: it rolls back before it and is re-applied after it. */
+const DOWN_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.down.sql`, 'utf8');
+const UP_039 = readFileSync(`${MIG_DIR}/039_m7b_store_credit_activity.up.sql`, 'utf8');
+const has039 = async (sql) => (await sql`select pg_catalog.to_regprocedure('tmpos_invoice_credit_note.m7b_store_credit_activity(text, uuid, uuid, uuid, integer)') is not null as present`)[0].present;
 const has037 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_payment.payment_proof_key') is not null as present`)[0].present;
 const has038 = async (sql) => (await sql`select pg_catalog.to_regclass('tmpos_invoice_credit_note.invoice_credit_note') is not null as present`)[0].present;
-const down036 = async (sql) => { if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
+const down036 = async (sql) => { if (await has039(sql)) await sql.unsafe(DOWN_039).simple(); if (await has038(sql)) await sql.unsafe(DOWN_038).simple(); if (await has037(sql)) await sql.unsafe(DOWN_037).simple(); await sql.unsafe(DOWN_036).simple(); };
 /** The up file's last DO block, its postcondition, run again on its own. */
 const POSTCONDITION_027 = UP_027.slice(UP_027.lastIndexOf('do $$'));
 const DIRECTORY = 'tmpos_store_access.m7b_store_directory(text)';
@@ -247,7 +251,7 @@ test.after(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// setup: every migration in the directory (001-038), a real non-owner runtime login, the keys installed by the owner
+// setup: every migration in the directory (001-039), a real non-owner runtime login, the keys installed by the owner
 // ---------------------------------------------------------------------------
 
 await owner.unsafe(`do $$ begin
@@ -413,10 +417,10 @@ async function preflightVerdict() {
 // STA-01..02: the migration, the inventory and the ACL
 // ---------------------------------------------------------------------------
 
-test('STA-01: 001-038 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
+test('STA-01: 001-039 applied clean, every checksum the pinned one; 027\'s postcondition holds and refuses every widening it names; a second apply is refused', async () => {
   assert.equal(applyReport.outcome, 'complete', JSON.stringify(applyReport).slice(0, 400));
   const ledger = await owner`select version, dirty, checksum from public.schema_migrations order by version`;
-  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 38 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
+  assert.deepEqual(ledger.map((r) => [r.version, r.dirty]), Array.from({ length: 39 }, (_, i) => [String(i + 1).padStart(3, '0'), false]));
   assert.deepEqual(ledger.map((r) => r.checksum), REQUIRED_MIGRATIONS.map((m) => m.checksum), 'every ledger checksum is the pinned one');
   assert.equal(ledger[26].checksum, createHash('sha256').update(UP_027).digest('hex'), '027\'s checksum is its up bytes');
   assert.equal((await rolledBack(RC, (tx) => tx.unsafe(POSTCONDITION_027).simple())).code, undefined, 'the applied state satisfies the postcondition');
@@ -712,10 +716,10 @@ test('STA-08: 027\'s down refuses while not applied or while an invoice draft ob
   assert.equal(twice.code, '55000');
   assert.match(twice.message, /migration 027 is not applied/);
   // The executor's own path: the down file and the ledger row, then restored.
-  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-038 runtime is accepted');
+  assert.deepEqual(await preflightVerdict(), { runtimeLogin: [], migrationLedger: [] }, 'control: the 001-039 runtime is accepted');
   const { rolledBack: undone, restore } = await rollBackAbove(owner, MIG_DIR, '026');
   try {
-    assert.deepEqual(undone, ['038', '037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027'], 'only 027 (and 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) sits above 026');
+    assert.deepEqual(undone, ['039', '038', '037', '036', '035', '034', '033', '032', '031', '030', '029', '028', '027'], 'only 027 (and 028, 029, 030, 031, 032, 033 and 034 above it, M7B-INVOICES-P1, -P2, -P2-R1, -P1-R3, -P1-R4, M7B-INVOICES-DISCARD-P1 and M7B-INVOICES-ISSUE-P1) sits above 026');
     const [state] = await owner`select pg_catalog.to_regnamespace('tmpos_store_access') is null as gone,
       (select max(version) from public.schema_migrations) as newest`;
     assert.deepEqual({ ...state }, { gone: true, newest: '026' });

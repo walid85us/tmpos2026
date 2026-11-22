@@ -593,13 +593,16 @@
 // issuing settings (034's row guards lifted for those deletes only, then put back in the mode found), the issue and settings
 // audits, and every audit subject naming one of its issued invoices or stores — so nothing of it blocks 034's rollback. Since
 // M7B-INVOICES-VOID-P1 (R-DB-1), when 035 is applied, its void audits go with the issue's and its void records before the
-// issued invoices they hold (035's ALWAYS guard lifted for that delete only), so nothing of it blocks 035's rollback. What it leaves is
+// issued invoices they hold (035's ALWAYS guard lifted for that delete only), so nothing of it blocks 035's rollback. Since
+// M7B-CREDITNOTES CN-P2 it seeds credit notes (with their registrations and withdrawals) by owner SQL under 038's row guards,
+// lifted inside that one transaction, and removes every 038 row and credit-note audit of its tenants first, so nothing of it
+// blocks 038's rollback. What it leaves is
 // what every suite leaves: its synthetically named identities, tenants, stores and grants, their audit records and
 // idempotency records.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
@@ -775,6 +778,12 @@ const REV_TABLE = 'tmpos_invoice_payment.invoice_payment_reversal';
 const REG_TABLE = 'tmpos_invoice_payment.invoice_payment_registration';
 const PAYMENT_TRIGGERS = [[PAY_TABLE, 'trg_invoice_payment_guard'], [REV_TABLE, 'trg_invoice_payment_reversal_guard']];
 const PAYMENT_ACTIONS = ['store.invoice_payment.record', 'store.invoice_payment.reverse', 'store.invoice_payment.register', 'store.invoice_payment.settle'];
+/** Literals, as above (M7B-CREDITNOTES CN-P2): migration 038's credit-note row guards and audit actions. */
+const CN_NOTE_TABLE = 'tmpos_invoice_credit_note.invoice_credit_note';
+const CN_GUARDS = [['tmpos_invoice_credit_note.invoice_credit_note_withdrawal', 'trg_invoice_credit_note_withdrawal_guard'],
+  ['tmpos_invoice_credit_note.invoice_credit_note_registration', 'trg_invoice_credit_note_registration_guard'], [CN_NOTE_TABLE, 'trg_invoice_credit_note_guard'],
+  ['tmpos_invoice_credit_note.invoice_credit_note_counter', 'trg_invoice_credit_note_counter_guard']];
+const CN_ACTIONS = ['store.invoice_credit_note.register', 'store.invoice_credit_note.issue', 'store.invoice_credit_note.settle', 'store.invoice_credit_note.withdraw'];
 /**
  * M7B-INVOICES-ISSUE-P2: this file's tenants' issued lines and invoices, counters and settings, their issue and settings
  * audits, and every audit subject naming one of their issued invoices or stores, in ONE owner transaction with the guards
@@ -783,9 +792,10 @@ const PAYMENT_ACTIONS = ['store.invoice_payment.record', 'store.invoice_payment.
  * the issue's and the void records (their ALWAYS guard lifted, then put back as found) before the issued invoices they hold.
  */
 async function cleanIssuing() {
-  const [{ present, voids, payments, registrations }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present,
+  const [{ present, voids, payments, registrations, credits }] = await owner`select to_regclass('tmpos_invoice_issue.issued_invoice') is not null as present,
     to_regclass('tmpos_invoice_void.issued_invoice_void') is not null as voids,
-    to_regclass(${PAY_TABLE}) is not null as payments, to_regclass(${REG_TABLE}) is not null as registrations`;
+    to_regclass(${PAY_TABLE}) is not null as payments, to_regclass(${REG_TABLE}) is not null as registrations,
+    to_regclass(${CN_NOTE_TABLE}) is not null as credits`;
   if (!present) return;
   await owner.begin('isolation level read committed', async (sql) => {
     await withTriggersLifted(sql, [['public.audit_event', 'trg_audit_event_reject_mutation']], async () => {
@@ -800,10 +810,25 @@ async function cleanIssuing() {
       }
       if (registrations) await sql`update public.audit_event set subject_invoice_payment_registration_id = null
         where tenant_id = any(${TENANTS}::uuid[]) and subject_invoice_payment_registration_id is not null`;
+      // CN-P2: the credit-note audits (the shop's issue writes them) go too, and no audit subject names a credit-note row.
+      if (credits) {
+        await sql`delete from public.audit_event where action_id = any(${CN_ACTIONS}::text[]) and tenant_id = any(${TENANTS}::uuid[])`;
+        await sql`update public.audit_event set subject_invoice_credit_note_id = null, subject_invoice_credit_note_registration_id = null
+          where tenant_id = any(${TENANTS}::uuid[]) and (subject_invoice_credit_note_id is not null or subject_invoice_credit_note_registration_id is not null)`;
+      }
       await sql`update public.audit_event set subject_issued_invoice_id = null
         where subject_issued_invoice_id in (select invoice_id from tmpos_invoice_issue.issued_invoice where tenant_id = any(${TENANTS}::uuid[]))`;
       await sql`update public.audit_event set subject_store_id = null
         where subject_store_id in (select store_id from public.store where tenant_id = any(${TENANTS}::uuid[]))`;
+    });
+    // CN-P2 (BF): 038's rows — seeded by creditShop, or written by the shop's issue — hold the issued invoices: they go first,
+    // its four row guards lifted for these deletes only (tests/db/invoiceCreditNoteHttp cleanAll order).
+    if (credits) await withTriggersLifted(sql, CN_GUARDS, async () => {
+      await sql`delete from tmpos_invoice_credit_note.invoice_credit_note_withdrawal where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`update tmpos_invoice_credit_note.invoice_credit_note_registration set credit_note_id = null where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_credit_note.invoice_credit_note where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_credit_note.invoice_credit_note_registration where tenant_id = any(${TENANTS}::uuid[])`;
+      await sql`delete from tmpos_invoice_credit_note.invoice_credit_note_counter where tenant_id = any(${TENANTS}::uuid[])`;
     });
     // 037's registrations reference payments: they go first, every one of their own guards lifted inside this transaction;
     // then reversals before payments, payments before void records (each foreign key restricts).
@@ -908,6 +933,20 @@ async function teardownDatabase() {
         const guards = `${at038 ? 'trg_issued_invoice_void_credit_note_barrier:A,' : ''}trg_issued_invoice_void_guard:A,trg_issued_invoice_void_truncate:A`;
         assert.deepEqual(rest, { voids: 0, audits: 0, guards },
           'R-DB-1: no void record or void audit of this file is left, and every void trigger is ALWAYS again (038\'s barrier when 038 is applied)');
+      });
+      await step(async () => { // CN-P2: nothing of this file blocks 038's rollback, checked rather than assumed
+        const [{ present }] = await owner`select to_regclass(${CN_NOTE_TABLE}) is not null as present`;
+        if (!present) return;
+        const [state] = await owner`select
+          (select count(*) from tmpos_invoice_credit_note.invoice_credit_note where tenant_id = any(${TENANTS}::uuid[]))::int as notes,
+          (select count(*) from tmpos_invoice_credit_note.invoice_credit_note_withdrawal where tenant_id = any(${TENANTS}::uuid[]))::int as withdrawals,
+          (select count(*) from tmpos_invoice_credit_note.invoice_credit_note_registration where tenant_id = any(${TENANTS}::uuid[]))::int as registrations,
+          (select count(*) from public.audit_event where tenant_id = any(${TENANTS}::uuid[]) and (action_id = any(${CN_ACTIONS}::text[])
+             or subject_invoice_credit_note_id is not null or subject_invoice_credit_note_registration_id is not null))::int as audits,
+          (select pg_catalog.string_agg(g.tgname::text || ':' || g.tgenabled::text, ',' order by g.tgname) from pg_catalog.pg_trigger g
+            where g.tgname = any(${CN_GUARDS.map(([, name]) => name)}::text[])) as guards`;
+        assert.deepEqual({ ...state }, { notes: 0, withdrawals: 0, registrations: 0, audits: 0, guards: CN_GUARDS.map(([, name]) => `${name}:A`).sort().join(',') },
+          'nothing of this file blocks 038\'s rollback, and every credit-note row guard is ALWAYS again');
       });
       await step(async () => { // R8, checked rather than assumed
         const [{ present }] = await owner`select to_regclass('tmpos_invoice_draft.invoice_draft') is not null as present`;
@@ -1238,11 +1277,13 @@ let entry2 = null; // the second tenant entry over the same database (P4): pages
 /** Each entry's pool: two, the owner's client and the cluster's reserved slots fit a disposable cluster's 20 connections. */
 const POOLS = Math.min(5, MAX_POOLS);
 
-async function startEntry() {
-  entry = await listenEntry();
+/** `writes`: the entry's TMPOS_CREDIT_NOTE_WRITES (doc 18 §6.6); only SCN-23 starts the primary entry with 'off'. */
+async function startEntry(writes = 'on') {
+  entry = await listenEntry(writes);
 }
 
-async function listenEntry() {
+async function listenEntry(writes = 'on') {
+  const env = writes === ENV.TMPOS_CREDIT_NOTE_WRITES ? ENV : Object.freeze({ ...ENV, TMPOS_CREDIT_NOTE_WRITES: writes });
   const cap = { codes: [], lines: [], proc: new EventEmitter() };
   const construction = {
     databaseClient: () => createSupervisedPgClient(testDriver(TARGET), driverDsn(TARGET_DSN, RUNTIME_LOGIN), {
@@ -1252,10 +1293,10 @@ async function listenEntry() {
     listen: () => ({ port: 0, host: '127.0.0.1' }),
   };
   const result = await startTenantEntry({
-    env: ENV, construction, proc: cap.proc, exit: (code) => { cap.codes.push(code); }, log: { log: (line) => { cap.lines.push(line); } },
+    env, construction, proc: cap.proc, exit: (code) => { cap.codes.push(code); }, log: { log: (line) => { cap.lines.push(line); } },
   });
   assert.equal(result.outcome, 'listening', JSON.stringify(result));
-  return { port: result.address.port, cap };
+  return { port: result.address.port, cap, writes };
 }
 
 async function stopEntry() {
@@ -1830,6 +1871,10 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SIS-25', 'SIS-26', 'SIS-27', 'SIS-28', 'SIS-29', 'SIS-30', 'SIS-31', 'SIS-32', 'SIS-33', 'SIS-34',
   'SIS-35', 'SIS-36', 'SIS-37', 'SIS-38', 'SIS-39',
   'SLH-01', 'SLH-02',
+  'SCN-01', 'SCN-02', 'SCN-03', 'SCN-04', 'SCN-05', 'SCN-06', 'SCN-07',
+  'SCN-08', 'SCN-09', 'SCN-10', 'SCN-11', 'SCN-12', 'SCN-13', 'SCN-14',
+  'SCN-15', 'SCN-16', 'SCN-17', 'SCN-18', 'SCN-19', 'SCN-20', 'SCN-21', 'SCN-22', 'SCN-23',
+  'SCA-01', 'SCA-02', 'SCA-03', 'SCA-04',
 ]);
 const registered = new Set();
 const repeated = [];
@@ -7748,9 +7793,48 @@ async function openIssued(page) {
   await waitData(page, 'issued-stores-state', 'phase', 'ready');
   return early;
 }
-async function pickIssuedStore(page, id) {
+/**
+ * Choose store `id` in the Issued section and wait for its settings entry. Doc 18: when the shop is expected to read the
+ * chosen store's credit activity — the store is not already chosen and this page's last store directory does not mark it
+ * readOnly (the shop has the view on: the prop's default) — also wait until that read has SETTLED FOR THIS STORE: its GET
+ * answered and the sub-section shown in a settled phase or hidden after its 403's classification, or the section's wait
+ * said instead of any GET. A timeout FAILS. `awaitActivity: false` is the opt-out for a scenario that holds a request at
+ * the front across the pick: it then asserts the activity outcome itself after its release. Returns the record index the
+ * pick began at.
+ */
+async function pickIssuedStore(page, id, { awaitActivity = true } = {}) {
+  const at = st.api.length;
   await page.evaluate(`(() => { const s = ${q('issued-store')}; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(id)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await page.waitFor(`!!${q('issued-settings-open')}`, 15_000, 'the Issuing settings entry for the chosen store');
+  if (!awaitActivity || !activityExpected(page, id)) return at; // a re-pick of the same store reads again: no short-circuit
+  await waitActivitySettled(page, id, at, `the credit activity read settled for store ${id}`);
+  return at;
+}
+/** Wait until store `id`'s activity settled since record `from`; throws at once when the view failed before its read was sent. */
+async function waitActivitySettled(page, id, from, label) {
+  let outcome = 'pending';
+  await page.waitFor(async () => { outcome = await activitySettledFor(page, id, from); return outcome !== 'pending'; }, 30_000, label);
+  if (outcome === 'failed-before-read') throw new Error(`activity view failed before its read for store ${id}`);
+}
+/** Whether the shop reads store `id`'s credit activity on its choice: not readOnly in this page's last answered store directory. */
+function activityExpected(page, id) {
+  const dir = sentBy(page, isStoresRead).filter((r) => r.status === 200).at(-1);
+  let stores = null;
+  try { stores = JSON.parse(dir?.replied?.text ?? '').stores; } catch { /* unreadable: expected, so a wrong guess fails loudly */ }
+  const entry = Array.isArray(stores) ? stores.find((x) => x.id === id) : undefined;
+  return entry?.readOnly !== true;
+}
+/**
+ * Store `id`'s activity since record `from`: 'settled' (the wait said with no GET, or its GET answered and the view not
+ * loading), 'failed-before-read' (the view failed with no GET sent: its session check failed first), else 'pending'.
+ */
+async function activitySettledFor(page, id, from) {
+  const view = await page.evaluate(`(() => { const s = ${q('issued-store')}; const p = ${q('issued-credit-activity-state')}; return { store: s?.value ?? null, phase: p?.dataset.phase ?? 'none' }; })()`);
+  if (view.store !== id) return 'pending';
+  if (view.phase === 'rate-limited') return 'settled';
+  const gets = sentBy(page, (r) => r.method === 'GET' && r.path === `${STORES}/${id}/credit-notes`, from);
+  if (gets.length === 0 && view.phase === 'failed') return 'failed-before-read';
+  return gets.length > 0 && gets.every((r) => r.status !== null) && view.phase !== 'loading' ? 'settled' : 'pending';
 }
 const panelPhaseOf = (page) => page.evaluate(`${q('issued-settings-state')}?.dataset.phase ?? null`);
 /** "Issuing settings": the panel opens and its one read answers. */
@@ -8135,8 +8219,40 @@ const isPaymentSettle = (store, id) => (r) => r.method === 'POST' && r.path === 
 const isPaymentAttemptsRead = (store) => (r) => r.method === 'GET' && r.path === `${STORES}/${store}/payment-attempts`;
 /** Any payment write of any store (register, record, settle, reversal). */
 const isPaymentWrite = (r) => r.method === 'POST' && (isPaymentRoute(r) || /^\/api\/v1\/stores\/[^/]+\/payment/.test(r.path));
-/** An issued read that is no void route and no payments-family route: a list page or one invoice's detail. */
-const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r) && !isPaymentRoute(r);
+// M7B-CREDITNOTES-CN-P2 (doc 17 §4.1, D-P2-12): every open from the Issued list (issued or voided) also reads the invoice's
+// credit-note list page one — GET …/invoices/{id}/credit-notes, under the issued-read matcher — and the attempts lookup (GET
+// /stores/{id}/credit-note-attempts, outside it). The pins count the list apart: still ONE detail GET per open.
+/**
+ * Any credit-note route of any store: under one invoice (list, issue, registration, proof, settlement), the store's attempts
+ * lookup, or (doc 18, the new arm) the store-wide credit activity GET /api/v1/stores/{id}/credit-notes. The new arm changes no
+ * pin below: isIssuedDetailOrList already leaves the store-wide GET out, since isIssuedRead requires an /invoices segment.
+ */
+const isCreditRoute = (r) => /^\/api\/v1\/stores\/[^/]+\/(?:invoices\/[^/]+\/credit-note|credit-note-attempts$|credit-notes$)/.test(r.path);
+/** Doc 18: the store-wide credit activity read of any store (no invoice segment). */
+const isActivityRead = (r) => r.method === 'GET' && /^\/api\/v1\/stores\/[^/]+\/credit-notes$/.test(r.path);
+/**
+ * `records` without doc 18's activity chain: each activity GET and, when it was refused 403, the first session read after it
+ * and the first store-directory read after that (its §8.4 classification). Session reads are alike, so a pin's exact list
+ * keeps its original meaning for every other read.
+ */
+function withoutActivity(records) {
+  const chain = new Set();
+  records.forEach((r, i) => {
+    if (!isActivityRead(r)) return;
+    chain.add(r);
+    if (r.status !== 403) return;
+    const check = records.findIndex((x, j) => j > i && isSessionRead(x) && !chain.has(x));
+    if (check < 0) return;
+    chain.add(records[check]);
+    const dir = records.findIndex((x, j) => j > check && isStoresRead(x) && !chain.has(x));
+    if (dir >= 0) chain.add(records[dir]);
+  });
+  return records.filter((r) => !chain.has(r));
+}
+/** An issued read that is no void route, no payments-family route and no credit-note route: a list page or one invoice's detail. */
+const isIssuedDetailOrList = (r) => isIssuedRead(r) && !isVoidRoute(r) && !isPaymentRoute(r) && !isCreditRoute(r);
+const isCreditListOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/credit-notes`;
+const isCreditLookupOf = (store) => (r) => r.method === 'GET' && r.path === `${STORES}/${store}/credit-note-attempts`;
 /** The shop's own void trigger (ServerIssuedInvoices.tsx VOID_TEXT.open). */
 const VOID_OPEN = 'Void invoice…';
 /**
@@ -8156,6 +8272,8 @@ async function eligibilityAnswered(page, store, id, from) {
   let status = null;
   try { status = JSON.parse(detail?.replied?.text ?? 'null')?.invoice?.status ?? null; } catch { /* not JSON: no status */ }
   if (status === 'issued') await page.waitFor(() => sentBy(page, isPaymentEligibilityOf(store, id), from).some((r) => r.status !== null), 30_000, `the payment eligibility of ${id} answered`);
+  // CN-P2: every open from the Issued list (issued or voided) reads the credit-note list page one: part of the barrier.
+  await page.waitFor(() => sentBy(page, isCreditListOf(store, id), from).some((r) => r.status !== null), 30_000, `the credit-note list of ${id} answered`);
   await quiet(page, from);
   await page.settle();
 }
@@ -8341,7 +8459,7 @@ scenario('SIS-06', 'AC-09 AC-10 THE ISSUED LIST AND ONE INVOICE, BOTH TAX MODES 
       // M7B-PAYMENTS-P2C (R1): plus ONE payment reversal eligibility GET per issued open (allowed: the owner).
       [`${issuedPath(main.id)}/${row.id}/payment-eligibility 200 {"eligibility":"allowed"}`, `${issuedPath(main.id)}/${row.id}/payment-reversal-eligibility 200 {"eligibility":"allowed"}`].sort(),
       `invoice ${row.number}: ONE payment eligibility GET and ONE reversal eligibility GET, both allowed for the owner`);
-    assert.equal(sentBy(page, isIssuedRead, from).length, 5, `invoice ${row.number}: the open's budget is 5 reads (detail, void eligibility, payments, payment eligibility, reversal eligibility)`);
+    assert.equal(sentBy(page, isIssuedRead, from).length, 6, `invoice ${row.number}: the open's budget is 6 reads (detail, void eligibility, payments, payment eligibility, reversal eligibility, CN-P2's credit-note list)`);
     assert.equal(focus, 'issued-view-close', `invoice ${row.number}: Close has the first focus`);
     const { text, buttons, shell, ...content } = view;
     assert.deepEqual(content, viewShown(row), `invoice ${row.number}: the snapshot the database holds`);
@@ -8416,11 +8534,19 @@ scenario('SIS-07', 'AC-09 AC-10 MORE THAN ONE PAGE, THEN A STORE CHANGE — 23 i
   const fromHeld = st.api.length;
   await page.click(by('issued-load-more'));
   await held.reached;
-  await pickIssuedStore(page, other.id);
+  // Doc 18: a response is held at the front across this pick, so the helper does not wait for the activity read; this
+  // scenario releases the hold itself, then asserts that read's outcome.
+  const pickAt = await pickIssuedStore(page, other.id, { awaitActivity: false });
   await waitIssuedRows(page, 1, 'the other store listed while the old page is held');
   held.release();
   await quiet(page, fromHeld);
+  await waitActivitySettled(page, other.id, pickAt, 'doc 18: the other store\'s credit activity settled after the release');
   await page.settle();
+  const activity = sentBy(page, (r) => r.method === 'GET' && /\/credit-notes$/.test(r.path) && !/\/invoices\//.test(r.path), pickAt);
+  const settled = await page.evaluate(`${q('issued-credit-activity-state')}?.dataset.phase ?? 'none'`);
+  record('SIS-07', { phase: 'held page: activity', activity: activity.map(readLine), settled });
+  assert.deepEqual(activity.map((r) => r.path), [`${STORES}/${other.id}/credit-notes`], 'doc 18: ONE activity GET, for the store just chosen, none for the store whose page is held');
+  assert.deepEqual([activity[0].status, settled], [200, 'ready'], `doc 18: the owner's activity read answered 200 and the view is ready for that store — a 403 here is a defect (${readLine(activity[0])}, ${settled})`);
   const after = { rows: await issuedRowsOf(page), phase: await issuedListPhase(page), more: await has(page, 'issued-load-more') };
   record('SIS-07', { phase: 'held page', reads: sentBy(page, isIssuedRead, fromHeld).map((r) => readLine(r).replace(/cursor=[^& ]+/, 'cursor=…')), rows: after.rows.length });
   assert.deepEqual(after, { rows: otherStored.map(rowShown), phase: 'ready', more: false }, 'the late page of the first store changed nothing');
@@ -8469,7 +8595,7 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   // M7B-PAYMENTS-P2C (R1): ONE payment reversal eligibility read, refused at Invoices View (reverse_invoice_payments needs Approve).
   assert.deepEqual(sentBy(page, isReversalEligibilityRead, from).map(readLine), [`${issuedPath(main.id)}/${invoiceId}/payment-reversal-eligibility 403 forbidden`], 'ONE reversal eligibility read, refused for Invoices View');
   assert.deepEqual(sentBy(page, isPaymentWrite, from).map(readLine), [], 'no payment write');
-  assert.equal(sentBy(page, (r) => isIssuedRead(r) && r.path.startsWith(`${issuedPath(main.id)}/${invoiceId}`), from).length, 5, 'the open\'s budget: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
+  assert.equal(sentBy(page, (r) => isIssuedRead(r) && r.path.startsWith(`${issuedPath(main.id)}/${invoiceId}`), from).length, 6, 'the open\'s budget: detail, void eligibility, payments, payment eligibility, reversal eligibility, CN-P2\'s credit-note list — 6 reads');
 
   // The owner narrows the manager's Customers level to None; the page asks again (a reload, then the store chosen again).
   await levelVia(direct, 'manager', 'customers', 'none');
@@ -8483,8 +8609,12 @@ scenario('SIS-08', 'AC-03 AC-09 THE ISSUED READS FOLLOW THE STORED LEVELS — a 
   await waitData(page, 'issued-list-state', 'phase', 'denied');
   await quiet(page, refusedFrom);
   await page.settle();
-  const after = sentBy(page, () => true, refusedFrom);
+  const full = sentBy(page, () => true, refusedFrom);
+  const after = withoutActivity(full); // doc 18: the activity chain of the same pick is not this pin's — asserted on its own below
   const refusedAt = after.findIndex(isIssuedRead);
+  const chain = full.filter((r) => !after.includes(r)).map((r) => `${r.method} ${r.path} ${answered(r)}`);
+  assert.deepEqual(chain, [`GET ${STORES}/${main.id}/credit-notes 403 forbidden`, 'GET /api/v1/session 200', `GET ${STORES} 200`],
+    'doc 18: the activity chain the filter took out — exactly ONE activity GET for this store, refused, then its classification\'s ONE session read and ONE directory read, in that order');
   const shown = { text: await textOf(page, 'issued-list-state'), rows: (await issuedRowsOf(page)).length, more: await has(page, 'issued-load-more'), retry: await has(page, 'issued-list-retry') };
   record('SIS-08', { after: after.map(apiLine), shown });
   assert.deepEqual(after.filter(isIssuedRead).map(readLine), [`${issuedPath(main.id)}?limit=20 403 forbidden`], 'ONE list read, refused by the server');
@@ -8645,7 +8775,9 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   const voidable = shown.status === 'Issued';
   // P2B: an issued invoice with a remaining amount, opened by the owner (payment eligibility allowed), also offers Record payment
   // in its Payments section, after the lines; a voided one reads no payment eligibility and offers no recording.
-  const tabOrder = voidable ? ['issued-view-void', 'issued-view-id-copy', 'issued-view-lines-scroll', 'issued-payments-record', 'issued-view-close'] : ['issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'];
+  // CN-P2 (doc 17 §2.1-§2.2): the owner's issued invoice, its attempts lookup read to the end, also offers "Issue credit note"
+  // beside Record payment; a voided one offers neither.
+  const tabOrder = voidable ? ['issued-view-void', 'issued-view-id-copy', 'issued-view-lines-scroll', 'issued-payments-record', 'issued-payments-credit-issue', 'issued-view-close'] : ['issued-view-id-copy', 'issued-view-lines-scroll', 'issued-view-close'];
   for (const { cell, width, height, font, overflows } of ISSUED_CELLS) {
     await page.setViewport(width, height);
     if (font !== null) await page.send('Page.setFontSizes', { fontSizes: { standard: font, fixed: font } });
@@ -8670,6 +8802,8 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     const from = st.api.length;
     await openIssuedInvoice(page, invoiceId, stored.number, { keyboard: cell === KEYBOARD_OPEN_CELL }); // by pointer since R1, from the keyboard in one cell
     await eligibilityAnswered(page, store, invoiceId, from); // VOID-P2: measured once the eligibility answer has filled its row
+    // CN-P2: the action shows only once the open's attempts lookup is read to the end (D-P2-3): waited for, never raced.
+    if (voidable) await page.waitFor(`!!${q('issued-payments-credit-issue')}`, 30_000, `${cell}: Issue credit note offered`);
     const b = await issuedBox(page);
     const { text, buttons, shell, ...content } = await issuedViewOf(page);
     // The void trigger (VOID-P2): there exactly when the invoice is issued, and then in view and on top once scrolled to.
@@ -8715,7 +8849,8 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
     check(same(sentBy(page, isPaymentEligibilityRead, from).map(readLine), voidable ? [`${issuedPath(store)}/${invoiceId}/payment-eligibility 200`] : []), `${cell}: not ${voidable ? 'ONE' : 'no'} payment eligibility GET per open`);
     // M7B-PAYMENTS-P2C (R1): ONE payment reversal eligibility GET per open of an issued invoice (the owner: allowed), none for a voided one: 5 reads / 3.
     check(same(sentBy(page, isReversalEligibilityRead, from).map(readLine), voidable ? [`${issuedPath(store)}/${invoiceId}/payment-reversal-eligibility 200`] : []), `${cell}: not ${voidable ? 'ONE' : 'no'} reversal eligibility GET per open`);
-    check(sentBy(page, isIssuedRead, from).length === (voidable ? 5 : 3), `${cell}: the open's read budget is not ${voidable ? 5 : 3} (${sentBy(page, isIssuedRead, from).map(readLine)})`);
+    // CN-P2: every open also reads the credit-note list page one: 6 reads / 4.
+    check(sentBy(page, isIssuedRead, from).length === (voidable ? 6 : 4), `${cell}: the open's read budget is not ${voidable ? 6 : 4} (${sentBy(page, isIssuedRead, from).map(readLine)})`);
     check(voidable ? trigger !== null && trigger.inView && trigger.onTop : trigger === null, `${cell}: the Void invoice… trigger ${voidable ? 'is not in view and on top' : 'is offered on a voided invoice'} ${JSON.stringify(trigger)}`);
     check(same(tabs, tabOrder), `${cell}: Tab from Close went ${JSON.stringify(tabs)}`);
     await alsoOpen(cell, check);
@@ -8727,7 +8862,7 @@ async function issuedCellProblems(page, id, store, stored, shown, alsoOpen = asy
   return problems;
 }
 
-scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened by an ordinary pointer click (from the keyboard at 320x640) on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured on the real page (since M7B-INVOICES-VOID-P2-R1 no section hold: the section lies inside the viewport, except at 768x1024 with 16 px text, whose md layout keeps the older page overflow, recorded), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open (since VOID-P2 beside ONE void eligibility GET, the owner\'s Void invoice… in view and on top and reached by Tab before the lines)', async () => {
+scenario('SIS-09', 'AC-10 BOUNDED LAYOUT OF ONE ISSUED INVOICE — an invoice issued through the entry with the longest seller values the settings take (legal name 200, store name 120, eight 120-character address lines, a 64-character unbroken tax registration ID), a 200-character customer name, a 256-character line description and the largest total the issue takes ($90,071,992,547,409.91, 2^53-1 cents, "No tax calculated"), opened by an ordinary pointer click (from the keyboard at 320x640) on ONE page at 1440x900, 768x1024, 320x640 and 320x480 CSS px (deviceScaleFactor 1, the browser\'s 16 px default) and at 768x1024 with a 24 px default text size (Page.setFontSizes): its list row (number, customer, Total, time, Issued, Open), measured on the real page (since M7B-INVOICES-VOID-P2-R1 no section hold: the section lies inside the viewport, except at 768x1024 with 16 px text, whose md layout keeps the older page overflow, recorded), stays inside that section, its Total on one line, its time breaking only at its spaces, its customer whole (every box of it inside the row, nothing clipping it) and Open in view and on top once scrolled to; the dialog never overflows sideways nor lies outside the viewport; Close is in view, on top and focused first; every amount is on one line and the Total\'s, scrolled into view, is whole inside the dialog and the viewport; the lines are a named region reached by Tab that scrolls sideways where the table is wider (ArrowRight), and the dialog itself never scrolls sideways; the issue time wraps only at its spaces; the long texts are shown whole as the database holds them; Escape gives focus back to the row\'s Open; one GET per open (since VOID-P2 beside ONE void eligibility GET, the owner\'s Void invoice… in view and on top and reached by Tab before the lines; since CN-P2 the owner\'s Issue credit note reached by Tab after Record payment)', async () => {
   const { tenant, stores: [main], boss } = await draftShop('i9', ['main']);
   const direct = await directLogin(boss);
   const values = {
@@ -9334,7 +9469,8 @@ scenario('SIS-16', 'VOID-10 R-BR-04 R-SHOP-2/3/5/6/7 A VOIDED INVOICE IN THE SHO
       `${label}: ${eligibility ? 'ONE void eligibility GET' : 'no void route'}`);
     // P2B: a voided invoice's open reads no payment eligibility (budget 3 from the list's Open; the drafts card's View invoice: 1).
     assert.deepEqual(sentBy(page, isPaymentEligibilityRead, since).map(readLine), [], `${label}: no payment eligibility GET for a voided invoice`);
-    assert.equal(sentBy(page, isIssuedRead, since).length, eligibility ? 3 : 1, `${label}: the open's read budget (${sentBy(page, isIssuedRead, since).map(readLine)})`);
+    // CN-P2: the list's Open also reads the credit-note list page one (budget 4); the drafts card's View invoice reads none.
+    assert.equal(sentBy(page, isIssuedRead, since).length, eligibility ? 4 : 1, `${label}: the open's read budget (${sentBy(page, isIssuedRead, since).map(readLine)})`);
     assert.equal(await has(page, 'issued-payments-record'), false, `${label}: no Record payment on a voided invoice`);
     const answer = JSON.parse(reads[0].replied.text).invoice;
     assert.deepEqual([answer.status, Object.keys(answer).at(-1), JSON.stringify(answer.void)], ['voided', 'void', JSON.stringify({ voidedAt, reasonCode: 'duplicate' })], `${label}: the answer's lifecycle, \`void\` last`);
@@ -9697,16 +9833,19 @@ scenario('SIS-18', 'VOID-08 AC-02 AUTHORITY FROM THE STORED LEVELS: A REFUSAL, T
   const page = await voidPage(manager, main.id, 1);
   const from = await openVoidable(page, main.id, id, 1);
   const eligAt = st.api.indexOf(sentBy(page, isVoidEligibility(main.id, id), from)[0]);
-  await page.waitFor(() => sentBy(page, isSessionRead, eligAt + 1).some((r) => r.status !== null), 15_000, 'the 403\'s fresh session check answered');
+  // CN-P2 (doc 17 §3.6 rule 1): the open's credit-note reads add the attempts lookup's 403 with ONE fresh check of its own, and
+  // their chain's session read (shared with one already in flight when there is one): 2 or 3 session reads in all, never a loop.
+  await page.waitFor(() => sentBy(page, isSessionRead, eligAt + 1).filter((r) => r.status !== null).length >= 2, 15_000, 'the 403s\' fresh session checks answered');
   await quiet(page, from);
   await page.settle();
+  const checks = sentBy(page, isSessionRead, eligAt + 1).length;
   const refused = {
-    eligibility: sentBy(page, isVoidEligibility(main.id, id), from).map(answered), freshChecks: sentBy(page, isSessionRead, eligAt + 1).length, logins: sentBy(page, isLogin, from).length,
+    eligibility: sentBy(page, isVoidEligibility(main.id, id), from).map(answered), freshChecks: checks === 2 || checks === 3 ? '2 or 3' : checks, logins: sentBy(page, isLogin, from).length,
     buttons: (await issuedViewOf(page)).buttons, row: await textOf(page, 'issued-view-void-row'), status: await textOf(page, 'issued-view-void-status'), alert: await textOf(page, 'issued-view-void-alert'),
   };
   record('SIS-18', { phase: 'edit', ...refused, sent: sentBy(page, () => true, from).map(apiLine) });
-  assert.deepEqual(refused, { eligibility: ['403 forbidden'], freshChecks: 1, logins: 0, buttons: ['Close'], row: '', status: '', alert: '' },
-    'Invoices Edit: the eligibility 403 and ONE fresh check; no Void invoice… and nothing said, no login');
+  assert.deepEqual(refused, { eligibility: ['403 forbidden'], freshChecks: '2 or 3', logins: 0, buttons: ['Close'], row: '', status: '', alert: '' },
+    'Invoices Edit: the eligibility 403 and ONE fresh check (and the attempts lookup\'s ONE); no Void invoice… and nothing said, no login');
   const m = await directLogin(manager);
   const beforeDirect = await counts();
   const directVoid = await call('POST', `${issuedPath(main.id)}/${id}/void`, { session: m, key: randomUUID(), body: { expectedTenant: tenant, reasonCode: 'other' } });
@@ -10927,7 +11066,9 @@ scenario('SIS-25', 'M7B-PAYMENTS-P2B RECORD A PAYMENT END TO END — the owner o
     `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
     // M7B-PAYMENTS-P2C (R1): an issued open also reads the payment reversal eligibility ONCE (the owner: allowed).
     `${issuedPath(main.id)}/${id}/payment-reversal-eligibility 200`,
-  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
+    // CN-P2: and the credit-note list page one ONCE (D-P2-12).
+    `${issuedPath(main.id)}/${id}/credit-notes 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility, credit-note list — 6 reads');
   await fillPaymentForm(page, '12.50', 'cash');
   const from = st.api.length;
   await page.click(by('issued-payments-submit'));
@@ -11472,7 +11613,9 @@ scenario('SIS-34', 'M7B-PAYMENTS-P2B QA: THE FULL BALANCE RECORDED, THEN A RELOA
     `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/payment-eligibility 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${issuedPath(main.id)}/${id}/void-eligibility 200`,
     // M7B-PAYMENTS-P2C (R1): an issued open also reads the payment reversal eligibility ONCE (the owner: allowed).
     `${issuedPath(main.id)}/${id}/payment-reversal-eligibility 200`,
-  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility — 5 reads');
+    // CN-P2: and the credit-note list page one ONCE (D-P2-12).
+    `${issuedPath(main.id)}/${id}/credit-notes 200`,
+  ].sort(), 'the open: detail, void eligibility, payments, payment eligibility, reversal eligibility, credit-note list — 6 reads');
   assert.equal(st.api.slice(reloaded).filter(isPaymentAttemptsRead(main.id)).length, 0, 'no lookup on open: only on a press');
   const shown = {
     remaining: await textOf(page, 'issued-payments-remaining'), items: await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-item"]').length`),
@@ -11875,3 +12018,2209 @@ scenario('SIS-39', 'M7B-PAYMENTS-P2C A STALE SIGN-IN (PAST THE 10-MINUTE RECENT 
   assert.deepEqual(await storedReversalOf(pid), { reversals: [], audits: 0 }, 'NO reversal row and no reverse audit');
   await assertNoLeak(page);
 }, 300_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-CREDITNOTES CN-P2 (docs/phase-4/17 §4.1, §3.6) — the READ side: every open from the Issued list reads the invoice's
+// credit-note list page one and the attempts lookup. BF: creditShop seeds the notes by owner SQL (no issue through the shop).
+// The literals are the shop's own texts (ServerIssuedInvoices.tsx CREDIT_TEXT; invoiceIssuingClient.ts reason labels).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const CREDIT_SAID = Object.freeze({
+  title: 'Credit notes', loaded: (n) => `${n} more loaded.`, active: 'Active', withdrawn: 'Withdrawn', notSet: 'Name not set',
+  reasons: { pricing_error: 'Pricing error', service_issue: 'Service issue', goodwill: 'Goodwill', billing_error: 'Billing error' },
+  withdrawals: { entered_in_error: 'Entered by mistake', wrong_amount: 'Wrong amount', wrong_invoice: 'Wrong invoice' },
+});
+const CN_REASONS = Object.keys(CREDIT_SAID.reasons);
+const CN_TIME = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
+
+/**
+ * BF: credit notes on one issued invoice as 038's issue and withdrawal leave them — each with its confirmed registration, numbered
+ * 1.. in issue order, 3 ms apart after the invoice's issue — written by owner SQL in ONE transaction with 038's row guards lifted
+ * inside it only (cleanIssuing removes them). `specs`: [{ gross, reason, by, withdrawal: { reason, by } | null }]. The notes as
+ * stored, in the list's order.
+ */
+async function seedCreditNotes(tenant, store, invoice, specs) {
+  await owner.begin(async (sql) => withTriggersLifted(sql, CN_GUARDS, async () => {
+    for (const [k, spec] of specs.entries()) {
+      const reg = randomUUID();
+      const id = randomUUID();
+      const made = await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_registration (registration_id, tenant_id, store_id,
+          invoice_id, registered_by, attempt_id, gross_cents, reason_code, session_digest, key_generation, registered_xact, registered_at)
+        select ${reg}, tenant_id, store_id, invoice_id, ${spec.by}, ${randomUUID()}, ${spec.gross}, ${spec.reason}, ${randomBytes(32)}, 1,
+          pg_catalog.pg_current_xact_id(), issued_at + make_interval(secs => ${(3 * k + 1) / 1000})
+        from tmpos_invoice_issue.issued_invoice where invoice_id = ${invoice} and tenant_id = ${tenant} and store_id = ${store}`;
+      assert.equal(made.count, 1, 'the seeded registration names the invoice');
+      await sql`insert into tmpos_invoice_credit_note.invoice_credit_note (credit_note_id, tenant_id, store_id, invoice_id, attempt_id,
+          registration_id, credit_note_number, gross_cents, tax_cents, net_cents, reason_code, issued_at, issued_by)
+        select ${id}, tenant_id, store_id, invoice_id, attempt_id, registration_id, ${k + 1}, gross_cents, 0, gross_cents, reason_code,
+          registered_at + interval '1 millisecond', registered_by
+        from tmpos_invoice_credit_note.invoice_credit_note_registration where registration_id = ${reg}`;
+      await sql`update tmpos_invoice_credit_note.invoice_credit_note_registration set credit_note_id = ${id},
+          acknowledged_at = registered_at + interval '2 milliseconds' where registration_id = ${reg}`;
+      if (spec.withdrawal) await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_withdrawal (credit_note_id, tenant_id, store_id,
+          invoice_id, reason_code, withdrawn_at, withdrawn_by)
+        select credit_note_id, tenant_id, store_id, invoice_id, ${spec.withdrawal.reason}, issued_at + interval '1 second', ${spec.withdrawal.by}
+        from tmpos_invoice_credit_note.invoice_credit_note where credit_note_id = ${id}`;
+    }
+  }));
+  const rows = await owner`select c.credit_note_id, c.credit_note_number::int as number, c.gross_cents::int as gross, c.reason_code, c.issued_by,
+      to_char(c.issued_at at time zone 'UTC', ${CN_TIME}) as issued_at, to_char(w.withdrawn_at at time zone 'UTC', ${CN_TIME}) as withdrawn_at,
+      w.reason_code as withdrawal_reason, w.withdrawn_by
+    from tmpos_invoice_credit_note.invoice_credit_note c
+    left join tmpos_invoice_credit_note.invoice_credit_note_withdrawal w on w.credit_note_id = c.credit_note_id
+    where c.invoice_id = ${invoice} order by c.issued_at, c.credit_note_id`;
+  return Array.from(rows, (r) => ({
+    id: r.credit_note_id, number: r.number, gross: r.gross, reason: r.reason_code, by: r.issued_by, issuedAt: r.issued_at,
+    withdrawnAt: r.withdrawn_at, withdrawalReason: r.withdrawal_reason, withdrawnBy: r.withdrawn_by,
+  }));
+}
+/**
+ * BF: voidShop's store with one issued $42.00 invoice, a named clerk and a staff member whose display name is not set (neither
+ * signs in), and the credit notes `specs({ clerk, unnamed })` lists. Voided first when asked (038's barrier refuses a void
+ * while a note is active: a voided invoice holds withdrawn notes only). `names`: staff id → display name (null: not set).
+ */
+async function creditShop(label, specs, { voided = false } = {}) {
+  const shop = await voidShop(label, 1);
+  const id = shop.ids[0];
+  const clerk = await actor(`${label}-clerk`, []);
+  const unnamed = await actor(`${label}-unnamed`, []);
+  const names = { [clerk.id]: `Synthetic Clerk ${label} ${SUFFIX}`, [unnamed.id]: null };
+  await owner`update app_user set display_name = ${names[clerk.id]} where internal_user_id = ${clerk.id}`;
+  if (voided) {
+    const res = await call('POST', `${issuedPath(shop.main.id)}/${id}/void`, { session: shop.direct, key: randomUUID(), body: { expectedTenant: shop.tenant, reasonCode: 'other' } });
+    assert.equal(res.status, 200, `the void: ${res.text}`);
+  }
+  const notes = await seedCreditNotes(shop.tenant, shop.main.id, id, specs({ clerk: clerk.id, unnamed: unnamed.id }));
+  return { ...shop, id, names, notes };
+}
+/** `n` active notes by the named clerk, the reasons in turn: two pages of the list from 51 on. */
+const clerkNotes = (n) => ({ clerk }) => Array.from({ length: n }, (_, k) => ({ gross: 25, reason: CN_REASONS[k % 4], by: clerk, withdrawal: null }));
+
+/** The credit-note list as shown: heading (and the Payments heading's level), state, list and each item ('absent': not rendered). */
+const creditListOf = (page) => page.evaluate(`(() => {
+  const box = document.querySelector('[data-testid="issued-payments-credit-notes"]');
+  if (box === null) return null;
+  const el = (n, id) => n.querySelector('[data-testid="' + id + '"]');
+  const t = (n, id) => el(n, id)?.textContent.trim() ?? null;
+  const at = (n, id) => n.querySelector('time[data-testid="' + id + '"]')?.getAttribute('datetime') ?? null;
+  const by = (n, id) => { const p = el(n, id); return p === null ? 'absent' : { text: p.textContent.trim(), bdi: p.querySelector('bdi')?.textContent ?? null }; };
+  const h = el(box, 'issued-payments-credit-title'), s = el(box, 'issued-payments-credit-state'), ul = el(box, 'issued-payments-credit-list');
+  const lis = [...box.querySelectorAll('[data-testid="issued-payments-credit-item"]')];
+  return {
+    heading: { tag: h?.tagName ?? null, text: h?.textContent.trim() ?? null, after: document.getElementById('issued-payments-title')?.tagName ?? null },
+    state: { phase: s?.dataset.phase ?? null, role: s?.getAttribute('role') ?? null, text: s?.textContent.trim() ?? null },
+    list: ul === null ? null : { tag: ul.tagName, labelledBy: ul.getAttribute('aria-labelledby'), children: ul.children.length, allLi: [...ul.children].every((c) => c.tagName === 'LI') },
+    items: lis.map((li) => ({
+      id: li.dataset.id, number: t(li, 'issued-payments-credit-number'), status: t(li, 'issued-payments-credit-status'),
+      amount: t(li, 'issued-payments-credit-amount'), reason: t(li, 'issued-payments-credit-reason'),
+      issuedAt: at(li, 'issued-payments-credit-issued-at'), issuedText: t(li, 'issued-payments-credit-issued-at'),
+      withdrawnAt: at(li, 'issued-payments-credit-withdrawn-at'), withdrawnText: t(li, 'issued-payments-credit-withdrawn-at'),
+      withdrawalReason: t(li, 'issued-payments-credit-withdrawal-reason'),
+      issuedBy: by(li, 'issued-payments-credit-issued-by'), withdrawnBy: by(li, 'issued-payments-credit-withdrawn-by'),
+    })),
+    words: lis.every((li) => li.innerText.includes(el(li, 'issued-payments-credit-status').textContent)),
+    taxOrNet: /\\b(tax|net)\\b/i.test(ul?.innerText ?? ''),
+    more: el(box, 'issued-payments-credit-more') !== null,
+  };
+})()`);
+const signedBy = (label, name) => ({ text: `${label} ${name ?? CREDIT_SAID.notSet}`, bdi: name ?? CREDIT_SAID.notSet });
+/** The item the list must show for a stored note; the staff names only when the reader is the store-scope owner (`named`). */
+const creditItemShown = (n, names, named) => ({
+  id: n.id, number: `CN-${n.number}`, status: n.withdrawnAt === null ? CREDIT_SAID.active : CREDIT_SAID.withdrawn, amount: usd(n.gross),
+  reason: CREDIT_SAID.reasons[n.reason], issuedAt: n.issuedAt, issuedText: secondOf(n.issuedAt),
+  withdrawnAt: n.withdrawnAt, withdrawnText: n.withdrawnAt === null ? null : secondOf(n.withdrawnAt),
+  withdrawalReason: n.withdrawnAt === null ? null : CREDIT_SAID.withdrawals[n.withdrawalReason],
+  issuedBy: named ? signedBy('Issued by', names[n.by]) : 'absent',
+  withdrawnBy: named && n.withdrawnAt !== null ? signedBy('Withdrawn by', names[n.withdrawnBy]) : 'absent',
+});
+/** The attempts lookup's state (its rows counted, never named) and its alert. */
+const creditLookupOf = (page) => page.evaluate(`(() => { const d = ${q('issued-payments-credit-lookup')}; return d === null ? null : { phase: d.dataset.phase, rows: d.dataset.rows, alert: ${q('issued-payments-credit-lookup-alert')}?.textContent.trim() ?? null }; })()`);
+/** The issued dialog's buttons whose name says credit or withdraw (the issue action, its card's): none for a reader. */
+const creditControlsOf = (page) => page.evaluate(`[...(${q('issued-view')}?.querySelectorAll('button') ?? [])].map((b) => b.textContent.trim()).filter((t) => /credit|withdraw/i.test(t))`);
+/** The open's credit-note reads answered (the lookup only when `lookup`), the list ready with `n` items, the lookup settled. */
+async function creditSettled(page, store, from, n, { lookup = true } = {}) {
+  if (lookup) await page.waitFor(() => sentBy(page, isCreditLookupOf(store), from).some((r) => r.status !== null), 30_000, 'the attempts lookup answered');
+  await page.waitFor(async () => { const l = await creditListOf(page); return l?.state.phase === 'ready' && l.items.length === n; }, 30_000, `the credit-note list ready with ${n} items`);
+  await page.waitFor(async () => !['loading', 'idle'].includes((await creditLookupOf(page))?.phase), 15_000, 'the attempts lookup settled');
+  await quiet(page, from);
+  await page.settle();
+}
+/** From now on, every change of `page`'s credit-note list (the ids it shows, in order) and of its lookup state ("phase:rows"). */
+const watchCreditList = (page) => page.evaluate(`(() => {
+  const ids = () => [...document.querySelectorAll('[data-testid="issued-payments-credit-item"]')].map((li) => li.dataset.id).join(',');
+  const look = () => { const d = document.querySelector('[data-testid="issued-payments-credit-lookup"]'); return d === null ? 'none' : d.dataset.phase + ':' + d.dataset.rows; };
+  window.__cnSnaps = [ids()];
+  window.__cnLookups = [look()];
+  new MutationObserver(() => {
+    const now = ids(); if (now !== window.__cnSnaps.at(-1)) window.__cnSnaps.push(now);
+    const l = look(); if (l !== window.__cnLookups.at(-1)) window.__cnLookups.push(l);
+  }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-id', 'data-phase', 'data-rows'] });
+  return true;
+})()`);
+const creditSnapsOf = (page) => page.evaluate(`(window.__cnSnaps ?? []).map((s) => s === '' ? [] : s.split(','))`);
+const lookupSnapsOf = (page) => page.evaluate('window.__cnLookups ?? []');
+/** BF: `n` of `by`'s own attempts on the invoice, released (settled, no credit note), 3 ms apart: the attempts lookup pages them. */
+async function seedReleasedAttempts(invoice, by, n) {
+  await owner.begin(async (sql) => withTriggersLifted(sql, CN_GUARDS, async () => {
+    const made = await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_registration (registration_id, tenant_id, store_id, invoice_id,
+        registered_by, attempt_id, gross_cents, reason_code, session_digest, key_generation, registered_xact, registered_at, acknowledged_at)
+      select gen_random_uuid(), i.tenant_id, i.store_id, i.invoice_id, ${by}, gen_random_uuid(), 25, 'goodwill', pg_catalog.sha256(k::text::bytea), 1,
+        pg_catalog.pg_current_xact_id(), i.issued_at + make_interval(secs => k * 0.003), i.issued_at + make_interval(secs => k * 0.003 + 0.001)
+      from tmpos_invoice_issue.issued_invoice i, generate_series(1, ${n}) k where i.invoice_id = ${invoice}`;
+    assert.equal(made.count, n, 'the seeded attempts name the invoice');
+  }));
+}
+/** Each snapshot as its length when it is exactly the first k notes in order (never mixed, never out of order), else 'mixed'. */
+const prefixLengths = (snaps, notes) => snaps.map((s) => (s.every((id, i) => id === notes[i]?.id) ? s.length : 'mixed'));
+
+scenario('SCN-01', 'M7B-CREDITNOTES CN-P2 P2-45 P2-55 P2-56 (B) THE INVOICE\'S CREDIT NOTES, LISTED AND PAGED FOR THE OWNER — 102 credit notes seeded by owner SQL on an issued $42.00 invoice (CN-1 $12.50 Pricing error and CN-2 $5.00, withdrawn Wrong amount, by a named clerk; CN-3 by a staff member whose name is not set; CN-4 withdrawn by that member; the rest $0.25 by the clerk): the open reads ONE list page one (no cursor, 200) and ONE attempts lookup (200: read to the end, no row of this invoice); "Credit notes" is an h4 after the Payments h3 and labels a ul of 50 li, oldest first, each "CN-<n>", "Active" or "Withdrawn" in words, the gross, the reason label, "Issued <UTC second>" in a time holding the stored instant, the withdrawal\'s time and reason label, and "Issued by"/"Withdrawn by" the name or "Name not set" in a bdi; no tax or net; Show more from the keyboard reads the next page after the last id shown, says "50 more loaded." and keeps focus; pressed again it reads the last 2, says "2 more loaded.", goes away and focus moves to CN-101 (tabindex -1 until it blurs); 102 items as stored, every page under one session token, nothing written', async () => {
+  const { main, boss, id, names, notes } = await creditShop('n1', ({ clerk, unnamed }) => Array.from({ length: 102 }, (_, k) => ({
+    gross: [1250, 500][k] ?? 25, reason: CN_REASONS[k % 4], by: k === 2 ? unnamed : clerk,
+    withdrawal: k === 1 ? { reason: 'wrong_amount', by: clerk } : k === 3 ? { reason: 'entered_in_error', by: unnamed } : null,
+  })));
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 50);
+  const shown = await creditListOf(page);
+  const reads = { list: sentBy(page, isCreditListOf(main.id, id), opened).map(readLine), lookup: sentBy(page, isCreditLookupOf(main.id), opened).map(readLine), lookupState: await creditLookupOf(page) };
+  record('SCN-01', { phase: 'open', reads, heading: shown.heading, state: shown.state, list: shown.list, more: shown.more });
+  assert.deepEqual(reads, {
+    list: [`${issuedPath(main.id)}/${id}/credit-notes 200`], lookup: [`${STORES}/${main.id}/credit-note-attempts 200`], lookupState: { phase: 'exhausted', rows: '0', alert: '' },
+  }, 'the open: ONE list page one (no cursor) and ONE attempts lookup, the owner\'s, read to the end with no row of this invoice');
+  assert.deepEqual({ heading: shown.heading, list: shown.list, phase: shown.state.phase, role: shown.state.role, more: shown.more, words: shown.words, taxOrNet: shown.taxOrNet }, {
+    heading: { tag: 'H4', text: CREDIT_SAID.title, after: 'H3' }, list: { tag: 'UL', labelledBy: 'issued-payments-credit-title', children: 50, allLi: true },
+    phase: 'ready', role: 'status', more: true, words: true, taxOrNet: false,
+  }, 'P2-45: "Credit notes" one level under the Payments heading, labelling a ul of one li per note; Show more; the status in words; no tax or net');
+  assert.deepEqual(shown.items, notes.slice(0, 50).map((n) => creditItemShown(n, names, true)), 'P2-45 P2-56: page one, oldest first, every field as stored; the owner sees "Issued by"/"Withdrawn by" the name or "Name not set"');
+
+  // P2-55: Show more, from the keyboard: focus stays on it while it stays; when it goes, focus moves to the first new item.
+  const more1 = st.api.length;
+  await page.call(by('issued-payments-credit-more'), function () { this.focus(); });
+  await page.press('Enter');
+  await page.waitFor(async () => (await textOf(page, 'issued-payments-credit-state')) === CREDIT_SAID.loaded(50), 30_000, '"50 more loaded." said');
+  await quiet(page, more1);
+  await page.settle();
+  const second = await creditListOf(page);
+  const paged = { reads: sentBy(page, isCreditListOf(main.id, id), more1).map(readLine), count: second.items.length, more: second.more, focus: await focusOf(page) };
+  record('SCN-01', { phase: 'show more', ...paged });
+  assert.deepEqual(paged, { reads: [`${issuedPath(main.id)}/${id}/credit-notes?after=${notes[49].id} 200`], count: 100, more: true, focus: 'issued-payments-credit-more' },
+    'P2-55: Show more reads ONE next page after the last id shown, says "50 more loaded." and keeps focus on it');
+  const more2 = st.api.length;
+  await page.press('Enter');
+  await page.waitFor(async () => (await textOf(page, 'issued-payments-credit-state')) === CREDIT_SAID.loaded(2), 30_000, '"2 more loaded." said');
+  await quiet(page, more2);
+  await page.settle();
+  const last = await creditListOf(page);
+  const moved = await page.evaluate(`(() => { const a = document.activeElement; return { testid: a?.dataset?.testid ?? a?.tagName ?? null, id: a?.dataset?.id ?? null, tabindex: a?.getAttribute('tabindex') ?? null }; })()`);
+  const ended = { reads: sentBy(page, isCreditListOf(main.id, id), more2).map(readLine), count: last.items.length, more: last.more, moved };
+  record('SCN-01', { phase: 'last page', ...ended });
+  assert.deepEqual(ended, {
+    reads: [`${issuedPath(main.id)}/${id}/credit-notes?after=${notes[99].id} 200`], count: 102, more: false,
+    moved: { testid: 'issued-payments-credit-item', id: notes[100].id, tabindex: '-1' },
+  }, 'P2-55: the last page (2 notes) read after the last id shown; Show more gone, focus on the first new item (tabindex -1)');
+  await page.press('Tab');
+  await page.settle();
+  assert.equal(await page.evaluate(`document.querySelector('[data-testid="issued-payments-credit-item"][data-id="${notes[100].id}"]').getAttribute('tabindex')`), null, 'the first new item loses tabindex -1 once it blurs');
+  assert.deepEqual(last.items, notes.map((n) => creditItemShown(n, names, true)), 'all 102 as stored, in order, no id twice');
+  const lists = sentBy(page, isCreditListOf(main.id, id), opened);
+  assert.ok(lists.length === 3 && typeof lists[0].headers[SESSION_CSRF] === 'string' && lists.every((r) => r.headers[SESSION_CSRF] === lists[0].headers[SESSION_CSRF]), 'every page under the one session token (compared, never printed)');
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), opened).map(apiLine), [], 'nothing written');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-02', 'M7B-CREDITNOTES CN-P2 P2-02 P2-56 (B) READERS WHO ARE NOT THE OWNER — an issued invoice with 3 credit notes (CN-2 withdrawn); a manager (Invoices Approve, Customers View), a technician (Invoices View, Customers View) and a sales_staff account of the store each open it: ONE list GET (200) shows the 3 notes with number, status, amount, reason and times but NO "Issued by" or "Withdrawn by" line; the attempts lookup is ONE GET answered 403 and ONE fresh session check confirms it under the same token: the lookup state is denied with no row and nothing said, no credit or withdraw control is rendered; a window focus sends no credit-note read, and a reopen reads the list again but never the lookup; nothing written', async () => {
+  const { tenant, main, direct, id, names, notes } = await creditShop('n2', ({ clerk, unnamed }) => [
+    { gross: 1250, reason: 'pricing_error', by: clerk, withdrawal: null },
+    { gross: 500, reason: 'goodwill', by: unnamed, withdrawal: { reason: 'wrong_invoice', by: clerk } },
+    { gross: 25, reason: 'billing_error', by: clerk, withdrawal: null },
+  ]);
+  await levelVia(direct, 'manager', 'customers', 'view');
+  await levelVia(direct, 'manager', 'invoices', 'approve');
+  await levelVia(direct, 'technician', 'customers', 'view');
+  const manager = await actor('n2-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  const tech = await actor('n2-tech', [grant(tenant, 'technician'), storeGrant(tenant, main.id, 'technician')], { role: 'technician' });
+  const staff = await actor('n2-staff', [grant(tenant, 'sales_staff'), storeGrant(tenant, main.id, 'sales_staff')], { role: 'sales_staff' });
+  for (const [who, label] of [[manager, 'manager'], [tech, 'technician'], [staff, 'sales_staff']]) {
+    const page = await voidPage(who, main.id, 1);
+    const opened = await openVoidable(page, main.id, id, 1);
+    await creditSettled(page, main.id, opened, 3);
+    const [lookup] = sentBy(page, isCreditLookupOf(main.id), opened);
+    const checks = sentBy(page, isSessionRead, st.api.indexOf(lookup) + 1).filter((r) => r.status === 200);
+    await focusAndSettle(page, 'focus');
+    const shown = await creditListOf(page);
+    const seen = {
+      list: sentBy(page, isCreditListOf(main.id, id), opened).map(answered), lookup: sentBy(page, isCreditLookupOf(main.id), opened).map(answered),
+      confirmed: checks.length >= 1 && answeredTokens(checks.slice(0, 1)).includes(lookup.headers[SESSION_CSRF]), lookupState: await creditLookupOf(page),
+      controls: await creditControlsOf(page), writes: sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), opened).map(apiLine),
+    };
+    record('SCN-02', { phase: label, ...seen, sent: sentBy(page, () => true, opened).map(apiLine) });
+    assert.deepEqual(seen, { list: ['200'], lookup: ['403 forbidden'], confirmed: true, lookupState: { phase: 'denied', rows: '0', alert: '' }, controls: [], writes: [] },
+      `${label}: ONE list read, ONE lookup 403 confirmed by ONE fresh check under the same token, no lookup row, no credit control, nothing written — and nothing more on a focus`);
+    assert.deepEqual(shown.items, notes.map((n) => creditItemShown(n, names, false)), `${label}: P2-56 the notes without any staff name`);
+    // The confirmed 403 holds for this generation and token at this store: a reopen reads the list, never the lookup again.
+    await page.click(by('issued-view-close'));
+    await page.waitFor(`!${q('issued-view')}`, 10_000, 'the dialog closed');
+    const again = await openVoidable(page, main.id, id, 1);
+    await creditSettled(page, main.id, again, 3, { lookup: false });
+    assert.deepEqual({ list: sentBy(page, isCreditListOf(main.id, id), again).map(answered), lookup: sentBy(page, isCreditLookupOf(main.id), again).map(answered), state: (await creditLookupOf(page))?.phase },
+      { list: ['200'], lookup: [], state: 'denied' }, `${label}: the reopen reads the list once and not the lookup`);
+    await page.close(); // its browser context disposed (idempotent in the scenario's cleanup): one live shop page at a time
+  }
+}, 300_000);
+
+scenario('SCN-03', 'M7B-CREDITNOTES CN-P2 P2-04 (B) A VOIDED INVOICE STILL LISTS ITS CREDIT NOTES — an invoice voided through the entry (a fresh direct sign-in, reason Other), then two withdrawn credit notes on it seeded by owner SQL (a voided invoice holds withdrawn ones only): the owner opens it from the Issued list: the dialog says "Voided", ONE list GET (200) and ONE attempts lookup (200) are read, both notes are listed "Withdrawn" with their withdrawal time and reason and the names, and no credit or withdraw control is rendered; nothing written', async () => {
+  const { main, boss, id, names, notes } = await creditShop('n3', ({ clerk, unnamed }) => [
+    { gross: 1250, reason: 'service_issue', by: clerk, withdrawal: { reason: 'wrong_invoice', by: clerk } },
+    { gross: 300, reason: 'goodwill', by: unnamed, withdrawal: { reason: 'entered_in_error', by: unnamed } },
+  ], { voided: true });
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 2);
+  const seen = {
+    status: await textOf(page, 'issued-view-status'), list: sentBy(page, isCreditListOf(main.id, id), opened).map(answered),
+    lookup: sentBy(page, isCreditLookupOf(main.id), opened).map(answered), controls: await creditControlsOf(page),
+    writes: sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), opened).map(apiLine),
+  };
+  record('SCN-03', seen);
+  assert.deepEqual(seen, { status: 'Voided', list: ['200'], lookup: ['200'], controls: [], writes: [] }, 'P2-04: a voided invoice: the list and the lookup read once, no credit control, nothing written');
+  assert.deepEqual((await creditListOf(page)).items, notes.map((n) => creditItemShown(n, names, true)), 'P2-04: both withdrawn notes listed as stored, with the owner\'s names');
+  await assertNoLeak(page);
+}, 180_000);
+
+/** This page's credit-note list read again from the Issued section's start under the session it holds now; the record index it began at. */
+async function reopenCredit(page, store, id) {
+  const from = st.api.length;
+  await openIssued(page);
+  await pickIssuedStore(page, store);
+  await waitIssuedRows(page, 1, 'the issued invoice listed again');
+  await openVoidable(page, store, id, 1);
+  return from;
+}
+/** A second tab of `page`'s browser context (one cookie jar, one sign-in store) signs in as `who`; this page then drops what it showed. */
+async function switchInOtherTab(page, who) {
+  const tab = await sameContextTab(page);
+  await signIn(tab, who);
+  await page.waitFor(async () => ((await creditListOf(page))?.items.length ?? 0) === 0, 30_000, 'this page no longer shows the rows read under the first session');
+  return tab;
+}
+
+scenario('SCN-04', 'M7B-CREDITNOTES CN-P2 P2-81 (B) SESSION ISOLATION, OWNER → OWNER IN ONE BROWSER CONTEXT — 52 credit notes, and 51 of the owner\'s own attempts (released, seeded) so the attempts lookup has two pages; (1) between LIST pages: the owner\'s page shows page one (50, the names) with Show more; a second tab of the same browser context signs in as a second store owner of the store: this page drops every row and name it read, and no request it sends after the switch carries the first session\'s token but that session\'s logout; read again in this page, the list starts from page one (no cursor) under the session the page holds now and Show more adds the last 2, never a mixed list (every state the first k notes in order, an empty one between the two sessions\' rows); (2) between LOOKUP pages, on a new browser: page two of the owner\'s lookup answered for the first session and held at the front while the other tab signs in; released, it joins nothing: the lookup never shows the first owner\'s rows, and read again it is the second owner\'s, exhausted with no row; which user ends signed in is not asserted', async () => {
+  const { tenant, main, boss, id, notes } = await creditShop('n4', clerkNotes(52));
+  await seedReleasedAttempts(id, boss.id, 51);
+  const other = await actor('n4-owner2', [grant(tenant, 'store_owner'), storeGrant(tenant, main.id, 'store_owner')], { role: 'store_owner' });
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 50);
+  assert.deepEqual({ lookups: sentBy(page, isCreditLookupOf(main.id), opened).map(answered), state: await creditLookupOf(page) },
+    { lookups: ['200', '200'], state: { phase: 'exhausted', rows: '51', alert: '' } }, 'the owner\'s lookup: two pages, read to the end, the 51 own attempts of this invoice');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  await watchCreditList(page);
+  const from = st.api.length;
+  await switchInOtherTab(page, other);
+  await quiet(page, from);
+  await page.settle();
+  record('SCN-04', { phase: 'switched', dialog: await has(page, 'issued-view'), sent: sentBy(page, () => true, from).map(apiLine) });
+  const reopen = await reopenCredit(page, main.id, id);
+  await creditSettled(page, main.id, reopen, 50);
+  const moreAt = st.api.length;
+  await page.click(by('issued-payments-credit-more'));
+  await page.waitFor(async () => (await creditListOf(page))?.items.length === 52, 30_000, 'the last 2 added');
+  await quiet(page, moreAt);
+  await page.settle();
+  const lists = sentBy(page, isCreditListOf(main.id, id), from);
+  const seen = {
+    snaps: prefixLengths(await creditSnapsOf(page), notes),
+    lists: lists.map((r) => `${r.query === '' ? 'page one' : r.query === `?after=${notes[49].id}` ? 'after CN-50' : 'other'} ${answered(r)}`),
+    listsCarryA: lists.some((r) => carries(r, aTokens)), carriersOfA: sentBy(page, (r) => !isLogout(r) && carries(r, aTokens), from).map(apiLine),
+  };
+  record('SCN-04', { phase: 'read again', ...seen, sent: sentBy(page, () => true, from).map(apiLine) });
+  assert.deepEqual(seen, { snaps: [50, 0, 50, 52], lists: ['page one 200', 'after CN-50 200'], listsCarryA: false, carriersOfA: [] },
+    'P2-81 (1): every row of the first session dropped; read again from page one under the session the page holds now; never a mixed list; nothing after the switch carries the first session\'s token but its logout');
+  await page.close();
+
+  // (2) Between lookup pages: page two's answer (the first session's) held at the front across the switch.
+  const page2 = await voidPage(boss, main.id, 1);
+  const held = gate((r) => r.frameId === page2.frameId && isCreditLookupOf(main.id)(r) && r.query !== '', 'response');
+  await openIssuedInvoice(page2, id, 1);
+  const lookupTwo = await Promise.race([held.reached, delay(30_000).then(() => null)]);
+  assert.ok(lookupTwo, 'the lookup\'s page two is held at the front');
+  await page2.waitFor(async () => (await creditListOf(page2))?.items.length === 50, 30_000, 'the list\'s page one shown');
+  await watchCreditList(page2);
+  const from2 = st.api.length;
+  await switchInOtherTab(page2, other);
+  held.release();
+  await page2.waitFor(() => lookupTwo.handedBack === true, 15_000, 'the held page two handed back to the browser');
+  await delay(1_500); // whatever the released answer would make the page do, it has done
+  await page2.settle();
+  const reopen2 = await reopenCredit(page2, main.id, id);
+  await creditSettled(page2, main.id, reopen2, 50);
+  let attemptsInAnswer = null;
+  try { attemptsInAnswer = JSON.parse(lookupTwo.replied.text).attempts.length; } catch { /* not a lookup page */ }
+  const seen2 = {
+    pageTwo: answered(lookupTwo), attemptsInAnswer, lookups: await lookupSnapsOf(page2),
+    after: sentBy(page2, isCreditLookupOf(main.id), from2).map((r) => `${r.query === '' ? 'page one' : 'after a cursor'} ${answered(r)}`),
+  };
+  record('SCN-04', { phase: 'lookup page two', ...seen2, sent: sentBy(page2, () => true, from2).map(apiLine) });
+  assert.deepEqual({ pageTwo: seen2.pageTwo, attemptsInAnswer: seen2.attemptsInAnswer, after: seen2.after, end: seen2.lookups.at(-1), firstOwnersRows: seen2.lookups.filter((l) => !/:0$/.test(l) && l !== 'none') },
+    { pageTwo: '200', attemptsInAnswer: 1, after: ['page one 200'], end: 'exhausted:0', firstOwnersRows: [] },
+    'P2-81 (2): the first session\'s page two (its last attempt) joined nothing; the lookup never showed the first owner\'s rows here and, read again, it is the second owner\'s: exhausted, no row');
+}, 300_000);
+
+scenario('SCN-05', 'M7B-CREDITNOTES CN-P2 P2-82 (B) SESSION ISOLATION, OWNER → ANOTHER USER WHO IS NOT AN OWNER — 52 credit notes; the owner\'s page shows page one with the names; a second tab of the same browser context signs in as a manager of the store (Invoices View, Customers View): this page drops every row and name; read again in this page under the session it holds now, the list has no "Issued by" line and no earlier name anywhere on the page, the attempts lookup is ONE 403 that ONE fresh check confirms, its state denied with no row, and no credit or withdraw control is rendered; no list it showed mixes chains; which user ends signed in is not asserted', async () => {
+  const { tenant, main, boss, direct, id, names, notes } = await creditShop('n5', clerkNotes(52));
+  await levelVia(direct, 'manager', 'customers', 'view');
+  await levelVia(direct, 'manager', 'invoices', 'view');
+  const manager = await actor('n5-manager', [grant(tenant, 'manager'), storeGrant(tenant, main.id, 'manager')], { role: 'manager' });
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 50);
+  assert.equal((await creditListOf(page)).items[0].issuedBy.bdi, names[notes[0].by], 'the owner\'s page shows the clerk\'s name first');
+  const aTokens = [...new Set(sentBy(page, () => true).flatMap(tokensOf))];
+  await watchCreditList(page);
+  const from = st.api.length;
+  await switchInOtherTab(page, manager);
+  await quiet(page, from);
+  await page.settle();
+  const reopen = await reopenCredit(page, main.id, id);
+  await creditSettled(page, main.id, reopen, 50);
+  const shown = await creditListOf(page);
+  const seen = {
+    snaps: prefixLengths(await creditSnapsOf(page), notes),
+    lookup: sentBy(page, isCreditLookupOf(main.id), reopen).map(answered), lookupState: await creditLookupOf(page), controls: await creditControlsOf(page),
+    names: shown.items.filter((i) => i.issuedBy !== 'absent').length, nameOnPage: await page.evaluate(`document.documentElement.outerHTML.includes(${JSON.stringify(names[notes[0].by])})`),
+    carriersOfA: sentBy(page, (r) => !isLogout(r) && carries(r, aTokens), from).map(apiLine),
+  };
+  record('SCN-05', { ...seen, sent: sentBy(page, () => true, from).map(apiLine) });
+  assert.deepEqual(seen, { snaps: [50, 0, 50], lookup: ['403 forbidden'], lookupState: { phase: 'denied', rows: '0', alert: '' }, controls: [], names: 0, nameOnPage: false, carriersOfA: [] },
+    'P2-82: the owner\'s rows and names dropped; read again without names, the lookup refused and confirmed, no action; never mixed');
+  assert.deepEqual(shown.items, notes.slice(0, 50).map((n) => creditItemShown(n, names, false)), 'page one again, as stored, without staff names');
+}, 240_000);
+
+scenario('SCN-06', 'M7B-CREDITNOTES CN-P2 P2-82 (B) THE SAME USER DEMOTED — 52 credit notes; the owner\'s page shows page one with the names; the owner\'s grants become manager\'s (owner SQL, as SRL-03): the shipped server ends that session on the role change, so the same-token demotion of doc 17 §3.6 rule 4 is NOT stageable in the browser (recorded); what the browser does: the next credit-note read (Show more) finds the session ended (its session check answers 401 unauthenticated), the section is signed out with every row and name dropped (no row appended) and Reconnect offered; Reconnect is ONE login, and the list read again has no "Issued by" line, the lookup is ONE 403 confirmed by ONE fresh check (denied, no row) and no credit control is rendered', async () => {
+  const { main, boss, direct, id, names, notes } = await creditShop('n6', clerkNotes(52));
+  await levelVia(direct, 'manager', 'customers', 'view');
+  await levelVia(direct, 'manager', 'invoices', 'view');
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 50);
+  await watchCreditList(page);
+  await owner`update user_membership set role_id = 'manager' where internal_user_id = ${boss.id}`;
+  const from = st.api.length;
+  await page.click(by('issued-payments-credit-more'));
+  await page.waitFor(async () => ((await creditListOf(page))?.items.length ?? 0) === 0, 30_000, 'the rows dropped');
+  await quiet(page, from);
+  await page.settle();
+  const ended = { sent: sentBy(page, () => true, from).map(apiLine), stores: await page.evaluate(`${q('issued-stores-state')}?.dataset.phase ?? null`), view: await has(page, 'issued-view') };
+  record('SCN-06', { phase: 'demoted', ...ended });
+  const reconnectAt = st.api.length;
+  await page.click(by('issued-retry')); // Reconnect
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the issued invoice listed again');
+  const again = st.api.length;
+  await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, again, 50);
+  const shown = await creditListOf(page);
+  const seen = {
+    afterDemotion: ended.sent.filter((l) => /\/session|credit-note/.test(l)).map((l) => l.replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, '{id}')), stores: ended.stores, view: ended.view,
+    logins: sentBy(page, isLogin, reconnectAt).map(answered), lookup: sentBy(page, isCreditLookupOf(main.id), again).map(answered), lookupState: await creditLookupOf(page),
+    names: shown.items.filter((i) => i.issuedBy !== 'absent').length, controls: await creditControlsOf(page), snaps: prefixLengths(await creditSnapsOf(page), notes),
+  };
+  record('SCN-06', { ...seen, sent: sentBy(page, () => true, reconnectAt).map(apiLine) });
+  assert.deepEqual(seen, {
+    afterDemotion: ['GET /api/v1/session -> 401 unauthenticated'], stores: 'signed-out', view: false,
+    logins: ['200'], lookup: ['403 forbidden'], lookupState: { phase: 'denied', rows: '0', alert: '' }, names: 0, controls: [], snaps: [50, 0, 50],
+  }, 'P2-82 same user: the role change ended the session (401) at the next read; rows and names dropped, nothing appended; after Reconnect, no names, the lookup refused and confirmed, no action');
+  assert.deepEqual(shown.items, notes.slice(0, 50).map((n) => creditItemShown(n, names, false)), 'page one again, as stored, without staff names');
+}, 240_000);
+
+scenario('SCN-07', 'M7B-CREDITNOTES CN-P2 P2-83 (B) A SESSION CHANGE WHILE PAGE TWO IS IN FLIGHT — 52 credit notes, the owner\'s page on page one; (1) Show more\'s page two is answered by the entry for the first session (200, the last 2 notes) and that answer held at the front while a second tab of the same browser context signs in as a second store owner; released, it joins nothing: no list the page shows ever holds more than page one\'s 50 from the first chain, and every row it read is dropped; (2) on a new browser, page two\'s REQUEST held at the front until the other tab\'s sign-in has ended the first session: released, the entry answers it 401 and nothing is added; page two leaving with the new cookie is NOT stageable with the gate (the held request keeps the cookie it was sent with), recorded', async () => {
+  const { tenant, main, boss, id, notes } = await creditShop('n7', clerkNotes(52));
+  const other = await actor('n7-owner2', [grant(tenant, 'store_owner'), storeGrant(tenant, main.id, 'store_owner')], { role: 'store_owner' });
+  const outcomes = {};
+  for (const phase of ['response', 'request']) {
+    const page = await voidPage(boss, main.id, 1);
+    const opened = await openVoidable(page, main.id, id, 1);
+    await creditSettled(page, main.id, opened, 50);
+    await watchCreditList(page);
+    const held = gate((r) => r.frameId === page.frameId && isCreditListOf(main.id, id)(r) && r.query === `?after=${notes[49].id}`, phase);
+    const from = st.api.length;
+    await page.click(by('issued-payments-credit-more'));
+    const pageTwo = await Promise.race([held.reached, delay(30_000).then(() => null)]);
+    assert.ok(pageTwo, `${phase}: page two is held at the front`);
+    await switchInOtherTab(page, other);
+    held.release();
+    await page.waitFor(() => pageTwo.status !== null, 30_000, `${phase}: page two answered`);
+    await delay(1_500); // whatever the released answer would make the page do, it has done
+    await page.settle();
+    let notesInAnswer = null;
+    try { notesInAnswer = JSON.parse(pageTwo.replied.text).creditNotes.map((n) => n.number); } catch { /* not a list page */ }
+    outcomes[phase] = { pageTwo: answered(pageTwo), notesInAnswer, handedBack: pageTwo.handedBack === true, items: (await creditListOf(page))?.items.length ?? 0, snaps: prefixLengths(await creditSnapsOf(page), notes) };
+    record('SCN-07', { phase, ...outcomes[phase], sent: sentBy(page, () => true, from).map(apiLine) });
+    await page.close();
+  }
+  assert.deepEqual(outcomes.response.pageTwo, '200', '(1) the entry answered page two for the first session');
+  assert.deepEqual(outcomes.response.notesInAnswer, [51, 52], '(1) the held answer is the last two notes');
+  assert.deepEqual(outcomes.request.pageTwo, '401 unauthenticated', '(2) the held request reached the entry after the first session ended: 401');
+  for (const [phase, o] of Object.entries(outcomes)) {
+    assert.deepEqual({ items: o.items, snaps: o.snaps }, { items: 0, snaps: [50, 0] }, `${phase}: nothing joined page one, and every row read under the first session was dropped`);
+  }
+}, 300_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-CREDITNOTES CN-P2 (docs/phase-4/17 §2, §3.1, §3.3) — the ISSUE side: the store owner's "Issue credit note", its form
+// and review, the confirmation and its sign-in, the first-send chain (register → proof → issue), its card, and the attempts
+// lookup's rows (Confirm / Release), on the real entry and the durable disposable PostgreSQL (038's proof routine refuses
+// fsync off). Keys, bodies, proofs and ids are compared, never printed.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** ServerIssuedInvoices.tsx CREDIT_TEXT, the issue side (exact, doc 17 §2.7): what SCN-08..SCN-14 read on the page. */
+const CN_SAID = Object.freeze({
+  action: 'Issue credit note', legend: 'Issue a credit note', amountLabel: 'Amount (USD)', amountHint: (r) => `Up to ${r} remaining.`, reasonLegend: 'Reason',
+  continue: 'Continue', cancel: 'Cancel',
+  errFormat: 'Enter an amount in dollars and cents, such as 12.50, without $ or commas.',
+  errDecimals: 'Enter an amount with no more than two decimal places.',
+  errZero: 'Enter an amount of at least $0.01.',
+  errOver: (r) => `The amount can't be more than the ${r} remaining.`,
+  errReason: 'Choose a reason.', errSummary: 'Fix the marked fields to continue.',
+  reviewVoided: "This invoice was voided, so a credit note can't be issued.",
+  title: 'Issue a credit note?',
+  consequence: (a) => `This creates a separate credit note and lowers what the customer owes on this invoice by ${a}. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer. You can't undo it here.`,
+  keep: "Don't issue", close: 'Close', closeWarning: "Closing this window doesn't cancel the credit note. It may still be issued.",
+  closedInFlight: 'Closed. The credit note is still being sent.',
+  signInNeeded: 'Issuing a credit note needs a recent sign-in. Sign in again to continue. No credit note has been issued yet.',
+  signedIn: (at, until) => `Signed in again at ${at}. Check the details, then press Issue credit note below before ${until}.`,
+  signInExpired: (at) => `Your sign-in from ${at} is too old to issue now. Sign in again to continue. No credit note has been issued yet.`,
+  issued: (a, r) => `Credit note issued: ${a}, ${r}.`,
+  issuedHint: "Confirm it to finish. Until you confirm, you can't issue another credit note on this invoice.",
+  confirmHint: 'The credit note is already issued. Confirming only closes this attempt. It moves no money.',
+  confirm: 'Confirm credit note', confirmed: 'Credit note confirmed.',
+  release: 'Release attempt', released: 'Attempt released. No credit note was issued from it.',
+  releaseHint: 'Release this attempt to free the invoice. Then you can issue a new credit note, for a smaller amount if needed.',
+  overRemaining: 'No credit note was issued: the amount is more than what remains on this invoice now.',
+  voided: 'No credit note was issued: this invoice was voided.',
+  attemptReleased: 'No credit note was issued: this attempt was released.',
+  unfinished: 'You have an unfinished credit note on this invoice. Confirm or release it before you issue another.',
+  /** unresolved's first two sentences: the rest names Check again only while it is offered (the recovery side's). */
+  unresolvedLead: "We can't tell whether this credit note was issued. Don't assume it wasn't. ",
+  find: 'Look up attempt',
+  lookupIncomplete: "We haven't checked all your unfinished credit notes yet, so issuing is off for now.", continueChecking: 'Continue checking',
+  rowOpen: /^Registered, not issued when checked at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC$/, rowIssued: 'Issued, not confirmed', rowReleased: 'Released', rowConfirmed: 'Confirmed',
+  blockedOwn: 'Confirm or release the unfinished credit note below first.',
+  blockedSibling: 'Finish your unfinished payment, reversal or void attempt first.',
+  blockedRemaining: 'Nothing remains to credit on this invoice.',
+  // The recovery side (doc 17 §2.7, §3.1-§3.3), exact: what SCN-15..SCN-22 read on the page.
+  regUnknown: 'No credit note was issued from this attempt. If the lookup finds it open, you can release it here.',
+  registeredOnly: (canContinue) => `Registered. No credit note has been issued from this attempt yet. Check the amounts, then ${canContinue ? 'press Continue issuing, or ' : ''}look up this attempt to release it.`,
+  continueIssuing: 'Continue issuing', continueHint: 'This uses the attempt you already registered. No new attempt is made.',
+  continueAfterSignIn: "This attempt can't continue after a new sign-in. Look up this attempt to release it, then start again.",
+  anotherNoteFound: 'Credit notes were issued on this invoice since you started this attempt. Check them before you continue.',
+  issueAnother: 'Issue another credit note',
+  anotherHint: "This issues one more credit note on this invoice. If one of this invoice's credit notes already covers it, look up this attempt to release it instead.",
+  unresolved: (canCheck) => `We can't tell whether this credit note was issued. Don't assume it wasn't. ${canCheck ? 'Check again, or look' : 'Look'} up this attempt.`,
+  replayGone: "We can't check this attempt from this sign-in, so we don't know whether the credit note was issued. Look up this attempt to see.",
+  settleUnknown: (canCheck) => `We can't tell whether this attempt was finished. ${canCheck ? 'Check again, or look' : 'Look'} up this attempt to see.`,
+  checkAgain: 'Check again', checkUntil: (at) => `You can check again until ${at}.`,
+  checkReplayHint: "Sends the same request again. If it wasn't recorded yet, this can finish it. It never starts a new attempt.",
+  hide: 'Hide this attempt',
+  hideWarning: "This only hides it here. It releases nothing, issues nothing and moves no money, and it doesn't tell us whether the credit note was issued. If the attempt is still open, it still blocks your next credit note on this invoice. Check this invoice's credit notes later.",
+});
+/** The only button names allowed to say "credit" or "withdraw" (RULES; TEST:5385's DIS-16 supersession). */
+const CN_BUTTONS = Object.freeze(['Issue credit note', 'Issue another credit note', 'Confirm credit note']);
+const isCreditRegisterOf = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/credit-note-registrations`;
+const isCreditProofOf = (store, id) => (r) => r.method === 'GET' && r.path === `${issuedPath(store)}/${id}/credit-note-registration-proof`;
+const isCreditIssueOf = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/credit-notes`;
+const isCreditSettleOf = (store, id) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/credit-note-settlement`;
+/** One invoice's credit-note commands and proof (register, proof, issue, settlement), in the order sent. */
+const isCreditChainOf = (store, id) => (r) => [isCreditRegisterOf, isCreditProofOf, isCreditIssueOf, isCreditSettleOf].some((m) => m(store, id)(r));
+/** Any write but a tenant login (the shop's own sign-ins are not the flow's writes). */
+const isWrite = (r) => r.method !== 'GET' && !isLogin(r);
+
+/** The recovery side's card controls (doc 17 §3.2, D-P2-6): read apart, so the issue side's pins hold whichever of them a card offers. */
+const CN_RECOVERY = Object.freeze(['Check again', 'Continue issuing', 'Issue another credit note', 'Hide this attempt']);
+/**
+ * The credit-note part of Payments as shown: the action (held back, and why), the form, the inline pair, the card (its
+ * issue-side buttons; the recovery side's apart, in `recovery`) and the lookup rows.
+ */
+const creditIssueOf = (page) => page.evaluate(`(() => {
+  const recovery = ${JSON.stringify(CN_RECOVERY)};
+  const el = (id, root = document) => root.querySelector('[data-testid="' + id + '"]');
+  const t = (id, root) => el(id, root)?.textContent.trim() ?? null;
+  const why = (n) => (n.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent.trim() ?? '?').join(' ');
+  const buttons = (n) => [...n.querySelectorAll('button')].map((b) => ({ text: b.textContent.trim(), why: why(b) }));
+  const a = el('issued-payments-credit-issue'), card = el('issued-payments-credit-card');
+  return {
+    action: a === null ? null : { text: a.textContent.trim(), disabled: a.getAttribute('aria-disabled'), why: why(a) },
+    form: el('issued-payments-credit-form') !== null, say: t('issued-payments-credit-say'), alert: t('issued-payments-credit-alert'),
+    card: card === null ? null : { state: card.dataset.state, text: t('issued-payments-credit-card-text', card), also: t('issued-payments-credit-card-also', card),
+      hint: t('issued-payments-credit-card-hint', card), number: t('issued-payments-credit-card-number', card), buttons: buttons(card).filter((b) => !recovery.includes(b.text)) },
+    recovery: card === null ? [] : buttons(card).map((b) => b.text).filter((x) => recovery.includes(x)),
+    rows: [...document.querySelectorAll('[data-testid="issued-payments-credit-row"]')].map((r) => ({
+      state: r.dataset.state, said: t('issued-payments-credit-row-state', r), amount: t('issued-payments-credit-row-amount', r), buttons: buttons(r) })),
+    focus: document.activeElement?.dataset?.testid ?? document.activeElement?.tagName ?? null,
+  };
+})()`);
+/** The credit-note form as shown: its legends and label, the amount and the reasons with their state and descriptions, the alert, the focus. */
+const creditFormOf = (page) => page.evaluate(`(() => {
+  const f = document.querySelector('[data-testid="issued-payments-credit-form"]');
+  if (f === null) return null;
+  const el = (id) => f.querySelector('[data-testid="' + id + '"]');
+  const desc = (n) => (n.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent.trim() ?? null);
+  const amount = el('issued-payments-credit-form-amount'), group = el('issued-payments-credit-form-reasons'), summary = el('issued-payments-credit-form-errors');
+  return {
+    legend: f.querySelector('legend')?.textContent.trim() ?? null, label: f.querySelector('label[for="issued-payments-credit-form-amount"]')?.textContent.trim() ?? null,
+    amount: { value: amount.value, inputMode: amount.inputMode, invalid: amount.getAttribute('aria-invalid'), describedBy: desc(amount) },
+    reasons: { tag: group.tagName, legend: group.querySelector('legend')?.textContent.trim() ?? null, invalid: group.getAttribute('aria-invalid'), describedBy: desc(group),
+      labels: [...group.querySelectorAll('label')].map((l) => l.textContent.trim()), checked: group.querySelector('input:checked')?.value ?? null },
+    summary: { role: summary.getAttribute('role'), text: summary.textContent.trim() }, alerts: f.querySelectorAll('[role="alert"]').length,
+    focus: document.activeElement?.dataset?.testid ?? document.activeElement?.tagName ?? null,
+  };
+})()`);
+/** The credit-note confirmation as shown: role, name and description, facts, controls, its own pair, the sign-in group, the focus. */
+const creditConfirmOf = (page) => page.evaluate(`(() => {
+  const d = document.querySelector('[data-testid="issued-credit-confirm"]');
+  if (d === null) return null;
+  const el = (id) => d.querySelector('[data-testid="' + id + '"]');
+  const t = (id) => el(id)?.textContent.trim() ?? null;
+  const group = el('issued-credit-reauth-group'), pw = el('issued-credit-reauth-password'), send = el('issued-credit-send'), keep = el('issued-credit-keep');
+  return {
+    role: d.getAttribute('role'), modal: d.getAttribute('aria-modal'), name: document.getElementById(d.getAttribute('aria-labelledby') ?? '')?.textContent.trim() ?? null,
+    description: (d.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent.trim() ?? '?').join(' '),
+    facts: t('issued-credit-facts'), keep: keep === null ? null : { text: keep.textContent.trim(), why: (keep.getAttribute('aria-describedby') ?? '') === '' ? null : document.getElementById(keep.getAttribute('aria-describedby'))?.textContent.trim() ?? '?' },
+    send: send === null ? null : { text: send.textContent.trim(), disabled: send.getAttribute('aria-disabled') },
+    status: t('issued-credit-confirm-status'), alert: t('issued-credit-confirm-alert'),
+    group: group === null ? null : { role: group.getAttribute('role'), named: (group.getAttribute('aria-labelledby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent.trim() ?? '').filter(Boolean).join(' ') || null,
+      password: pw === null ? null : { type: pw.type, autocomplete: pw.getAttribute('autocomplete'), readOnly: pw.readOnly },
+      confirm: t('issued-credit-reauth-confirm'), stop: t('issued-credit-reauth-stop') },
+    viewInert: document.querySelector('[data-testid="issued-view"]')?.closest('[inert]') != null,
+    focus: document.activeElement?.id || document.activeElement?.dataset?.testid || document.activeElement?.tagName || null,
+  };
+})()`);
+/** A node of the browser's own accessibility tree (queryAXTree): disabled, invalid and its computed description. */
+const axOf = (n) => (n === undefined ? null : {
+  disabled: n.properties?.some((p) => p.name === 'disabled' && p.value?.value === true) ?? false,
+  invalid: String(n.properties?.find((p) => p.name === 'invalid')?.value?.value ?? 'false'),
+  description: (n.description?.value ?? '').replace(/\s+/g, ' ').trim(),
+});
+/**
+ * The ONE node of `role` in the browser's own accessibility tree whose accessible name is `name` in any letter case (a CSS
+ * uppercase renders into Chrome's computed name), as axOf reads it; else how many there were.
+ */
+async function axOne(page, role, name) {
+  const nodes = (await page.axNodes({ role })).filter((n) => String(n.name?.value ?? '').replace(/\s+/g, ' ').trim().toLowerCase() === name.toLowerCase());
+  return nodes.length === 1 ? axOf(nodes[0]) : { count: nodes.length };
+}
+/** "Issue credit note" pressed from the keyboard (focused, Enter) once offered and not held back: the form open, its amount focused. */
+async function openCreditForm(page) {
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'Issue credit note offered');
+  await page.call(by('issued-payments-credit-issue'), function () { this.focus(); });
+  await page.press('Enter');
+  await page.waitFor(`document.activeElement === ${q('issued-payments-credit-form-amount')}`, 10_000, 'the credit-note form open, its amount focused');
+}
+/** The amount typed over whatever the field held (selected, deleted, typed as a user does). */
+async function typeAmount(page, dollars) {
+  await page.call(by('issued-payments-credit-form-amount'), function () { this.focus(); this.select(); document.execCommand('delete'); });
+  if (dollars !== '') await page.type(dollars);
+  await page.waitFor(`${q('issued-payments-credit-form-amount')}?.value === ${JSON.stringify(dollars)}`, 5_000, `the amount reads "${dollars}"`);
+}
+/** A reason chosen as a user does (its radio clicked), and seen chosen. */
+async function chooseCreditReason(page, code) {
+  await page.click(by(`issued-payments-credit-form-reason-${code}`));
+  await page.waitFor(`${q(`issued-payments-credit-form-reason-${code}`)}?.checked === true`, 5_000, `the reason ${code} chosen`);
+}
+/** Continue pressed on a valid form: the review's reads, then the confirmation with "Don't issue" focused; the record index it began at. */
+async function continueToConfirm(page) {
+  const from = st.api.length;
+  await page.click(by('issued-payments-credit-continue'));
+  await page.waitFor(`!!${q('issued-credit-confirm')}`, 30_000, 'the credit-note confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-credit-keep', 10_000, '"Don\'t issue" focused first');
+  await quiet(page, from);
+  await page.settle();
+  return from;
+}
+/** The confirmation's alert saying `text`, the password field focused (the sign-in group). */
+async function signInAsked(page, text) {
+  await page.waitFor(async () => (await creditConfirmOf(page))?.alert === text, 10_000, `the confirmation says: ${text.slice(0, 40)}…`);
+  await page.waitFor(`document.activeElement === ${q('issued-credit-reauth-password')}`, 10_000, 'the password field focused');
+}
+/** The sign-in group's password typed and Confirm sign-in pressed: signed in again, the review read again, "Don't issue" focused. */
+async function creditSignIn(page, who) {
+  const from = st.api.length;
+  await page.fill(by('issued-credit-reauth-password'), who.password);
+  await page.click(by('issued-credit-reauth-confirm'));
+  await page.waitFor(async () => /^Signed in again at /.test((await creditConfirmOf(page))?.status ?? ''), 30_000, 'signed in again, the review read again');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-credit-keep', 10_000, '"Don\'t issue" focused after the sign-in');
+  await quiet(page, from);
+  await page.settle();
+  return from;
+}
+/** The confirmation's "Issue credit note" pressed — twice in one task when `twice` (before any re-render) — and the confirmation closed. */
+async function sendCredit(page, { twice = false } = {}) {
+  if (twice) await page.evaluate(`(() => { const b = ${q('issued-credit-send')}; b.click(); b.click(); })()`);
+  else await page.click(by('issued-credit-send'));
+  await page.waitFor(`!${q('issued-credit-confirm')}`, 45_000, 'the chain answered: the confirmation closed');
+}
+/**
+ * The issued dialog closed by its Close button and its `n` invoices listed — read again by the list's Try again when a
+ * sign-in in the dialog cleared the list read before it (LIST_TEXT.renewed).
+ */
+async function closeIssued(page, n) {
+  await page.click(by('issued-view-close'));
+  await page.waitFor(`!${q('issued-view')}`, 10_000, 'the issued dialog closed');
+  if (await has(page, 'issued-list-retry')) await page.click(by('issued-list-retry'));
+  await waitIssuedRows(page, n, 'the issued invoices listed again');
+}
+/**
+ * The first-send chain's checks (doc 17 §2.6): the register and issue bodies exactly, in their fixed key orders, the proof
+ * GET naming the registration the entry answered, the issue carrying exactly the proof the entry answered (only ever in
+ * memory), two distinct v4 keys; every id and key joins the leak check. The attempt id.
+ */
+function assertCreditChain(tenant, { reg, proof, issue }, { grossCents, reason }) {
+  const attemptId = jsonOf(reg.body, 'the register body').attemptId;
+  assert.ok(V4.test(attemptId), 'the attempt id is a v4 UUID minted by the page');
+  assert.ok(reg.body === JSON.stringify({ expectedTenant: tenant, attemptId, grossCents, reason }), 'the register body, exactly (compared, never printed)');
+  const registrationId = jsonOf(reg.replied.text, 'the register answer').registration?.id;
+  assert.ok(V4.test(registrationId ?? ''), 'the register answered a registration id');
+  for (const secret of [attemptId, registrationId, reg.headers['idempotency-key'], issue.headers['idempotency-key']]) if (typeof secret === 'string') st.secrets.add(secret);
+  assert.ok(proof.query === `?registration=${registrationId}`, 'the proof GET names the registration the entry answered (compared, never printed)');
+  const proofText = proofOf(proof);
+  assert.ok(typeof proofText === 'string' && proofText.length > 0, 'the proof the entry answered');
+  assert.ok(issue.body === JSON.stringify({ expectedTenant: tenant, registrationId, attemptId, grossCents, reason, registrationProof: proofText }),
+    'the issue body, exactly, carrying the proof the entry answered (compared, never printed)');
+  const keys = [reg, issue].map((r) => r.headers['idempotency-key']);
+  assert.ok(keys.every((k) => V4.test(k)) && keys[0] !== keys[1] && !keys.includes(attemptId), 'register and issue carry distinct v4 keys, neither the attempt id');
+  assert.ok([reg, proof, issue].every((r) => typeof r.headers[SESSION_CSRF] === 'string' && r.headers[SESSION_CSRF].length > 0 && r.headers[SESSION_CSRF] === reg.headers[SESSION_CSRF]), 'the chain under the page\'s one session token');
+  return attemptId;
+}
+/** One invoice's credit notes and registrations as the database owner reads them (038's states); attempts named by their place in `mine`. */
+async function storedCreditsOf(invoice, mine = []) {
+  const name = (a) => (mine.includes(a) ? `attempt ${mine.indexOf(a) + 1}` : 'other');
+  const notes = await owner`select attempt_id, credit_note_number::int as number, gross_cents::int as gross, reason_code as reason
+    from tmpos_invoice_credit_note.invoice_credit_note where invoice_id = ${invoice} order by issued_at, credit_note_id`;
+  const regs = await owner`select attempt_id, credit_note_id is not null as issued, acknowledged_at is not null as settled
+    from tmpos_invoice_credit_note.invoice_credit_note_registration where invoice_id = ${invoice} order by registered_at, registration_id`;
+  return {
+    notes: Array.from(notes, (n) => ({ attempt: name(n.attempt_id), number: n.number, gross: n.gross, reason: n.reason })),
+    registrations: Array.from(regs, (r) => ({ attempt: name(r.attempt_id), state: r.issued ? (r.settled ? 'confirmed' : 'issued') : (r.settled ? 'released' : 'open') })),
+  };
+}
+/** One tenant's credit-note audit actions, oldest first (the action's last word). */
+async function creditAuditsOf(tenant) {
+  const rows = await owner`select action_id from public.audit_event where action_id = any(${CN_ACTIONS}::text[]) and tenant_id = ${tenant} order by occurred_at, event_id`;
+  return Array.from(rows, (r) => r.action_id.split('.').at(-1));
+}
+/** BF: ONE open (unsettled, unissued) registration of `by` on the invoice, as 038's register leaves it (its row guard lifted in that transaction only). */
+async function seedOpenAttempt(invoice, by, grossCents) {
+  await owner.begin(async (sql) => withTriggersLifted(sql, CN_GUARDS, async () => {
+    const made = await sql`insert into tmpos_invoice_credit_note.invoice_credit_note_registration (registration_id, tenant_id, store_id, invoice_id,
+        registered_by, attempt_id, gross_cents, reason_code, session_digest, key_generation, registered_xact, registered_at)
+      select gen_random_uuid(), i.tenant_id, i.store_id, i.invoice_id, ${by}, gen_random_uuid(), ${grossCents}, 'service_issue', ${randomBytes(32)}, 1,
+        pg_catalog.pg_current_xact_id(), pg_catalog.clock_timestamp()
+      from tmpos_invoice_issue.issued_invoice i where i.invoice_id = ${invoice}`;
+    assert.equal(made.count, 1, 'the seeded open attempt names the invoice');
+  }));
+}
+/**
+ * AG (doc 17 §5): the sign-in of `page`'s CURRENT tenant session (the last login answered to it) aged by owner SQL past the
+ * server's 10-minute window, on the DATABASE clock (ICH's ageSession). The shop's own sign-in stamp is the page's clock, untouched.
+ */
+async function ageSessionOf(page) {
+  const last = sentBy(page, (r) => isLogin(r) && r.status === 200 && r.cookie !== null).at(-1);
+  assert.ok(last !== undefined, 'the page signed in to a session');
+  const key = createHash('sha256').update(last.cookie.slice(last.cookie.indexOf('=') + 1)).digest('base64url');
+  const rows = await owner`update tmpos_session.session
+      set authenticated_at = (extract(epoch from pg_catalog.clock_timestamp()) * 1000)::bigint - ${RECENT_AUTH_MAX_AGE_MS + 60_000}::bigint
+    where session_key = ${key}
+    returning authenticated_at < (extract(epoch from pg_catalog.clock_timestamp()) * 1000)::bigint - ${RECENT_AUTH_MAX_AGE_MS}::bigint as stale`;
+  assert.deepEqual(rows.map((r) => r.stale), [true], 'the page\'s session binds a sign-in older than 10 minutes');
+}
+/**
+ * The page's wall clock (Date.now, read beside performance.now by the shop's 8-minute window: the larger elapsed counts)
+ * moved `ms` ahead; 0 puts it back. Only the shop's own stamp ages: the server and the identity provider keep real time.
+ */
+const shiftWallClock = (page, ms) => page.evaluate(`(() => { window.__cnRealNow ??= Date.now; Date.now = ${ms} === 0 ? window.__cnRealNow : () => window.__cnRealNow() + ${ms}; return true; })()`);
+/** A page's buttons whose name says credit or withdraw and is not one of the three allowed names (DIS-16): none. */
+const creditNamedOutside = (page) => page.evaluate(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /credit|withdraw/i.test(t) && !${JSON.stringify(CN_BUTTONS)}.includes(t))`);
+/** Every credit-note control's and card's text on the page (the issue side and the list): CN-27b's and P2-60's scan surface. */
+const creditWordsOf = (page) => page.evaluate(`[...document.querySelectorAll('[data-testid^="issued-payments-credit"], [data-testid^="issued-credit"]')].map((n) => n.innerText ?? n.textContent).join('\\n')`);
+
+scenario('SCN-08', 'M7B-CREDITNOTES CN-P2 P2-01 P2-08 P2-10 P2-11 P2-12 P2-15 P2-16 P2-39 P2-43 P2-51 P2-60 CN-27b (B) THE STORE OWNER ISSUES ONE CREDIT NOTE — an issued $42.00 invoice, its attempts lookup read to the end with no row: "Issue credit note" is offered and not held back (in the accessibility tree too); from the keyboard its form opens on the amount; Continue on an empty form, then 12.505, 0, 42.01 and $5 says each field error (aria-invalid, the amount described by its hint and its error, the reasons a fieldset with its legend), ONE alert "Fix the marked fields to continue." and focus on the amount, and sends nothing; $12.50 Goodwill: Continue reads the invoice, the payments, the lookup and the list, and opens a modal alertdialog named "Issue a credit note?" described by the exact consequence, facts "Invoice 1: $12.50 · Goodwill · Remaining $42.00", "Don\'t issue" focused, the page behind inert; with no sign-in seen by the shop two presses in one task send nothing and show the sign-in group (signInNeeded, the password field focused, autocomplete current-password, a paste not prevented); one sign-in is ONE reauthentication login, the review read again, the values kept and "Signed in again at {t}. … before {t + 8 min}."; the page\'s own clock moved 8 min 1 s ahead, a press says "Your sign-in from {t} is too old…" and sends nothing; signed in again, two presses in one task send ONE register, ONE proof and ONE issue with the exact bytes, distinct v4 keys and the proof only in memory; the card says "Credit note issued: $12.50, Goodwill.", its hint, "CN-1" once its row loads and Confirm credit note described by its hint, focus on the card\'s heading, the action held back with "Confirm or release the unfinished credit note below first.", the payments read again ($12.50 credited, $29.50 remaining) and the list holding CN-1 as stored; a focus, a visibilitychange and 2 s send no write; Confirm pressed twice in one task is ONE settlement (version 2) and "Credit note confirmed.", the action offered again, the lookup row Confirmed; the database holds ONE credit note and its registration confirmed, and the register, issue and settle audits; no credit-note text says paid, unpaid, refunded or withdraw, and no button names credit or withdraw beyond the three allowed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n8', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 0);
+  const offered = await creditIssueOf(page);
+  const ax = await axOne(page, 'button', CN_SAID.action);
+  record('SCN-08', { phase: 'offered', action: offered.action, ax });
+  assert.deepEqual({ action: offered.action, form: offered.form, card: offered.card, rows: offered.rows, ax },
+    { action: { text: CN_SAID.action, disabled: 'false', why: '' }, form: false, card: null, rows: [], ax: { disabled: false, invalid: 'false', description: '' } },
+    'P2-01: the store owner, an issued invoice, the lookup read to the end with no row: Issue credit note offered, not held back');
+
+  // P2-08: every field error, nothing sent.
+  await openCreditForm(page);
+  const formFrom = st.api.length;
+  const steps = [
+    { amount: '', reason: null, said: { amount: CN_SAID.errFormat, reason: CN_SAID.errReason } },
+    { amount: '12.505', reason: 'goodwill', said: { amount: CN_SAID.errDecimals, reason: null } },
+    { amount: '0', reason: null, said: { amount: CN_SAID.errZero, reason: null } },
+    { amount: '42.01', reason: null, said: { amount: CN_SAID.errOver('$42.00'), reason: null } },
+    { amount: '$5', reason: null, said: { amount: CN_SAID.errFormat, reason: null } },
+  ];
+  for (const [n, step] of steps.entries()) {
+    await typeAmount(page, step.amount);
+    if (step.reason !== null) await chooseCreditReason(page, step.reason);
+    await page.click(by('issued-payments-credit-continue'));
+    await page.waitFor(async () => (await creditFormOf(page))?.amount.describedBy[1] === step.said.amount, 10_000, `step ${n}: the amount's error`);
+    await page.waitFor(async () => (await focusOf(page)) === 'issued-payments-credit-form-amount', 5_000, `step ${n}: focus on the amount`);
+    const f = await creditFormOf(page);
+    const axAmount = await axOne(page, 'textbox', CN_SAID.amountLabel);
+    record('SCN-08', { phase: `form ${n}`, form: f, ax: axAmount });
+    assert.deepEqual({ ...f, ax: axAmount }, {
+      legend: CN_SAID.legend, label: CN_SAID.amountLabel,
+      amount: { value: step.amount, inputMode: 'decimal', invalid: 'true', describedBy: [CN_SAID.amountHint('$42.00'), step.said.amount] },
+      reasons: { tag: 'FIELDSET', legend: CN_SAID.reasonLegend, invalid: step.said.reason === null ? 'false' : 'true', describedBy: step.said.reason === null ? [] : [step.said.reason],
+        labels: Object.values(CREDIT_SAID.reasons), checked: n === 0 ? null : 'goodwill' },
+      summary: { role: 'alert', text: CN_SAID.errSummary }, alerts: 1, focus: 'issued-payments-credit-form-amount',
+      ax: { disabled: false, invalid: 'true', description: `${CN_SAID.amountHint('$42.00')} ${step.said.amount}` },
+    }, `P2-08 P2-51 step ${n}: the field errors, aria-invalid, the amount described by its hint and error, ONE alert, focus on the amount`);
+  }
+  assert.deepEqual(sentBy(page, () => true, formFrom).map(apiLine), [], 'P2-08: nothing sent for an invalid form');
+
+  // P2-10: the review, then the confirmation.
+  await typeAmount(page, '12.50');
+  const reviewFrom = await continueToConfirm(page);
+  const confirm = await creditConfirmOf(page);
+  const axDialog = [await axOne(page, 'alertdialog', CN_SAID.title)];
+  record('SCN-08', { phase: 'confirmation', reads: sentBy(page, (r) => !isSessionRead(r), reviewFrom).map(readLine), confirm, ax: axDialog });
+  assert.deepEqual(sentBy(page, (r) => !isSessionRead(r), reviewFrom).map(readLine).sort(), [
+    `${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/credit-notes 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${STORES}/${main.id}/credit-note-attempts 200`,
+  ].sort(), 'Continue: ONE review — the invoice, the list, the payments and the lookup read again; nothing written');
+  assert.deepEqual(confirm, {
+    role: 'alertdialog', modal: 'true', name: CN_SAID.title, description: CN_SAID.consequence('$12.50'), facts: 'Invoice 1: $12.50 · Goodwill · Remaining $42.00',
+    keep: { text: CN_SAID.keep, why: null }, send: { text: CN_SAID.action, disabled: 'false' }, status: '', alert: '', group: null, viewInert: true, focus: 'issued-credit-keep',
+  }, 'P2-10: a modal alertdialog named by its title and described by the exact consequence, the facts reviewed, "Don\'t issue" focused, the page behind inert');
+  assert.deepEqual(axDialog, [{ disabled: false, invalid: 'false', description: CN_SAID.consequence('$12.50') }], 'P2-51: ONE alertdialog of that name in the browser\'s accessibility tree, described by the consequence');
+
+  // P2-11 P2-39: no sign-in seen by the shop — two presses send nothing and ask for one.
+  const noStamp = st.api.length;
+  await page.evaluate(`(() => { const b = ${q('issued-credit-send')}; b.click(); b.click(); })()`);
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await page.settle();
+  const asked = await creditConfirmOf(page);
+  const paste = await page.evaluate(`(() => { const f = ${q('issued-credit-reauth-password')}; const e = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: new DataTransfer() }); f.dispatchEvent(e); return { prevented: e.defaultPrevented }; })()`);
+  // The group's name leads with why a sign-in is asked (doc 17 §2.5); what follows it (the void's explanation) is not pinned here.
+  const axGroup = (await page.axNodes({ role: 'group' })).filter((n) => String(n.name?.value ?? '').startsWith(CN_SAID.signInNeeded)).length;
+  const named = asked.group?.named?.startsWith(CN_SAID.signInNeeded) === true;
+  record('SCN-08', { phase: 'sign-in asked', asked, paste, axGroup, sent: sentBy(page, () => true, noStamp).map(apiLine) });
+  assert.deepEqual({ group: { ...asked.group, named }, send: asked.send, facts: asked.facts, paste, axGroup, sent: sentBy(page, () => true, noStamp).map(apiLine) }, {
+    group: { role: 'group', named: true, password: { type: 'password', autocomplete: 'current-password', readOnly: false }, confirm: 'Confirm sign-in', stop: null },
+    send: null, facts: 'Invoice 1: $12.50 · Goodwill · Remaining $42.00', paste: { prevented: false }, axGroup: 1, sent: [],
+  }, 'P2-11 P2-39 P2-12: no shop-observed sign-in — the sign-in group (named by why), the password field current-password and pasteable, nothing sent for two presses');
+
+  // P2-12: the sign-in — ONE reauthentication, the review read again, the values kept, the window stated in clock times.
+  const signAt = await creditSignIn(page, boss);
+  const signed = await creditConfirmOf(page);
+  const times = /^Signed in again at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC)\. Check the details, then press Issue credit note below before (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC)\.$/.exec(signed.status);
+  const ms = (t) => Date.parse(`${t.slice(0, 10)}T${t.slice(11, 19)}Z`);
+  const afterSignIn = sentBy(page, (r) => !isSessionRead(r), signAt);
+  record('SCN-08', { phase: 'signed in', status: signed.status, sent: afterSignIn.map(apiLine) });
+  assert.ok(times !== null && signed.status === CN_SAID.signedIn(times[1], times[2]) && ms(times[2]) - ms(times[1]) === 8 * 60_000 && Math.abs(ms(times[1]) - Date.now()) < 120_000,
+    `P2-12: "Signed in again at {t}. … before {t + 8 min}." in clock times (${signed.status})`);
+  assert.deepEqual(afterSignIn.filter(isLogin).map((r) => `${answered(r)} ${r.headers['x-tmpos-reauthenticate'] ?? '-'}`), ['200 1'], 'P2-12: ONE login, the explicit reauthentication');
+  const reviewed = afterSignIn.filter((r) => !isLogin(r)).map(readLine);
+  assert.ok([`${issuedPath(main.id)}/${id} 200`, `${issuedPath(main.id)}/${id}/credit-notes 200`, `${issuedPath(main.id)}/${id}/payments 200`, `${STORES}/${main.id}/credit-note-attempts 200`].every((l) => reviewed.includes(l))
+    && afterSignIn.every((r) => r.method === 'GET' || isLogin(r)), `P2-12: the review read again under the new session (the invoice, the list, the payments, the lookup), nothing written`);
+  assert.deepEqual({ facts: signed.facts, group: signed.group, send: signed.send, alert: signed.alert, focus: signed.focus },
+    { facts: 'Invoice 1: $12.50 · Goodwill · Remaining $42.00', group: null, send: { text: CN_SAID.action, disabled: 'false' }, alert: '', focus: 'issued-credit-keep' },
+    'P2-12: the amount and the reason still shown, nothing sent: a new press is needed');
+
+  // P2-11: the shop's own sign-in, aged past 8 minutes on the page's clock — a press asks again and sends nothing.
+  await shiftWallClock(page, 8 * 60_000 + 1_000);
+  const aged = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInExpired(times[1]));
+  await shiftWallClock(page, 0);
+  assert.deepEqual(sentBy(page, () => true, aged).map(apiLine), [], 'P2-11: a shop-observed sign-in older than 8 minutes: signInExpired with its time, nothing sent');
+  await creditSignIn(page, boss);
+
+  // P2-15 P2-39: two presses in one task, ONE chain.
+  const pressAt = st.api.length;
+  await sendCredit(page, { twice: true });
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.number === 'CN-1', 30_000, 'the card shows CN-1 once its row loads');
+  await rereadAnswered(page, main.id, id, pressAt);
+  const chain = sentBy(page, isCreditChainOf(main.id, id), pressAt);
+  record('SCN-08', { phase: 'issued', chain: chain.map(payLine(main.id, id)), reads: sentBy(page, (r) => r.method === 'GET' && !isCreditChainOf(main.id, id)(r), pressAt).map(readLine) });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 201'],
+    'P2-15 P2-39: two presses in one task are ONE register, ONE proof and ONE issue');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'goodwill' });
+  const reread = sentBy(page, (r) => r.method === 'GET' && !isSessionRead(r) && !isCreditChainOf(main.id, id)(r), pressAt).map(readLine);
+  assert.ok(reread.includes(`${issuedPath(main.id)}/${id}/payments 200`) && reread.includes(`${issuedPath(main.id)}/${id}/credit-notes 200`), `P2-16: the payments and the list read again after the issue`);
+  const issued = await creditIssueOf(page);
+  record('SCN-08', { phase: 'card', issued });
+  assert.deepEqual({ card: issued.card, say: issued.say, alert: issued.alert, action: issued.action, focus: issued.focus }, {
+    card: { state: 'issued', text: CN_SAID.issued('$12.50', 'Goodwill'), also: null, hint: CN_SAID.issuedHint, number: 'CN-1', buttons: [{ text: CN_SAID.confirm, why: CN_SAID.confirmHint }] },
+    say: CN_SAID.issued('$12.50', 'Goodwill'), alert: '', action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn }, focus: 'issued-payments-credit-card-heading',
+  }, 'P2-16 P2-05: issued with its hint, CN-1 from its row, Confirm credit note described by confirmHint; focus on the card\'s heading; the action held back with blockedOwn');
+  assert.deepEqual({ credited: await textOf(page, 'issued-payments-credited'), remaining: await textOf(page, 'issued-payments-remaining') }, { credited: '$12.50', remaining: '$29.50' }, 'P2-16: the amounts read again');
+  const [stored] = await owner`select c.credit_note_id, to_char(c.issued_at at time zone 'UTC', ${CN_TIME}) as issued_at, u.display_name
+    from tmpos_invoice_credit_note.invoice_credit_note c join app_user u on u.internal_user_id = c.issued_by where c.invoice_id = ${id}`;
+  const note = { id: stored.credit_note_id, number: 1, gross: 1250, reason: 'goodwill', by: boss.id, issuedAt: stored.issued_at, withdrawnAt: null, withdrawalReason: null, withdrawnBy: null };
+  assert.deepEqual((await creditListOf(page)).items, [creditItemShown(note, { [boss.id]: stored.display_name }, true)], 'P2-16: the list read again holds CN-1 as stored');
+
+  // P2-43: nothing is sent on its own.
+  const idle = st.api.length;
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  await delay(2_000);
+  await quiet(page, idle);
+  assert.deepEqual(sentBy(page, isWrite, idle).map(apiLine), [], 'P2-43: a focus, a visibilitychange and time send no write');
+
+  // P2-16 P2-39: Confirm, pressed twice in one task, is ONE settlement.
+  const confirmAt = st.api.length;
+  await page.evaluate(`(() => { const b = ${q('issued-payments-credit-card-confirm')}; b.click(); b.click(); })()`);
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.confirmed, 30_000, 'Credit note confirmed.');
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'confirmed'), 30_000, 'the lookup read again: the row confirmed');
+  await quiet(page, confirmAt);
+  await page.settle();
+  const settles = sentBy(page, isCreditChainOf(main.id, id), confirmAt);
+  const done = await creditIssueOf(page);
+  record('SCN-08', { phase: 'confirmed', settles: settles.map(payLine(main.id, id)), done, reads: sentBy(page, (r) => r.method === 'GET', confirmAt).map(readLine) });
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'P2-16 P2-39: Confirm pressed twice is ONE settlement');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'the settlement body: version 2, this attempt (compared, never printed)');
+  const afterConfirm = sentBy(page, (r) => r.method === 'GET', confirmAt).map(readLine);
+  assert.ok([`${issuedPath(main.id)}/${id}/credit-notes 200`, `${STORES}/${main.id}/credit-note-attempts 200`, `${issuedPath(main.id)}/${id}/payments 200`].every((l) => afterConfirm.includes(l)),
+    'P2-16: the list, the lookup and the payments read again after the confirm');
+  assert.ok(V4.test(settles[0].headers['idempotency-key']) && ![chain[0], chain[2]].some((r) => r.headers['idempotency-key'] === settles[0].headers['idempotency-key']), 'a third distinct v4 key');
+  assert.deepEqual({ card: done.card, action: done.action, rows: done.rows }, {
+    card: { state: 'confirmed', text: CN_SAID.confirmed, also: null, hint: null, number: 'CN-1', buttons: [] }, action: { text: CN_SAID.action, disabled: 'false', why: '' },
+    rows: [{ state: 'confirmed', said: CN_SAID.rowConfirmed, amount: '$12.50', buttons: [] }],
+  }, 'P2-16: confirmed; the action offered again ($29.50 remains); the lookup row Confirmed without an action');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'goodwill' }], registrations: [{ attempt: 'attempt 1', state: 'confirmed' }] },
+    'ONE credit note, its registration confirmed');
+  assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'the register, issue and settle audits, once each');
+
+  // P2-60 CN-27b: the wording scans.
+  const words = await creditWordsOf(page);
+  assert.ok(!/\b(paid|unpaid|refunded|refund)\b/i.test(words) && !/withdraw/i.test(words), `CN-27b P2-60: no credit-note text says paid, unpaid, refunded, refund or withdraw (${words.match(/\b(paid|unpaid|refunded|refund)\b|withdraw/i)?.[0]})`);
+  assert.deepEqual(await creditNamedOutside(page), [], 'P2-60: no button names credit or withdraw beyond the three allowed');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-09', 'M7B-CREDITNOTES CN-P2 P2-11 P2-12 P2-13 (B) SIGN-IN BEFORE THE REGISTER — an issued $42.00 invoice, $10.00 Service issue reviewed and confirmed: with no sign-in seen by the shop a press shows the sign-in group and sends nothing; Confirm sign-in with the identity provider\'s password request held at the gate: Stop waiting ends the wait (the field editable again, nothing said, no tenant login), and the held answer released late changes nothing; held again, Escape closes the confirmation and ends the wait, the late answer again changes nothing; Continue (the form kept its values) and one sign-in; then the server session\'s sign-in aged past 10 minutes by owner SQL (AG; the shop\'s own stamp is fresh): the press is ONE register refused 403 step_up_required, nothing more of that chain, "Issuing a credit note needs a recent sign-in…" said and nothing stored; a new form, the sign-in group again (the refusal cleared the shop\'s stamp), one more sign-in, and the new press is ONE register under a NEW key and a NEW attempt id, ONE proof and ONE issue; the database holds ONE credit note from that second attempt and no registration of the first', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n9', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '10.00');
+  await chooseCreditReason(page, 'service_issue');
+  await continueToConfirm(page);
+  const from = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+
+  // P2-13 (1): Stop waiting ends the wait; the late provider answer changes nothing.
+  const idpFrom = st.idp.length;
+  const held = idpGate(page, '/v1/accounts:signInWithPassword');
+  await page.fill(by('issued-credit-reauth-password'), boss.password);
+  await page.click(by('issued-credit-reauth-confirm'));
+  await held.reached;
+  await page.waitFor(`!!${q('issued-credit-reauth-stop')}`, 10_000, 'Stop waiting offered while the provider is waited for');
+  const waiting = await creditConfirmOf(page);
+  await page.click(by('issued-credit-reauth-stop'));
+  await page.waitFor(`!${q('issued-credit-reauth-stop')} && ${q('issued-credit-reauth-password')}?.readOnly === false`, 10_000, 'the wait ended: the field editable again');
+  const stopped = await creditConfirmOf(page);
+  held.release();
+  await page.waitFor(() => st.idp.slice(idpFrom).includes(`POST ${STS_HOST}/v1/token`), 15_000, 'the provider finished its own late sign-in');
+  await quiet(page, from);
+  await page.settle();
+  await page.settle();
+  const late = await creditConfirmOf(page);
+  record('SCN-09', { phase: 'stop waiting', waiting: waiting.group, stopped: stopped.group, late: late.group, sent: sentBy(page, () => true, from).map(apiLine) });
+  assert.deepEqual({ busy: waiting.group.password.readOnly, stop: waiting.group.stop, after: stopped.group.stop, editable: stopped.group.password.readOnly, alert: stopped.alert, lateAlert: late.alert, lateGroup: late.group !== null, sent: sentBy(page, () => true, from).map(apiLine) },
+    { busy: true, stop: 'Stop waiting', after: null, editable: false, alert: '', lateAlert: '', lateGroup: true, sent: [] },
+    'P2-13: Stop waiting ends the wait (nothing said, the field editable); the late provider answer applies nothing; no tenant login, nothing sent');
+
+  // P2-13 (2): Escape during the wait closes the confirmation and ends it; the late answer again changes nothing.
+  const idpFrom2 = st.idp.length;
+  const held2 = idpGate(page, '/v1/accounts:signInWithPassword');
+  await page.fill(by('issued-credit-reauth-password'), boss.password);
+  await page.click(by('issued-credit-reauth-confirm'));
+  await held2.reached;
+  await page.press('Escape');
+  await page.waitFor(`!${q('issued-credit-confirm')}`, 10_000, 'Escape closed the confirmation');
+  held2.release();
+  await page.waitFor(() => st.idp.slice(idpFrom2).includes(`POST ${STS_HOST}/v1/token`), 15_000, 'the provider finished its own late sign-in');
+  await quiet(page, from);
+  await page.settle();
+  await page.settle();
+  const escaped = { confirm: await has(page, 'issued-credit-confirm'), view: await has(page, 'issued-view'), form: await creditFormOf(page), sent: sentBy(page, () => true, from).map(apiLine) };
+  record('SCN-09', { phase: 'escape', ...escaped });
+  assert.deepEqual({ confirm: escaped.confirm, view: escaped.view, amount: escaped.form?.amount.value, reason: escaped.form?.reasons.checked, sent: escaped.sent },
+    { confirm: false, view: true, amount: '10.00', reason: 'service_issue', sent: [] }, 'P2-13: Escape ends the wait and closes the confirmation alone (the form keeps its values); the late answer applies nothing; nothing sent');
+
+  // P2-11 (server): one sign-in, then the SERVER's sign-in aged past 10 minutes (AG): the register meets the step-up.
+  await continueToConfirm(page);
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await creditSignIn(page, boss);
+  await ageSessionOf(page);
+  const firstAt = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditIssueOf(page)).alert === CN_SAID.signInNeeded, 10_000, 'the attempt says signInNeeded');
+  await quiet(page, firstAt);
+  await page.settle();
+  const first = sentBy(page, isCreditChainOf(main.id, id), firstAt);
+  const refused = await creditIssueOf(page);
+  record('SCN-09', { phase: 'server step-up', chain: first.map(payLine(main.id, id)), card: refused.card });
+  assert.deepEqual({ chain: first.map(payLine(main.id, id)), card: refused.card?.text ?? null, stored: await storedCreditsOf(id), audits: await creditAuditsOf(tenant) },
+    { chain: ['POST /credit-note-registrations 403 step_up_required'], card: CN_SAID.signInNeeded, stored: { notes: [], registrations: [] }, audits: [] },
+    'P2-11: the server\'s 10-minute window decides — ONE register refused before its key, no proof, no issue, signInNeeded, nothing stored');
+
+  // P2-12: a new press after a new sign-in sends under NEW keys and a NEW attempt.
+  await openCreditForm(page);
+  await typeAmount(page, '10.00');
+  await chooseCreditReason(page, 'service_issue');
+  await continueToConfirm(page);
+  const again = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  assert.deepEqual(sentBy(page, () => true, again).map(apiLine), [], 'the refusal cleared the shop\'s own stamp: the sign-in group, nothing sent');
+  await creditSignIn(page, boss);
+  const secondAt = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.state === 'issued', 30_000, 'issued');
+  await rereadAnswered(page, main.id, id, secondAt);
+  const second = sentBy(page, isCreditChainOf(main.id, id), secondAt);
+  record('SCN-09', { phase: 'new keys', chain: second.map(payLine(main.id, id)) });
+  assert.deepEqual(second.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 201'], 'P2-15: ONE register, ONE proof, ONE issue');
+  const attemptId = assertCreditChain(tenant, { reg: second[0], proof: second[1], issue: second[2] }, { grossCents: 1000, reason: 'service_issue' });
+  const oldAttempt = jsonOf(first[0].body, 'the refused register body').attemptId;
+  st.secrets.add(oldAttempt);
+  assert.ok(V4.test(oldAttempt) && oldAttempt !== attemptId && ![second[0], second[2]].some((r) => r.headers['idempotency-key'] === first[0].headers['idempotency-key']),
+    'P2-12: the new press: a new attempt id and new keys (compared, never printed)');
+  assert.deepEqual(await storedCreditsOf(id, [oldAttempt, attemptId]), { notes: [{ attempt: 'attempt 2', number: 1, gross: 1000, reason: 'service_issue' }], registrations: [{ attempt: 'attempt 2', state: 'issued' }] },
+    'ONE credit note, from the second attempt; the refused one never registered');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-10', 'M7B-CREDITNOTES CN-P2 P2-17 P2-33 P2-05 P2-51 (B) ANOTHER CREDIT LANDS FIRST — an issued $42.00 invoice; the owner reviews $12.50 Pricing error and signs in; then a $42.00 credit note by a clerk is stored (owner SQL, as 038\'s issue leaves it): the press is ONE register (201), ONE proof (200) and ONE issue answered with the sealed 409 amount_exceeds_remaining; the card says "No credit note was issued: the amount is more than what remains on this invoice now." with Look up attempt and no Release attempt, the amounts read again ($42.00 credited, $0.00 remaining), and the action is held back with "Confirm or release the unfinished credit note below first." (aria-disabled, described, in the accessibility tree too); Look up attempt is ONE attempts read that lists the open row "Registered, not issued when checked at {time}" with Release attempt described by its hint; Release attempt is ONE settlement (version 1) and "Attempt released. No credit note was issued from it.", the row Released, and the action held back with "Nothing remains to credit on this invoice."; the database holds the clerk\'s note only and the attempt released', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n10', 1);
+  const clerk = await actor('n10-clerk', []);
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '12.50');
+  await chooseCreditReason(page, 'pricing_error');
+  await continueToConfirm(page);
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await creditSignIn(page, boss);
+  await seedCreditNotes(tenant, main.id, id, [{ gross: 4200, reason: 'goodwill', by: clerk.id, withdrawal: null }]);
+  const pressAt = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.overRemaining, 30_000, 'overRemaining said');
+  await rereadAnswered(page, main.id, id, pressAt);
+  const chain = sentBy(page, isCreditChainOf(main.id, id), pressAt);
+  const over = await creditIssueOf(page);
+  const axHeld = await axOne(page, 'button', CN_SAID.action);
+  record('SCN-10', { phase: 'over', chain: chain.map(payLine(main.id, id)), over, ax: axHeld });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 409 amount_exceeds_remaining'],
+    'P2-17: the server decides — the issue refused with the sealed amount_exceeds_remaining');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'pricing_error' });
+  assert.deepEqual({ card: { ...over.card, state: 'held' }, alert: over.alert, action: over.action, ax: axHeld, rows: over.rows }, {
+    card: { state: 'held', text: CN_SAID.overRemaining, also: null, hint: null, number: null, buttons: [{ text: CN_SAID.find, why: '' }] }, alert: CN_SAID.overRemaining,
+    action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn }, ax: { disabled: true, invalid: 'false', description: CN_SAID.blockedOwn }, rows: [],
+  }, 'P2-17 P2-05 P2-51: overRemaining with Look up attempt and NO Release attempt on the card; the action aria-disabled, described by blockedOwn');
+  assert.deepEqual({ credited: await textOf(page, 'issued-payments-credited'), remaining: await textOf(page, 'issued-payments-remaining') }, { credited: '$42.00', remaining: '$0.00' }, 'P2-17: the amounts read again');
+
+  const findAt = st.api.length;
+  await page.click(by('issued-payments-credit-card-find'));
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'open'), 30_000, 'the lookup lists the open row');
+  await quiet(page, findAt);
+  await page.settle();
+  const found = await creditIssueOf(page);
+  record('SCN-10', { phase: 'look up', reads: sentBy(page, (r) => !isSessionRead(r), findAt).map(readLine), rows: found.rows });
+  assert.deepEqual(sentBy(page, (r) => !isSessionRead(r), findAt).map(readLine), [`${STORES}/${main.id}/credit-note-attempts 200`], 'Look up attempt: ONE attempts read, nothing written');
+  assert.equal(found.rows.length, 1, 'ONE row of this invoice');
+  assert.ok(CN_SAID.rowOpen.test(found.rows[0].said), `the open row: "Registered, not issued when checked at {time}" (${found.rows[0].said})`);
+  assert.deepEqual({ ...found.rows[0], said: 'open' }, { state: 'open', said: 'open', amount: '$12.50', buttons: [{ text: CN_SAID.release, why: CN_SAID.releaseHint }] }, 'P2-17: the open row offers Release attempt, described by releaseHint');
+
+  const releaseAt = st.api.length;
+  await page.click(by('issued-payments-credit-row-release'));
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.released, 30_000, 'Attempt released.');
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'released'), 30_000, 'the lookup read again: the row released');
+  await quiet(page, releaseAt);
+  await page.settle();
+  const settles = sentBy(page, isCreditChainOf(main.id, id), releaseAt);
+  const released = await creditIssueOf(page);
+  const axAfter = await axOne(page, 'button', CN_SAID.action);
+  record('SCN-10', { phase: 'released', settles: settles.map(payLine(main.id, id)), released, ax: axAfter });
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'P2-33: Release attempt is ONE settlement');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 1 }), 'version 1: the open row of THIS attempt (compared, never printed)');
+  assert.deepEqual({ card: released.card?.text, rows: released.rows, action: released.action, ax: axAfter }, {
+    card: CN_SAID.released, rows: [{ state: 'released', said: CN_SAID.rowReleased, amount: '$12.50', buttons: [] }],
+    action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedRemaining }, ax: { disabled: true, invalid: 'false', description: CN_SAID.blockedRemaining },
+  }, 'P2-33 P2-05: released; the row Released without an action; nothing remains, so the action is held back with blockedRemaining');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'other', number: 1, gross: 4200, reason: 'goodwill' }], registrations: [{ attempt: 'other', state: 'confirmed' }, { attempt: 'attempt 1', state: 'released' }] },
+    'the clerk\'s note only; this attempt released, no note from it');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-11', 'M7B-CREDITNOTES CN-P2 P2-09 P2-33 P2-05 (B) THE REVIEW BEFORE THE CONFIRMATION — three issued $42.00 invoices; on each the form is filled, then the server\'s state changes by owner SQL or direct HTTP before Continue: (1) a $40.00 credit note stored by a clerk: Continue reads the invoice, the list, the payments and stops at "The amount can\'t be more than the $2.00 remaining." on the amount (aria-invalid, focused), no confirmation; (2) an open attempt of the owner stored on invoice 2: Continue says "You have an unfinished credit note on this invoice…", the form closes, the lookup row offers Release attempt and the action is held back with blockedOwn; Release attempt is ONE settlement and the action is offered again; (3) the review\'s attempts read lost before the entry: the lookup says "We haven\'t checked all your unfinished credit notes yet, so issuing is off for now." with Continue checking, the form closes and the action is gone; Continue checking reads it to the end and the action is back; (4) invoice 3 voided by direct HTTP: Continue says "This invoice was voided, so a credit note can\'t be issued."; no confirmation opens in any of these and no credit note is registered or issued', async () => {
+  const { tenant, main, boss, direct, ids: [one, two, three] } = await voidShop('n11', 3);
+  const clerk = await actor('n11-clerk', []);
+  const page = await voidPage(boss, main.id, 3);
+  const writesFrom = st.api.length;
+
+  // (1) The remaining fell.
+  let opened = await openVoidable(page, main.id, one, 1);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '12.50');
+  await chooseCreditReason(page, 'goodwill');
+  await seedCreditNotes(tenant, main.id, one, [{ gross: 4000, reason: 'billing_error', by: clerk.id, withdrawal: null }]);
+  let at = st.api.length;
+  await page.click(by('issued-payments-credit-continue'));
+  await page.waitFor(async () => (await creditFormOf(page))?.amount.describedBy[1] === CN_SAID.errOver('$2.00'), 30_000, 'errOver with the remaining just read');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-payments-credit-form-amount', 5_000, 'focus on the amount');
+  await quiet(page, at);
+  const fell = await creditFormOf(page);
+  const fellReads = sentBy(page, (r) => !isSessionRead(r), at).map(readLine);
+  record('SCN-11', { phase: 'remaining fell', reads: fellReads, form: fell });
+  assert.ok([`${issuedPath(main.id)}/${one} 200`, `${issuedPath(main.id)}/${one}/credit-notes 200`, `${issuedPath(main.id)}/${one}/payments 200`].every((l) => fellReads.includes(l))
+    && sentBy(page, isWrite, at).length === 0, 'P2-09 (1): Continue read the invoice, the list and the payments again, and wrote nothing');
+  assert.deepEqual({ amount: fell.amount, summary: fell.summary.text, confirm: await has(page, 'issued-credit-confirm') },
+    { amount: { value: '12.50', inputMode: 'decimal', invalid: 'true', describedBy: [CN_SAID.amountHint('$2.00'), CN_SAID.errOver('$2.00')] }, summary: CN_SAID.errSummary, confirm: false },
+    'P2-09 (1): the remaining fell — errOver with the remaining read now, on the amount; no confirmation');
+  await closeIssued(page, 3);
+
+  // (2) An unfinished attempt of this owner here.
+  opened = await openVoidable(page, main.id, two, 2);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '5.00');
+  await chooseCreditReason(page, 'goodwill');
+  await seedOpenAttempt(two, boss.id, 700);
+  at = st.api.length;
+  await page.click(by('issued-payments-credit-continue'));
+  await page.waitFor(async () => (await creditIssueOf(page)).alert === CN_SAID.unfinished, 30_000, 'unfinished said');
+  await quiet(page, at);
+  await page.settle();
+  const own = await creditIssueOf(page);
+  record('SCN-11', { phase: 'own row', reads: sentBy(page, (r) => !isSessionRead(r), at).map(readLine), own });
+  assert.deepEqual({ form: own.form, action: own.action, rows: own.rows.map((r) => ({ ...r, said: CN_SAID.rowOpen.test(r.said) ? 'open' : r.said })), confirm: await has(page, 'issued-credit-confirm') }, {
+    form: false, action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+    rows: [{ state: 'open', said: 'open', amount: '$7.00', buttons: [{ text: CN_SAID.release, why: CN_SAID.releaseHint }] }], confirm: false,
+  }, 'P2-09 (2) P2-05: an unfinished attempt here — unfinished, the form closed, its row with Release attempt, the action held back with blockedOwn');
+  at = st.api.length;
+  await page.click(by('issued-payments-credit-row-release'));
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'released'), 30_000, 'the row released');
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'the action offered again');
+  await quiet(page, at);
+  assert.deepEqual(sentBy(page, isCreditChainOf(main.id, two), at).map((r) => `${payLine(main.id, two)(r)} v${jsonOf(r.body, 'the settlement body').expectedVersion}`), ['POST /credit-note-settlement 200 v1'], 'P2-33: Release attempt is ONE settlement, version 1; the action offered again');
+
+  // (3) The review's lookup stopped (no answer): lookupIncomplete.
+  await openCreditForm(page);
+  await typeAmount(page, '5.00');
+  await chooseCreditReason(page, 'goodwill');
+  at = st.api.length;
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'request' && isCreditLookupOf(main.id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-payments-credit-continue'));
+    await page.waitFor(async () => (await creditLookupOf(page))?.phase === 'incomplete', 30_000, 'the lookup incomplete');
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, at);
+  await page.settle();
+  const stopped = { lookup: await creditLookupOf(page), issue: await creditIssueOf(page), more: await textOf(page, 'issued-payments-credit-lookup-continue'), confirm: await has(page, 'issued-credit-confirm') };
+  record('SCN-11', { phase: 'lookup stopped', sent: sentBy(page, () => true, at).map(apiLine), stopped });
+  assert.deepEqual({ alert: stopped.lookup.alert, form: stopped.issue.form, action: stopped.issue.action, more: stopped.more, confirm: stopped.confirm },
+    { alert: CN_SAID.lookupIncomplete, form: false, action: null, more: CN_SAID.continueChecking, confirm: false }, 'P2-09 (3): the lookup stopped — lookupIncomplete and Continue checking, the form closed, the action gone, no confirmation');
+  await page.click(by('issued-payments-credit-lookup-continue'));
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'read to the end again: the action back');
+  await closeIssued(page, 3);
+
+  // (4) Voided meanwhile.
+  opened = await openVoidable(page, main.id, three, 3);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '5.00');
+  await chooseCreditReason(page, 'goodwill');
+  const voided = await call('POST', `${issuedPath(main.id)}/${three}/void`, { session: direct, key: randomUUID(), body: { expectedTenant: tenant, reasonCode: 'other' } });
+  assert.equal(voided.status, 200, `invoice 3 voided by direct HTTP: ${voided.status}`);
+  at = st.api.length;
+  await page.click(by('issued-payments-credit-continue'));
+  await page.waitFor(async () => (await creditIssueOf(page)).alert === CN_SAID.reviewVoided, 30_000, 'reviewVoided said');
+  await quiet(page, at);
+  const gone = await creditIssueOf(page);
+  record('SCN-11', { phase: 'voided', sent: sentBy(page, () => true, at).map(apiLine), gone });
+  assert.deepEqual({ form: gone.form, confirm: await has(page, 'issued-credit-confirm') }, { form: false, confirm: false }, 'P2-09 (4): voided meanwhile — reviewVoided, the form closed, no confirmation');
+  assert.deepEqual(sentBy(page, (r) => isWrite(r) && !isCreditSettleOf(main.id, two)(r), writesFrom).map(apiLine), [], 'no credit-note write but the one Release attempt');
+  for (const [inv, want] of [[one, { notes: [{ attempt: 'other', number: 1, gross: 4000, reason: 'billing_error' }], registrations: [{ attempt: 'other', state: 'confirmed' }] }],
+    [two, { notes: [], registrations: [{ attempt: 'other', state: 'released' }] }], [three, { notes: [], registrations: [] }]]) {
+    assert.deepEqual(await storedCreditsOf(inv), want, 'nothing registered or issued by the review');
+  }
+}, 240_000);
+
+scenario('SCN-12', 'M7B-CREDITNOTES CN-P2 P2-18 P2-19 P2-33 P2-05 (B) REFUSED BY THE INVOICE\'S OR THE ATTEMPT\'S STATE — three issued $42.00 invoices, the owner signed in once in the confirmation: (a) the issue held at the front after ONE register and ONE proof while invoice 1 is voided by direct HTTP: the issue is the sealed 409 invalid_state, the invoice read again says voided, the card says "No credit note was issued: this invoice was voided." with Look up attempt; the lookup lists the open row and Release attempt is ONE settlement, released; (b) on invoice 2 the issue held while the attempt is released by direct HTTP (its own owner, version 1): the issue is the sealed 409 invalid_state, the invoice read again is issued, and the card says "No credit note was issued: this attempt was released." (the attempt over, the action offered again); (c) on invoice 2 an open attempt of the owner stored after the review: the press is ONE register answered with the sealed 409 write_conflict, "You have an unfinished credit note on this invoice…", the lookup read lists its open row with Release attempt, the action held back with blockedOwn; released; (d) on invoice 3 a payment whose record answer is lost at the front (unresolved): the action is held back with "Finish your unfinished payment, reversal or void attempt first."; the database holds no credit note', async () => {
+  const { tenant, main, boss, direct, ids: [one, two, three] } = await voidShop('n12', 3);
+  const page = await voidPage(boss, main.id, 3);
+
+  // (a) Voided between the proof and the issue.
+  let opened = await openVoidable(page, main.id, one, 1);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '12.50');
+  await chooseCreditReason(page, 'goodwill');
+  await continueToConfirm(page);
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await creditSignIn(page, boss);
+  let held = gate((r) => r.frameId === page.frameId && isCreditIssueOf(main.id, one)(r), 'request');
+  let at = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await held.reached;
+  const voided = await call('POST', `${issuedPath(main.id)}/${one}/void`, { session: direct, key: randomUUID(), body: { expectedTenant: tenant, reasonCode: 'other' } });
+  assert.equal(voided.status, 200, `invoice 1 voided by direct HTTP between the proof and the issue: ${voided.status}`);
+  held.release();
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.voided, 30_000, 'voided said');
+  await quiet(page, at);
+  await page.settle();
+  let chain = sentBy(page, isCreditChainOf(main.id, one), at);
+  const reread1 = sentBy(page, (r) => r.method === 'GET' && r.path === `${issuedPath(main.id)}/${one}` && st.api.indexOf(r) > st.api.indexOf(chain[2]), at);
+  const a = await creditIssueOf(page);
+  record('SCN-12', { phase: 'voided', chain: chain.map(payLine(main.id, one)), reread: reread1.map(readLine), card: a.card });
+  assert.deepEqual(chain.map(payLine(main.id, one)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 409 invalid_state'], 'P2-18: the issue refused with the sealed invalid_state');
+  const attemptA = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'goodwill' });
+  assert.ok(reread1.length >= 1 && jsonOf(reread1[0].replied.text, 'the invoice read again').invoice.status === 'voided', 'P2-18: the invoice read again: voided');
+  assert.deepEqual({ ...a.card, state: 'held' }, { state: 'held', text: CN_SAID.voided, also: null, hint: null, number: null, buttons: [{ text: CN_SAID.find, why: '' }] }, 'P2-18: voided, with Look up attempt (no Release on the card)');
+  await page.click(by('issued-payments-credit-card-find'));
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'open'), 30_000, 'the lookup lists the open row');
+  at = st.api.length;
+  await page.click(by('issued-payments-credit-row-release'));
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.released, 30_000, 'released');
+  await quiet(page, at);
+  const releasedA = sentBy(page, isCreditChainOf(main.id, one), at);
+  assert.deepEqual(releasedA.map(payLine(main.id, one)), ['POST /credit-note-settlement 200'], 'P2-18 P2-33: the open row released by ONE settlement');
+  assert.ok(releasedA[0].body === JSON.stringify({ expectedTenant: tenant, attemptId: attemptA, expectedVersion: 1 }), 'version 1: the open row of THIS attempt (compared, never printed)');
+  assert.deepEqual(await storedCreditsOf(one, [attemptA]), { notes: [], registrations: [{ attempt: 'attempt 1', state: 'released' }] }, 'no note; the attempt released');
+  await closeIssued(page, 3);
+
+  // (b) Released (by direct HTTP, its own owner) between the proof and the issue.
+  opened = await openVoidable(page, main.id, two, 2);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '5.00');
+  await chooseCreditReason(page, 'pricing_error');
+  await continueToConfirm(page);
+  held = gate((r) => r.frameId === page.frameId && isCreditIssueOf(main.id, two)(r), 'request');
+  at = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await held.reached;
+  const attemptB = jsonOf(sentBy(page, isCreditRegisterOf(main.id, two), at)[0].body, 'the register body').attemptId;
+  st.secrets.add(attemptB);
+  const release = await call('POST', `${issuedPath(main.id)}/${two}/credit-note-settlement`, { session: direct, key: randomUUID(), body: { expectedTenant: tenant, attemptId: attemptB, expectedVersion: 1 } });
+  assert.equal(release.status, 200, `the attempt released by direct HTTP between the proof and the issue: ${release.status}`);
+  held.release();
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.attemptReleased, 30_000, 'attemptReleased said');
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'the action offered again');
+  await quiet(page, at);
+  await page.settle();
+  chain = sentBy(page, isCreditChainOf(main.id, two), at);
+  const reread2 = sentBy(page, (r) => r.method === 'GET' && r.path === `${issuedPath(main.id)}/${two}` && st.api.indexOf(r) > st.api.indexOf(chain[2]), at);
+  assert.ok(reread2.length >= 1 && jsonOf(reread2[0].replied.text, 'the invoice read again').invoice.status === 'issued', 'P2-18: the invoice read again: still issued');
+  const b = await creditIssueOf(page);
+  record('SCN-12', { phase: 'released', chain: chain.map(payLine(main.id, two)), card: b.card });
+  assert.deepEqual(chain.map(payLine(main.id, two)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 409 invalid_state'], 'P2-18 P2-33: a released attempt\'s issue: the sealed invalid_state');
+  assert.deepEqual({ state: b.card.state, text: b.card.text, buttons: b.card.buttons, action: b.action }, { state: 'released', text: CN_SAID.attemptReleased, buttons: [], action: { text: CN_SAID.action, disabled: 'false', why: '' } },
+    'P2-18: the invoice still issued — attemptReleased, the attempt over, the action offered again');
+
+  // (c) P2-19: an open attempt of the owner stored after the review — the register meets the slot rule.
+  await openCreditForm(page);
+  await typeAmount(page, '5.00');
+  await chooseCreditReason(page, 'pricing_error');
+  await continueToConfirm(page);
+  await seedOpenAttempt(two, boss.id, 300);
+  at = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'open'), 30_000, 'the lookup lists the open row');
+  await quiet(page, at);
+  await page.settle();
+  const c = await creditIssueOf(page);
+  record('SCN-12', { phase: 'write conflict', sent: sentBy(page, (r) => !isSessionRead(r), at).map(apiLine), c });
+  assert.deepEqual(sentBy(page, isCreditChainOf(main.id, two), at).map(payLine(main.id, two)), ['POST /credit-note-registrations 409 write_conflict'], 'P2-19: ONE register, the sealed write_conflict; no proof, no issue');
+  const conflict = sentBy(page, isCreditRegisterOf(main.id, two), at)[0];
+  assert.ok(sentBy(page, isCreditLookupOf(main.id), at).some((r) => r.status === 200 && st.api.indexOf(r) > st.api.indexOf(conflict)), 'P2-19: the lookup read after the write_conflict');
+  assert.deepEqual({ card: c.card?.text, alert: c.alert, action: c.action, rows: c.rows.map((r) => ({ ...r, said: CN_SAID.rowOpen.test(r.said) ? 'open' : r.said })) }, {
+    card: CN_SAID.unfinished, alert: CN_SAID.unfinished, action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+    rows: [{ state: 'released', said: CN_SAID.rowReleased, amount: '$5.00', buttons: [] }, { state: 'open', said: 'open', amount: '$3.00', buttons: [{ text: CN_SAID.release, why: CN_SAID.releaseHint }] }],
+  }, 'P2-19 P2-05: unfinished; the lookup rows (the released one, the open one with Release attempt); the action held back with blockedOwn');
+  at = st.api.length;
+  await page.click(by('issued-payments-credit-row-release'));
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'released: the action offered again');
+  await quiet(page, at);
+  assert.deepEqual(sentBy(page, isCreditChainOf(main.id, two), at).map((r) => `${payLine(main.id, two)(r)} v${jsonOf(r.body, 'the settlement body').expectedVersion}`), ['POST /credit-note-settlement 200 v1'], 'P2-33: released by ONE settlement, version 1');
+  await closeIssued(page, 3);
+
+  // (d) P2-05 blockedSibling: an unresolved payment attempt on invoice 3.
+  opened = await openVoidable(page, main.id, three, 3);
+  await creditSettled(page, main.id, opened, 0);
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'the action offered');
+  await fillPaymentForm(page, '5.00', 'cash');
+  let lost = 0;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isPaymentRecord(main.id, three)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-payments-submit'));
+    await page.waitFor(`!!${q('issued-payments-check')}`, 30_000, 'the payment unresolved: Check again offered');
+  } finally {
+    st.lose = null;
+  }
+  await page.settle();
+  const d = await creditIssueOf(page);
+  const axSibling = await axOne(page, 'button', CN_SAID.action);
+  record('SCN-12', { phase: 'sibling', action: d.action, ax: axSibling });
+  assert.deepEqual({ action: d.action, ax: axSibling }, { action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedSibling }, ax: { disabled: true, invalid: 'false', description: CN_SAID.blockedSibling } },
+    'P2-05 P2-51: an unresolved payment attempt here — the action aria-disabled, described by blockedSibling');
+  for (const inv of [one, two, three]) assert.deepEqual((await storedCreditsOf(inv)).notes, [], 'no credit note stored');
+  await assertNoLeak(page);
+}, 300_000);
+
+scenario('SCN-13', 'M7B-CREDITNOTES CN-P2 P2-54 CN-07b P2-43 P2-41 P2-32 (B) ESCAPE IN FLIGHT, A LOST ISSUE ANSWER, A RELOAD AND THE LOOKUP\'S CONFIRM — an issued $42.00 invoice, $12.50 Billing error confirmed after one sign-in; the issue held at the front after ONE register and ONE proof: "Don\'t issue" reads "Close" described by "Closing this window doesn\'t cancel the credit note…"; Escape closes the confirmation alone (the dialog stays, focus not on the page body) and "Closed. The credit note is still being sent." is said; released, the issue reaches the entry and commits (201) and its answer is lost at the front: "We can\'t tell whether this credit note was issued. Don\'t assume it wasn\'t. …" is said (never "No credit note…"), with Look up attempt; a focus, a visibilitychange and 3 s send no write; the page reloaded and the invoice opened again sends no write: the lookup lists the attempt "Issued, not confirmed" with Confirm credit note described by its hint, the action held back with blockedOwn and the list holds CN-1; Confirm credit note is ONE settlement (version 2, this attempt) and "Credit note confirmed."; the database holds ONE credit note and its registration confirmed, and the register, issue and settle audits', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n13', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, '12.50');
+  await chooseCreditReason(page, 'billing_error');
+  await continueToConfirm(page);
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await creditSignIn(page, boss);
+  const held = gate((r) => r.frameId === page.frameId && isCreditIssueOf(main.id, id)(r), 'request');
+  const at = st.api.length;
+  let lost = 0;
+  let chain;
+  try {
+    st.lose = (rec, phase) => phase === 'response' && isCreditIssueOf(main.id, id)(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await page.click(by('issued-credit-send'));
+    await held.reached;
+    await page.waitFor(async () => (await creditConfirmOf(page))?.keep?.text === CN_SAID.close, 10_000, '"Don\'t issue" became "Close" while sending');
+    const sending = await creditConfirmOf(page);
+    // P2-54: Escape in flight closes, never aborts.
+    await page.press('Escape');
+    await page.waitFor(`!${q('issued-credit-confirm')}`, 10_000, 'Escape closed the confirmation');
+    await page.waitFor(async () => (await creditIssueOf(page)).say === CN_SAID.closedInFlight, 10_000, 'closedInFlight said');
+    const inFlight = { view: await has(page, 'issued-view'), say: (await creditIssueOf(page)).say, focus: await page.evaluate('document.activeElement === document.body') };
+    record('SCN-13', { phase: 'in flight', sending: { keep: sending.keep, status: sending.status }, inFlight });
+    assert.deepEqual({ keep: sending.keep, status: sending.status, ...inFlight }, { keep: { text: CN_SAID.close, why: CN_SAID.closeWarning }, status: 'Issuing the credit note…', view: true, say: CN_SAID.closedInFlight, focus: false },
+      'P2-54: while sending, Close described by closeWarning; Escape closes the confirmation alone, closedInFlight said, focus never on the body');
+    held.release();
+    await page.waitFor(async () => ((await creditIssueOf(page)).alert ?? '').startsWith(CN_SAID.unresolvedLead), 30_000, 'unresolved said');
+    chain = sentBy(page, isCreditChainOf(main.id, id), at);
+  } finally {
+    st.lose = null;
+  }
+  await quiet(page, at);
+  await page.settle();
+  const unsure = await creditIssueOf(page);
+  record('SCN-13', { phase: 'lost', chain: chain.map(payLine(main.id, id)), card: unsure.card });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 201 (response lost)'],
+    'P2-54 CN-07b: the held issue was not aborted — it reached the entry and committed; its answer lost at the front');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'billing_error' });
+  assert.ok(unsure.card.text.startsWith(CN_SAID.unresolvedLead) && !/No credit note/.test(`${unsure.card.text} ${unsure.say} ${unsure.alert}`) && unsure.card.buttons.some((x) => x.text === CN_SAID.find),
+    `CN-07b P2-54: unresolved (never "not issued"), Look up attempt offered, said in the section's regions (${unsure.card.text})`);
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'billing_error' }], registrations: [{ attempt: 'attempt 1', state: 'issued' }] },
+    'the entry committed ONE credit note');
+
+  // P2-43: nothing is sent again on its own.
+  const idle = st.api.length;
+  await focusAndSettle(page, 'focus');
+  await focusAndSettle(page, 'visibilitychange');
+  await delay(3_000);
+  await quiet(page, idle);
+  assert.deepEqual(sentBy(page, isWrite, idle).map(apiLine), [], 'P2-43 CN-07b: a focus, a visibilitychange and time send no write and no replay');
+
+  // P2-41 P2-32: the reload forgets the attempt; the lookup finds it issued; Confirm from its row.
+  const reloadAt = st.api.length;
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the invoice listed after the reload');
+  const reopened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, reopened, 1);
+  const back = await creditIssueOf(page);
+  record('SCN-13', { phase: 'reloaded', back, writes: sentBy(page, isWrite, reloadAt).map(apiLine) });
+  assert.deepEqual({ writes: sentBy(page, isWrite, reloadAt).map(apiLine), card: back.card, action: back.action, rows: back.rows, list: (await creditListOf(page)).items.map((i) => i.number) }, {
+    writes: [], card: null, action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+    rows: [{ state: 'issued', said: CN_SAID.rowIssued, amount: '$12.50', buttons: [{ text: CN_SAID.confirm, why: CN_SAID.confirmHint }] }], list: ['CN-1'],
+  }, 'P2-41 P2-32: after the reload nothing is sent on mount; the lookup row Issued, not confirmed with Confirm credit note (confirmHint); blockedOwn; CN-1 listed');
+  const confirmAt = st.api.length;
+  await page.click(by('issued-payments-credit-row-confirm'));
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.confirmed, 30_000, 'Credit note confirmed.');
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'confirmed'), 30_000, 'the row confirmed');
+  await quiet(page, confirmAt);
+  await page.settle();
+  const settles = sentBy(page, isCreditChainOf(main.id, id), confirmAt);
+  const reads = sentBy(page, (r) => r.method === 'GET' && !isSessionRead(r), confirmAt).map(readLine);
+  record('SCN-13', { phase: 'confirmed', settles: settles.map(payLine(main.id, id)), reads });
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'P2-32: Confirm credit note on the issued row is ONE settlement');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'version 2: the lost attempt (compared, never printed)');
+  assert.ok(reads.includes(`${issuedPath(main.id)}/${id}/credit-notes 200`), `P2-32: the list read again after the confirm`);
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'billing_error' }], registrations: [{ attempt: 'attempt 1', state: 'confirmed' }] },
+    'ONE credit note, its registration confirmed');
+  assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'the register, issue and settle audits, once each');
+  await assertNoLeak(page);
+}, 240_000);
+
+/** TS (doc 17 §5): WCAG 1.4.12's text-spacing override, as a user style sheet applies it. */
+const TEXT_SPACING = '* { line-height: 1.5 !important; letter-spacing: 0.12em !important; word-spacing: 0.16em !important; } p { margin-bottom: 2em !important; }';
+/** 24 px default text and the TS override on (P2-47), or the browser's defaults back (16 px, no override). */
+async function largeSpacedText(page, on) {
+  await page.evaluate(`(() => { document.getElementById('cn-ts')?.remove(); if (${on}) { const s = document.createElement('style'); s.id = 'cn-ts'; s.textContent = ${JSON.stringify(TEXT_SPACING)}; document.head.append(s); } return true; })()`);
+  await page.send('Page.setFontSizes', { fontSizes: on ? { standard: 24, fixed: 24 } : { standard: 16, fixed: 13 } });
+  await page.settle();
+  assert.equal(await page.evaluate('getComputedStyle(document.documentElement).fontSize'), on ? '24px' : '16px', 'the default text size took');
+}
+/**
+ * P2-50: every button and radio label under `root` (by test id) as laid out: its box, at least 24 x 24 CSS px, and any two
+ * that overlap (spacing). Hidden ones (no box) are skipped.
+ */
+const targetsOf = (page, root) => page.evaluate(`(() => {
+  const r = document.querySelector('[data-testid="${root}"]');
+  if (r === null) return null;
+  const nodes = [...r.querySelectorAll('button[data-testid^="issued-payments-credit"], button[data-testid^="issued-credit"], [role="radiogroup"] label')].filter((n) => n.getClientRects().length > 0);
+  const boxes = nodes.map((n) => { const b = n.getBoundingClientRect(); return { name: n.textContent.trim().slice(0, 30), x: b.left, y: b.top, w: b.width, h: b.height }; });
+  const small = boxes.filter((b) => b.w < 24 - 0.5 || b.h < 24 - 0.5).map((b) => ({ name: b.name, w: Math.round(b.w * 10) / 10, h: Math.round(b.h * 10) / 10 }));
+  const overlaps = [];
+  for (let i = 0; i < boxes.length; i += 1) for (let j = i + 1; j < boxes.length; j += 1) {
+    const a = boxes[i], b = boxes[j];
+    if (Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0.5 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.5) overlaps.push([a.name, b.name]);
+  }
+  return { count: boxes.length, names: boxes.map((b) => b.name), small, overlaps };
+})()`);
+/**
+ * P2-47: `root` (by test id) inside its scrolling panel at the current text settings: the page and the panel never wider
+ * than their client box, no box reaching past the panel, no clipped text (ellipsis or hidden overflow), the focused
+ * element in view and on top (2.4.11), and every control in view and on top once scrolled to (dialog buttons reachable).
+ */
+const reflowOf = (page, root, panelId) => page.evaluate(`(() => {
+  const r = document.querySelector('[data-testid="${root}"]'), panel = document.querySelector('[data-testid="${panelId}"]');
+  if (r === null || panel === null) return null;
+  const doc = document.documentElement;
+  const tag = (n) => n.dataset?.testid ?? n.id ?? n.tagName.toLowerCase();
+  const onTop = (n) => { const b = n.getBoundingClientRect(); const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    return b.left >= -0.5 && b.top >= -0.5 && b.right <= innerWidth + 0.5 && b.bottom <= innerHeight + 0.5 && hit !== null && (n.contains(hit) || hit.contains(n)); };
+  const a = document.activeElement;
+  if (a !== null && a !== document.body) a.scrollIntoView({ block: 'nearest', inline: 'nearest' }); // as receiving focus scrolls it, after the text grew
+  const focus = a === null || a === document.body ? 'body' : { id: tag(a), ok: onTop(a) };
+  const p = panel.getBoundingClientRect();
+  const all = [r, ...r.querySelectorAll('*')].filter((n) => n.getClientRects().length > 0);
+  const past = all.filter((n) => { const b = n.getBoundingClientRect(); return b.right > p.right + 0.5 || b.left < p.left - 0.5; }).map(tag).slice(0, 8);
+  const clipped = all.filter((n) => { const c = getComputedStyle(n);
+    return (c.textOverflow === 'ellipsis' && n.scrollWidth > n.clientWidth + 0.5) || (['hidden', 'clip'].includes(c.overflowX) && n.scrollWidth > n.clientWidth + 0.5 && n.clientWidth > 1)
+      || (['hidden', 'clip'].includes(c.overflowY) && n.scrollHeight > n.clientHeight + 0.5 && n.clientHeight > 1); }).map(tag).slice(0, 8);
+  const unreachable = [...r.querySelectorAll('button, input, [role="radiogroup"] label')].filter((n) => n.getClientRects().length > 0 && !n.classList.contains('sr-only'))
+    .filter((n) => { n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); return !onTop(n); }).map(tag);
+  return { page: [doc.scrollWidth, doc.clientWidth], panel: [panel.scrollWidth, panel.clientWidth], past, clipped, focus, unreachable };
+})()`);
+
+scenario('SCN-14', 'M7B-CREDITNOTES CN-P2 P2-47 P2-50 (B) 320 PX, 24 PX TEXT, TEXT SPACING AND TARGET SIZE — an issued $42.00 invoice; the owner\'s display name is 200 characters; at 320x640 CSS px, the action, the form with its errors, the confirmation, its sign-in group, the issued card and the list holding the issued note "Issued by" that name are each measured twice: at the browser\'s 16 px default every button and radio label is at least 24 x 24 CSS px and none overlaps another (P2-50); with a 24 px default text size and WCAG 1.4.12\'s text-spacing override (line height 1.5, paragraphs 2 em apart, letters 0.12 em, words 0.16 em) the page and the dialog never scroll sideways, no box reaches past the dialog, no text is clipped, the focused element is in view and on top, and every control is in view and on top once scrolled to (P2-47); the 200-character name is shown whole', async () => {
+  const { main, boss, ids: [id] } = await voidShop('n14', 1);
+  const name = wordsOf(`Owner${SUFFIX}n`, 200);
+  await owner`update app_user set display_name = ${name} where internal_user_id = ${boss.id}`;
+  const page = await voidPage(boss, main.id, 1);
+  await page.setViewport(320, 640);
+  await page.settle();
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 0);
+  const problems = [];
+  const check = (ok, what) => { if (!ok) problems.push(what); };
+  const measure = async (state, root, panel, { controls = true } = {}) => {
+    const targets = await targetsOf(page, root);
+    await largeSpacedText(page, true);
+    const reflow = await reflowOf(page, root, panel);
+    await largeSpacedText(page, false);
+    record('SCN-14', { state, targets, reflow });
+    check(targets !== null && (targets.count > 0 || !controls) && targets.small.length === 0 && targets.overlaps.length === 0, `${state}: a target under 24 x 24 px or overlapping ${JSON.stringify(targets)}`);
+    check(reflow !== null && reflow.page[0] <= reflow.page[1] + 0.5 && reflow.panel[0] <= reflow.panel[1] + 0.5, `${state}: the page or the dialog scrolls sideways ${JSON.stringify(reflow && { page: reflow.page, panel: reflow.panel })}`);
+    check(reflow !== null && reflow.past.length === 0 && reflow.clipped.length === 0, `${state}: a box past the dialog or clipped text ${JSON.stringify(reflow && { past: reflow.past, clipped: reflow.clipped })}`);
+    check(reflow !== null && reflow.focus !== 'body' && reflow.focus.ok, `${state}: the focused element is not in view and on top ${JSON.stringify(reflow?.focus)}`);
+    check(reflow !== null && reflow.unreachable.length === 0, `${state}: a control not in view and on top once scrolled to ${JSON.stringify(reflow?.unreachable)}`);
+  };
+  await page.call(by('issued-payments-credit-issue'), function () { this.focus(); });
+  await measure('action', 'issued-payments-credit-issuer', 'issued-view');
+  await openCreditForm(page);
+  await page.click(by('issued-payments-credit-continue'));
+  await page.waitFor(async () => (await creditFormOf(page))?.summary.text === CN_SAID.errSummary, 10_000, 'the form\'s errors');
+  await measure('form with errors', 'issued-payments-credit-form', 'issued-view');
+  await typeAmount(page, '12.50');
+  await chooseCreditReason(page, 'service_issue');
+  await continueToConfirm(page);
+  await measure('confirmation', 'issued-credit-confirm', 'issued-credit-confirm');
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await measure('sign-in group', 'issued-credit-confirm', 'issued-credit-confirm');
+  await creditSignIn(page, boss);
+  const pressAt = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.number === 'CN-1', 30_000, 'the card shows CN-1');
+  await quiet(page, pressAt);
+  await measure('issued card', 'issued-payments-credit-card', 'issued-view');
+  await page.click(by('issued-payments-credit-card-confirm'));
+  await page.waitFor(async () => (await creditIssueOf(page)).card?.text === CN_SAID.confirmed, 30_000, 'Credit note confirmed.');
+  await page.waitFor(async () => (await creditListOf(page))?.items[0]?.issuedBy?.bdi === name, 30_000, 'the list shows the note issued by the 200-character name');
+  await quiet(page, pressAt);
+  await page.call(by('issued-payments-credit-card-heading'), function () { this.focus(); });
+  await measure('list', 'issued-payments-credit-notes', 'issued-view', { controls: false }); // one note: no Show more, no Try again
+  assert.deepEqual(problems, [], 'P2-47 P2-50: at 320 px every target is 24 x 24 px or more, and with 24 px text and text spacing nothing scrolls sideways, clips or hides a control');
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-CREDITNOTES CN-P2 (docs/phase-4/17 §3.1-§3.3, §3.6) — the RECOVERY side: a lost answer at each stage, Check again
+// (same session, key and bytes, inside its window), Continue issuing and the D-P2-15 comparison, Hide this attempt, and the
+// lookup-first settlement after a sign-in or a reload. Expectations are the design's; keys, bodies and ids never printed.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** One "YYYY-MM-DD HH:MM:SS UTC" clock text moved by `ms`. */
+const clockPlus = (t, ms) => { const d = new Date(Date.parse(`${t.slice(0, 10)}T${t.slice(11, 19)}Z`) + ms).toISOString(); return `${d.slice(0, 10)} ${d.slice(11, 19)} UTC`; };
+const CARD = 'issued-payments-credit-card';
+/** The inline credit-note card (or `prefix`'s) as shown: state, line, second line, Check-again deadline, number, every button (and why), listed notes. */
+const creditCardOf = (page, prefix = CARD) => page.evaluate(`(() => {
+  const c = document.querySelector('[data-testid="${prefix}"]');
+  if (c === null) return null;
+  const t = (id) => c.querySelector('[data-testid="${prefix}-' + id + '"]')?.textContent.trim() ?? null;
+  const why = (n) => (n.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id)?.textContent.trim() ?? '?').join(' ');
+  return {
+    state: c.dataset.state, text: t('text'), also: t('also'), until: t('until'), number: t('number'),
+    buttons: [...c.querySelectorAll('button')].map((b) => ({ text: b.textContent.trim(), why: why(b) })),
+    notes: [...c.querySelectorAll('[data-testid="${prefix}-note"]')].map((li) => ({ id: li.dataset.id, number: li.querySelector('[data-testid="${prefix}-note-number"]')?.textContent.trim() ?? null })),
+    focus: document.activeElement?.dataset?.testid ?? document.activeElement?.tagName ?? null,
+  };
+})()`);
+const names = (buttons) => buttons.map((b) => b.text);
+/** `act` run while ONE of `page`'s requests matching `match` is lost at the front: 'request' never reaches the entry, 'response' commits there and its answer is dropped. */
+async function losingOne(page, match, phase, act) {
+  let lost = 0;
+  try {
+    st.lose = (rec, p) => p === phase && match(rec) && rec.frameId === page.frameId && lost++ === 0;
+    await act();
+  } finally {
+    st.lose = null;
+  }
+}
+/**
+ * The owner's page on issued invoice `id` (number `n`, no credit note yet): its form filled ($`dollars`, `reason`), reviewed
+ * and the confirmation open — signed in there first when the shop has no fresh sign-in (`signIn`). The sign-in's clock text.
+ */
+async function creditReady(page, store, id, n, who, dollars, reason, { signIn = true } = {}) {
+  const opened = await openVoidable(page, store, id, n);
+  await creditSettled(page, store, opened, 0);
+  await openCreditForm(page);
+  await typeAmount(page, dollars);
+  await chooseCreditReason(page, reason);
+  await continueToConfirm(page);
+  if (!signIn) return null;
+  await page.click(by('issued-credit-send'));
+  await signInAsked(page, CN_SAID.signInNeeded);
+  await creditSignIn(page, who);
+  return /^Signed in again at (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC)\./.exec((await creditConfirmOf(page)).status)[1];
+}
+/** A card's button pressed, its outcome waited for (`done` on the card), then every request answered. The record index it began at. */
+async function pressCard(page, button, done, label, prefix = CARD) {
+  const from = st.api.length;
+  await page.click(by(`${prefix}-${button}`));
+  await page.waitFor(async () => done(await creditCardOf(page, prefix)), 30_000, label);
+  await quiet(page, from);
+  await page.settle();
+  return from;
+}
+/** The review's four reads (doc 17 §2.4, E3) among `records`: the invoice, its payments, the owner's lookup and the list. */
+const reviewRead = (records, store, id) => [`${issuedPath(store)}/${id}`, `${issuedPath(store)}/${id}/payments`, `${STORES}/${store}/credit-note-attempts`, `${issuedPath(store)}/${id}/credit-notes`]
+  .every((path) => records.some((r) => r.method === 'GET' && r.path === path && r.status === 200));
+/** A credit note issued (and confirmed, unless told not to) through the entry by `session` (another device): register → proof → issue (→ settle). */
+async function creditNoteVia(session, tenant, store, invoice, grossCents, reason, { confirm = true } = {}) {
+  const base = `${issuedPath(store)}/${invoice}`;
+  const attemptId = randomUUID();
+  const reg = await call('POST', `${base}/credit-note-registrations`, { session, key: randomUUID(), body: { expectedTenant: tenant, attemptId, grossCents, reason } });
+  assert.equal(reg.status, 201, 'the other device\'s register');
+  const registrationId = JSON.parse(reg.text).registration.id;
+  const proof = await call('GET', `${base}/credit-note-registration-proof?registration=${registrationId}`, { session });
+  assert.equal(proof.status, 200, 'the other device\'s proof');
+  const registrationProof = JSON.parse(proof.text).proof;
+  for (const secret of [attemptId, registrationId, registrationProof]) st.secrets.add(secret);
+  const issue = await call('POST', `${base}/credit-notes`, { session, key: randomUUID(), body: { expectedTenant: tenant, registrationId, attemptId, grossCents, reason, registrationProof } });
+  assert.equal(issue.status, 201, 'the other device\'s issue');
+  if (confirm) {
+    const settle = await call('POST', `${base}/credit-note-settlement`, { session, key: randomUUID(), body: { expectedTenant: tenant, attemptId, expectedVersion: 2 } });
+    assert.equal(settle.status, 200, 'the other device\'s confirm');
+  }
+  return { attemptId, id: JSON.parse(issue.text).creditNote.id };
+}
+/** The page's session ended by owner SQL, then noticed (a focus checks it: 401) and Reconnect pressed: ONE login, `store`'s `n` invoices listed again. */
+async function endAndReconnect(page, who, store, n) {
+  await endSessions(who);
+  await focusAndSettle(page, 'focus');
+  await waitData(page, 'issued-stores-state', 'phase', 'signed-out');
+  const from = st.api.length;
+  await page.click(by('issued-retry'));
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await pickIssuedStore(page, store);
+  await waitIssuedRows(page, n, 'the issued invoices listed after Reconnect');
+  assert.deepEqual(sentBy(page, isLogin, from).map(answered), ['200'], 'Reconnect: ONE login');
+}
+
+scenario('SCN-15', 'M7B-CREDITNOTES CN-P2 P2-22 P2-65 P2-05 (B) A LOST REGISTER ANSWER, CHECK AGAIN, THEN CONTINUE ISSUING — $12.50 Goodwill on an issued $42.00 invoice, signed in; the register commits and its answer is lost at the front: the card says regUnknown with Check again (described by checkReplayHint, "You can check again until {sign-in + 9 min}"), Look up attempt and Hide this attempt (described by hideWarning), and nothing more is sent; Check again is ONE register with the SAME key and bytes, replayed by the entry: registeredOnly with Continue issuing (continueHint), the review read again (invoice, payments, lookup, list), no proof and no issue, focus on the card\'s heading, the action held back (blockedOwn); Continue issuing re-reads the review and the list, then ONE proof and ONE issue (never a register): issued; Confirm credit note: confirmed; the database holds ONE note and its registration confirmed, ONE register audit', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n15', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const signedAt = await creditReady(page, main.id, id, 1, boss, '12.50', 'goodwill');
+  const at = st.api.length;
+  await losingOne(page, isCreditRegisterOf(main.id, id), 'response', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.regUnknown, 30_000, 'regUnknown said');
+  });
+  await quiet(page, at);
+  await page.settle();
+  const first = sentBy(page, isCreditChainOf(main.id, id), at);
+  const lost = await creditCardOf(page);
+  record('SCN-15', { phase: 'lost', chain: first.map(payLine(main.id, id)), card: lost, action: (await creditIssueOf(page)).action });
+  assert.deepEqual(first.map(payLine(main.id, id)), ['POST /credit-note-registrations 201 (response lost)'], 'P2-22: ONE register, committed, its answer lost; no proof, nothing more');
+  const attemptId = jsonOf(first[0].body, 'the register body').attemptId;
+  st.secrets.add(attemptId);
+  assert.deepEqual({ text: lost.text, until: lost.until, buttons: lost.buttons, action: (await creditIssueOf(page)).action }, {
+    text: CN_SAID.regUnknown, until: CN_SAID.checkUntil(clockPlus(signedAt, 9 * 60_000)),
+    buttons: [{ text: CN_SAID.checkAgain, why: CN_SAID.checkReplayHint }, { text: CN_SAID.find, why: '' }, { text: CN_SAID.hide, why: CN_SAID.hideWarning }],
+    action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+  }, 'P2-22 P2-05: regUnknown with Check again (checkReplayHint, its 9-minute deadline as a clock time), Look up attempt and Hide this attempt (hideWarning); the action held back');
+
+  const checkAt = await pressCard(page, 'check', (c) => c?.text === CN_SAID.registeredOnly(true), 'registeredOnly with Continue issuing');
+  const replay = sentBy(page, isCreditChainOf(main.id, id), checkAt);
+  const registered = await creditCardOf(page);
+  record('SCN-15', { phase: 'check again', chain: replay.map(payLine(main.id, id)), reads: sentBy(page, (r) => r.method === 'GET', checkAt).map(readLine), card: registered });
+  assert.deepEqual(replay.map(payLine(main.id, id)), ['POST /credit-note-registrations 201'], 'P2-22: Check again replays the register only — no proof, no issue: a Check again never runs on');
+  assert.ok(replay[0].body === first[0].body && replay[0].headers['idempotency-key'] === first[0].headers['idempotency-key'] && replay[0].replied.headers['idempotent-replayed'] === 'true',
+    'the SAME key and exact bytes; the entry answered its stored 201 (compared, never printed)');
+  // The 201 is said first; the review's reads follow it: waited for (a timeout fails the row).
+  await page.waitFor(() => reviewRead(sentBy(page, () => true, st.api.indexOf(replay[0]) + 1), main.id, id), 15_000, 'after the Check-again 201 the review is read again: the invoice, the payments, the lookup and the list');
+  await quiet(page, checkAt);
+  assert.deepEqual({ text: registered.text, buttons: names(registered.buttons).filter((x) => x !== CN_SAID.hide), cont: registered.buttons.find((b) => b.text === CN_SAID.continueIssuing)?.why, focus: registered.focus, action: (await creditIssueOf(page)).action }, {
+    text: CN_SAID.registeredOnly(true), buttons: [CN_SAID.continueIssuing, CN_SAID.find], cont: CN_SAID.continueHint, focus: `${CARD}-heading`,
+    action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+  }, 'P2-22 P2-65 P2-05: registeredOnly with Continue issuing (continueHint) and Look up attempt; focus on the card\'s heading; the action held back (blockedOwn)');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [], registrations: [{ attempt: 'attempt 1', state: 'open' }] }, 'registered, nothing issued');
+
+  const contAt = await pressCard(page, 'continue', (c) => c?.state === 'issued' && c.number === 'CN-1', 'issued, CN-1 shown');
+  const cont = sentBy(page, isCreditChainOf(main.id, id), contAt);
+  record('SCN-15', { phase: 'continue issuing', chain: cont.map(payLine(main.id, id)), reads: sentBy(page, (r) => r.method === 'GET', contAt).map(readLine) });
+  assert.deepEqual(cont.map(payLine(main.id, id)), ['GET /credit-note-registration-proof 200', 'POST /credit-notes 201'], 'P2-65: Continue issuing sends ONE proof and ONE issue — it never registers');
+  assert.ok(reviewRead(st.api.slice(contAt, st.api.indexOf(cont[0])).filter((r) => r.frameId === page.frameId), main.id, id), 'P2-65: the press re-read the review and the list BEFORE its proof (E3, E4)');
+  assertCreditChain(tenant, { reg: first[0], proof: cont[0], issue: cont[1] }, { grossCents: 1250, reason: 'goodwill' });
+  assert.deepEqual((await creditIssueOf(page)).action, { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn }, 'P2-65: the main action stays held back');
+  await pressCard(page, 'confirm', (c) => c?.text === CN_SAID.confirmed, 'Credit note confirmed.');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'goodwill' }], registrations: [{ attempt: 'attempt 1', state: 'confirmed' }] }, 'ONE note, confirmed');
+  assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'ONE register audit: the replay wrote none');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-16', 'M7B-CREDITNOTES CN-P2 P2-67 P2-36 (B) CONTINUE ISSUING BLOCKED AFTER A SIGN-IN — as SCN-15 up to registeredOnly with Continue issuing; then the page\'s session ends (owner SQL) and Reconnect signs the same owner in again: the invoice\'s card says continueAfterSignIn with Look up attempt (and Hide this attempt), no Continue issuing and no Check again, the action held back; Look up attempt lists the open row, whose Release attempt is ONE settlement (version 1) under the new session: released, the action offered again; no proof and no issue were ever sent', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n16', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await creditReady(page, main.id, id, 1, boss, '12.50', 'service_issue');
+  const at = st.api.length;
+  await losingOne(page, isCreditRegisterOf(main.id, id), 'response', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.regUnknown, 30_000, 'regUnknown said');
+  });
+  await pressCard(page, 'check', (c) => c?.text === CN_SAID.registeredOnly(true), 'registeredOnly with Continue issuing');
+  const attemptId = jsonOf(sentBy(page, isCreditRegisterOf(main.id, id), at)[0].body, 'the register body').attemptId;
+  st.secrets.add(attemptId);
+
+  await endAndReconnect(page, boss, main.id, 1);
+  const reopened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, reopened, 0);
+  const after = await creditCardOf(page);
+  record('SCN-16', { phase: 'signed in again', card: after, action: (await creditIssueOf(page)).action, rows: (await creditIssueOf(page)).rows });
+  assert.deepEqual({ text: after?.text, buttons: names(after?.buttons ?? []), action: (await creditIssueOf(page)).action },
+    { text: CN_SAID.continueAfterSignIn, buttons: [CN_SAID.find, CN_SAID.hide], action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn } },
+    'P2-67: a new session of the same owner — continueAfterSignIn with Look up attempt only (no Continue issuing, no Check again); the action held back');
+  const findAt = await pressCard(page, 'find', () => true, 'Look up attempt pressed');
+  await page.waitFor(() => sentBy(page, isCreditLookupOf(main.id), findAt).some((r) => r.status !== null), 30_000, 'Look up attempt read');
+  await quiet(page, findAt);
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'open'), 30_000, 'the open row listed');
+  assert.deepEqual(sentBy(page, (r) => !isSessionRead(r), findAt).map((r) => `${isCreditLookupOf(main.id)(r) ? 'attempts' : 'other'} ${answered(r)}`), ['attempts 200'], 'Look up attempt: ONE attempts read');
+  const relAt = st.api.length;
+  await page.click(by('issued-payments-credit-row-release'));
+  await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.released, 30_000, 'Attempt released.');
+  await page.waitFor(`${q('issued-payments-credit-issue')}?.getAttribute('aria-disabled') === 'false'`, 30_000, 'the action offered again');
+  await quiet(page, relAt);
+  const rel = sentBy(page, isCreditChainOf(main.id, id), relAt);
+  assert.deepEqual(rel.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'P2-67: Release attempt is ONE settlement');
+  assert.ok(rel[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 1 }) && rel[0].headers[SESSION_CSRF] !== sentBy(page, isCreditRegisterOf(main.id, id), at)[0].headers[SESSION_CSRF],
+    'version 1 for THIS attempt, under the NEW session (compared, never printed)');
+  assert.deepEqual(sentBy(page, (r) => isCreditProofOf(main.id, id)(r) || isCreditIssueOf(main.id, id)(r), at).map(apiLine), [], 'no proof and no issue were ever sent');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [], registrations: [{ attempt: 'attempt 1', state: 'released' }] }, 'released, nothing issued');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-17', 'M7B-CREDITNOTES CN-P2 P2-25 CN-07b P2-50 P2-43 (B) A LOST ISSUE ANSWER, RECOVERED BY CHECK AGAIN — $12.50 Billing error, signed in; the issue commits and its answer is lost at the front: unresolved with Check again (checkReplayHint, "You can check again until {sign-in + 9 min}"), Look up attempt and Hide this attempt (hideWarning), never "No credit note…"; at 320 px every card button is at least 24 x 24 px and Hide this attempt sits apart from Check again (its own row, no overlap, at least 12 px below); a focus and 2 s send nothing; Check again is ONE issue with the SAME key and bytes, replayed by the entry: issued with Confirm credit note, focus on the card\'s heading, no settlement sent on its own; the database holds ONE credit note and ONE issue audit; Confirm: confirmed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n17', 1);
+  const page = await voidPage(boss, main.id, 1);
+  const signedAt = await creditReady(page, main.id, id, 1, boss, '12.50', 'billing_error');
+  const at = st.api.length;
+  await losingOne(page, isCreditIssueOf(main.id, id), 'response', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.unresolved(true), 30_000, 'unresolved said');
+  });
+  await quiet(page, at);
+  await page.settle();
+  const chain = sentBy(page, isCreditChainOf(main.id, id), at);
+  const card = await creditCardOf(page);
+  record('SCN-17', { phase: 'lost', chain: chain.map(payLine(main.id, id)), card });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 201 (response lost)'], 'the issue committed; its answer lost');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'billing_error' });
+  assert.deepEqual({ text: card.text, until: card.until, buttons: card.buttons }, {
+    text: CN_SAID.unresolved(true), until: CN_SAID.checkUntil(clockPlus(signedAt, 9 * 60_000)),
+    buttons: [{ text: CN_SAID.checkAgain, why: CN_SAID.checkReplayHint }, { text: CN_SAID.find, why: '' }, { text: CN_SAID.hide, why: CN_SAID.hideWarning }],
+  }, 'P2-25 CN-07b: unresolved — never "not issued" — with Check again (checkReplayHint, its deadline), Look up attempt and Hide this attempt');
+
+  // P2-50: the card's targets at 320 px, Hide this attempt apart from Check again.
+  await page.setViewport(320, 640);
+  await page.settle();
+  const boxes = await page.evaluate(`(() => Object.fromEntries(['check', 'find', 'hide'].map((b) => { const n = document.querySelector('[data-testid="${CARD}-' + b + '"]'); const r = n.getBoundingClientRect(); return [b, { x: r.left, y: r.top, w: r.width, h: r.height, row: n.parentElement === document.querySelector('[data-testid="${CARD}-check"]').parentElement }]; })))()`);
+  await page.setViewport(1440, 1000);
+  await page.settle();
+  record('SCN-17', { phase: 'targets', boxes });
+  const overlap = (a, b) => Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x) > 0.5 && Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y) > 0.5;
+  assert.ok(Object.values(boxes).every((b) => b.w >= 24 && b.h >= 24) && !overlap(boxes.check, boxes.hide) && !overlap(boxes.find, boxes.hide) && !overlap(boxes.check, boxes.find) && !boxes.hide.row && boxes.hide.y >= boxes.check.y + boxes.check.h + 12,
+    `P2-50: at 320 px Check again, Look up attempt and Hide this attempt are at least 24 x 24 px, and Hide sits in its own row at least 12 px below Check again ${JSON.stringify(boxes)}`);
+
+  const idle = st.api.length;
+  await focusAndSettle(page, 'focus');
+  await delay(2_000);
+  await quiet(page, idle);
+  assert.deepEqual(sentBy(page, isWrite, idle).map(apiLine), [], 'CN-07b: nothing re-sends on its own');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'billing_error' }], registrations: [{ attempt: 'attempt 1', state: 'issued' }] }, 'the entry committed ONE note');
+
+  const checkAt = await pressCard(page, 'check', (c) => c?.state === 'issued' && c.number === 'CN-1', 'issued, CN-1 shown');
+  const replay = sentBy(page, isCreditChainOf(main.id, id), checkAt);
+  const issued = await creditCardOf(page);
+  record('SCN-17', { phase: 'check again', chain: replay.map(payLine(main.id, id)), card: issued });
+  assert.deepEqual(replay.map(payLine(main.id, id)), ['POST /credit-notes 201'], 'P2-25: Check again is ONE issue — no settlement on its own');
+  assert.ok(replay[0].body === chain[2].body && replay[0].headers['idempotency-key'] === chain[2].headers['idempotency-key'] && replay[0].replied.headers['idempotent-replayed'] === 'true',
+    'the SAME key and exact bytes; the entry answered its stored 201 (compared, never printed)');
+  assert.deepEqual({ text: issued.text, buttons: names(issued.buttons), focus: issued.focus }, { text: CN_SAID.issued('$12.50', 'Billing error'), buttons: [CN_SAID.confirm], focus: `${CARD}-heading` },
+    'P2-25 CN-07b: issued with Confirm credit note (a Check again never confirms); focus on the card\'s heading');
+  assert.deepEqual({ stored: await storedCreditsOf(id, [attemptId]), audits: await creditAuditsOf(tenant) },
+    { stored: { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'billing_error' }], registrations: [{ attempt: 'attempt 1', state: 'issued' }] }, audits: ['register', 'issue'] },
+    'P2-25: ONE credit note and ONE issue audit after the replay');
+  await pressCard(page, 'confirm', (c) => c?.text === CN_SAID.confirmed, 'Credit note confirmed.');
+  assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'then the one settle');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-18', 'M7B-CREDITNOTES CN-P2 P2-26 P2-36 (B) A LOST SETTLEMENT ANSWER — invoice 1: $12.50 issued, Confirm credit note\'s settlement commits and its answer is lost at the front: settleUnknown with Check again (checkReplayHint, "You can check again until {first send + 23 h}"), Look up attempt and Hide this attempt; Check again is ONE settlement with the SAME key and bytes, replayed: confirmed, ONE settle audit; invoice 2: the same lost settlement, then the page\'s session ends and Reconnect signs the owner in again: the card offers Look up attempt and no Check again; Look up attempt reads the row confirmed: "Credit note confirmed." and the attempt over, no settlement sent under the new session', async () => {
+  const { tenant, main, boss, ids: [one, two] } = await voidShop('n18', 2);
+  const page = await voidPage(boss, main.id, 2);
+  const attempts = [];
+  for (const [n, id] of [[1, one], [2, two]]) {
+    if (n === 1) await creditReady(page, main.id, id, 1, boss, '12.50', 'goodwill');
+    else { await closeIssued(page, 2); await creditReady(page, main.id, id, 2, boss, '12.50', 'goodwill', { signIn: false }); }
+    const at = st.api.length;
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.number === `CN-${n}`, 30_000, `issued, CN-${n} shown`);
+    await quiet(page, at);
+    // Pressed once it is offered and not held back (aria-disabled while the issue's re-reads are out, §3.5).
+    await page.waitFor(`${q(`${CARD}-confirm`)}?.getAttribute('aria-disabled') === 'false'`, 15_000, 'Confirm credit note offered');
+    attempts.push(jsonOf(sentBy(page, isCreditRegisterOf(main.id, id), at)[0].body, 'the register body').attemptId);
+    st.secrets.add(attempts.at(-1));
+    const pressed = Date.now();
+    const settleAt = st.api.length;
+    await losingOne(page, isCreditSettleOf(main.id, id), 'response', async () => {
+      await page.click(by(`${CARD}-confirm`));
+      await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.settleUnknown(true), 30_000, 'settleUnknown said');
+    });
+    await quiet(page, settleAt);
+    const unsure = await creditCardOf(page);
+    const until = /^You can check again until (.+ UTC)\.$/.exec(unsure.until ?? '')?.[1] ?? null;
+    record('SCN-18', { phase: `invoice ${n} lost`, sent: sentBy(page, isCreditChainOf(main.id, id), settleAt).map(payLine(main.id, id)), card: unsure });
+    assert.deepEqual({ sent: sentBy(page, isCreditChainOf(main.id, id), settleAt).map(payLine(main.id, id)), buttons: unsure.buttons }, {
+      sent: ['POST /credit-note-settlement 200 (response lost)'],
+      buttons: [{ text: CN_SAID.checkAgain, why: CN_SAID.checkReplayHint }, { text: CN_SAID.find, why: '' }, { text: CN_SAID.hide, why: CN_SAID.hideWarning }],
+    }, `P2-26 invoice ${n}: the settlement committed, its answer lost — settleUnknown with Check again, Look up attempt and Hide this attempt`);
+    const t = (x) => Date.parse(`${x.slice(0, 10)}T${x.slice(11, 19)}Z`);
+    assert.ok(until !== null && t(until) >= Math.floor((pressed + 23 * 3_600_000) / 1000) * 1000 - 1000 && t(until) <= Date.now() + 23 * 3_600_000, `P2-26: the replay limit stated as a clock time 23 h after the first send (${unsure.until})`);
+    assert.deepEqual((await storedCreditsOf(id, attempts)).registrations, [{ attempt: `attempt ${n}`, state: 'confirmed' }], 'the entry confirmed it');
+    if (n === 1) {
+      const checkAt = await pressCard(page, 'check', (c) => c?.text === CN_SAID.confirmed, 'Credit note confirmed.');
+      const replay = sentBy(page, isCreditChainOf(main.id, id), checkAt);
+      const first = sentBy(page, isCreditSettleOf(main.id, id), settleAt)[0];
+      assert.deepEqual(replay.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'P2-26: Check again is ONE settlement');
+      assert.ok(replay[0].body === first.body && replay[0].headers['idempotency-key'] === first.headers['idempotency-key'] && replay[0].replied.headers['idempotent-replayed'] === 'true', 'the SAME key and bytes, replayed (compared, never printed)');
+      assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'ONE settle audit');
+    }
+  }
+  // Invoice 2: after a sign-in the lost settlement is recovered lookup-first; the old key is never sent from the new session.
+  await endAndReconnect(page, boss, main.id, 2);
+  const reopened = await openVoidable(page, main.id, two, 2);
+  await creditSettled(page, main.id, reopened, 1);
+  const detached = await creditCardOf(page);
+  record('SCN-18', { phase: 'signed in again', card: detached, rows: (await creditIssueOf(page)).rows });
+  assert.deepEqual(names(detached?.buttons ?? []), [CN_SAID.find, CN_SAID.hide], 'P2-26: after a sign-in (detached) — Look up attempt and Hide this attempt, no Check again');
+  const findAt = await pressCard(page, 'find', (c) => c?.text === CN_SAID.confirmed, 'the row read: Credit note confirmed.');
+  assert.ok(sentBy(page, isCreditLookupOf(main.id), findAt).some((r) => r.status === 200), 'P2-26: Look up attempt read the attempts');
+  assert.deepEqual({ sent: sentBy(page, (r) => isWrite(r), findAt).map(apiLine), buttons: names((await creditCardOf(page)).buttons) }, { sent: [], buttons: [] },
+    'P2-26: Look up attempt reads the row confirmed — the attempt is over, nothing sent');
+  assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle', 'register', 'issue', 'settle'], 'one settle audit per attempt');
+  await assertNoLeak(page);
+}, 300_000);
+
+scenario('SCN-19', 'M7B-CREDITNOTES CN-P2 P2-63 P2-05 P2-38 (B) CHECK AGAIN AFTER THE SERVER\'S SIGN-IN WINDOW, THEN HIDE — a lost issue answer (unresolved, Check again); the page\'s session then binds a sign-in older than 10 minutes (AG): Check again is ONE issue with the same key, refused 403 step_up_required: replayGone with Look up attempt, no Check again; Hide this attempt hides the card only: the action stays held back (blockedOwn) and Record payment stays hidden on this invoice; the invoice opened again lists the attempt issued, and its row\'s Confirm credit note is ONE settlement (version 2): confirmed', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n19', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await creditReady(page, main.id, id, 1, boss, '12.50', 'pricing_error');
+  const at = st.api.length;
+  await losingOne(page, isCreditIssueOf(main.id, id), 'response', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.unresolved(true), 30_000, 'unresolved said');
+  });
+  const attemptId = jsonOf(sentBy(page, isCreditRegisterOf(main.id, id), at)[0].body, 'the register body').attemptId;
+  st.secrets.add(attemptId);
+  await ageSessionOf(page);
+  const checkAt = await pressCard(page, 'check', (c) => c?.text === CN_SAID.replayGone, 'replayGone said');
+  const gone = await creditCardOf(page);
+  record('SCN-19', { phase: 'replay refused', sent: sentBy(page, isCreditChainOf(main.id, id), checkAt).map(payLine(main.id, id)), card: gone });
+  assert.deepEqual({ sent: sentBy(page, isCreditChainOf(main.id, id), checkAt).map(payLine(main.id, id)), buttons: names(gone.buttons) },
+    { sent: ['POST /credit-notes 403 step_up_required'], buttons: [CN_SAID.find, CN_SAID.hide] }, 'P2-63: the Check again refused by the server\'s 10-minute window — replayGone with Look up attempt (and Hide this attempt: still unresolved), no Check again');
+  await quiet(page, checkAt);
+  // P2-05 P2-38: Hide hides the card only.
+  await page.click(by(`${CARD}-hide`));
+  await page.waitFor(async () => (await creditCardOf(page)) === null, 10_000, 'the card hidden');
+  await page.settle();
+  const hidden = { action: (await creditIssueOf(page)).action, record: await has(page, 'issued-payments-record'), focus: await focusOf(page) };
+  record('SCN-19', { phase: 'hidden', ...hidden });
+  assert.deepEqual({ action: hidden.action, record: hidden.record, onBody: hidden.focus === 'BODY' }, { action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn }, record: false, onBody: false },
+    'P2-05 P2-38: a hidden hold still holds the action back (blockedOwn) and keeps Record payment hidden; focus not on the body');
+  await closeIssued(page, 1);
+  const reopened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, reopened, 1);
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'issued'), 30_000, 'the lookup row: issued');
+  const confirmAt = st.api.length;
+  await page.click(by('issued-payments-credit-row-confirm'));
+  await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'confirmed'), 30_000, 'the row confirmed');
+  await quiet(page, confirmAt);
+  const settles = sentBy(page, isCreditChainOf(main.id, id), confirmAt);
+  assert.deepEqual(settles.map(payLine(main.id, id)), ['POST /credit-note-settlement 200'], 'the row\'s Confirm credit note: ONE settlement');
+  assert.ok(settles[0].body === JSON.stringify({ expectedTenant: tenant, attemptId, expectedVersion: 2 }), 'version 2, this attempt (compared, never printed)');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId]), { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'pricing_error' }], registrations: [{ attempt: 'attempt 1', state: 'confirmed' }] }, 'ONE note, confirmed');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-20', 'M7B-CREDITNOTES CN-P2 P2-35 P2-05 (B) A REGISTER THAT NEVER ARRIVED, A MISSING ROW — the register request is lost before the entry: regUnknown (Check again, Look up attempt, Hide this attempt); Look up attempt is ONE attempts read to the end with no row of this attempt: regUnknown stays, nothing settled; Hide this attempt hides the card and the action stays held back; the page reloaded and the invoice opened again: an exhausted lookup with no row restores the action, nothing sent on mount, nothing stored', async () => {
+  const { main, boss, ids: [id] } = await voidShop('n20', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await creditReady(page, main.id, id, 1, boss, '7.00', 'goodwill');
+  const at = st.api.length;
+  await losingOne(page, isCreditRegisterOf(main.id, id), 'request', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.regUnknown, 30_000, 'regUnknown said');
+  });
+  await quiet(page, at);
+  assert.deepEqual(sentBy(page, isCreditChainOf(main.id, id), at).map(payLine(main.id, id)), ['POST /credit-note-registrations 0 (request lost)'], 'the register never reached the entry');
+  assert.deepEqual(await storedCreditsOf(id), { notes: [], registrations: [] }, 'nothing registered');
+  const findAt = await pressCard(page, 'find', () => true, 'Look up attempt pressed');
+  await page.waitFor(() => sentBy(page, isCreditLookupOf(main.id), findAt).some((r) => r.status !== null), 30_000, 'Look up attempt read');
+  await page.waitFor(async () => (await creditLookupOf(page))?.phase === 'exhausted', 30_000, 'the lookup read to the end');
+  await quiet(page, findAt);
+  await page.settle();
+  const missing = await creditCardOf(page);
+  record('SCN-20', { phase: 'missing row', sent: sentBy(page, () => true, findAt).map(apiLine), card: missing, rows: (await creditIssueOf(page)).rows });
+  assert.deepEqual({ reads: sentBy(page, (r) => !isSessionRead(r), findAt).map((r) => `${isCreditLookupOf(main.id)(r) ? 'attempts' : 'other'} ${answered(r)}`), text: missing.text, rows: (await creditIssueOf(page)).rows, action: (await creditIssueOf(page)).action }, {
+    reads: ['attempts 200'], text: CN_SAID.regUnknown, rows: [], action: { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn },
+  }, 'P2-35: no row of this attempt — regUnknown stays (claims nothing), nothing settled, the action still held back');
+  await page.click(by(`${CARD}-hide`));
+  await page.waitFor(async () => (await creditCardOf(page)) === null, 10_000, 'the card hidden');
+  assert.deepEqual((await creditIssueOf(page)).action, { text: CN_SAID.action, disabled: 'true', why: CN_SAID.blockedOwn }, 'P2-35 P2-05: hidden, the attempt still holds the action back');
+  const reloadAt = st.api.length;
+  await page.goto(`${SHOP}/invoices`, 30_000);
+  await openIssued(page);
+  await pickIssuedStore(page, main.id);
+  await waitIssuedRows(page, 1, 'the invoice listed after the reload');
+  const reopened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, reopened, 0);
+  const back = await creditIssueOf(page);
+  assert.deepEqual({ action: back.action, card: back.card, writes: sentBy(page, isWrite, reloadAt).map(apiLine) }, { action: { text: CN_SAID.action, disabled: 'false', why: '' }, card: null, writes: [] },
+    'P2-35: after the reload an exhausted lookup with no row restores the action; no write on mount');
+  assert.deepEqual(await storedCreditsOf(id), { notes: [], registrations: [] }, 'nothing stored');
+}, 240_000);
+
+scenario('SCN-21', 'M7B-CREDITNOTES CN-P2 P2-42 (B) A COMPETING CREDIT FROM ANOTHER SESSION LANDS FIRST — the owner\'s $12.50 issue is held at the front after its register and proof while a second store owner, on another device (direct HTTP), issues and confirms $40.00 on the same invoice; released, the issue is the sealed 409 amount_exceeds_remaining: overRemaining with Look up attempt, the amounts read again ($40.00 credited, $2.00 remaining); the database holds the other owner\'s note only', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n21', 1);
+  const other = await actor('n21-owner2', [grant(tenant, 'store_owner'), storeGrant(tenant, main.id, 'store_owner')], { role: 'store_owner' });
+  const page = await voidPage(boss, main.id, 1);
+  await creditReady(page, main.id, id, 1, boss, '12.50', 'goodwill');
+  const held = gate((r) => r.frameId === page.frameId && isCreditIssueOf(main.id, id)(r), 'request');
+  const at = st.api.length;
+  await page.click(by('issued-credit-send'));
+  await held.reached;
+  const theirs = await creditNoteVia(await directLogin(other), tenant, main.id, id, 4000, 'service_issue');
+  held.release();
+  await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.overRemaining, 30_000, 'overRemaining said');
+  await rereadAnswered(page, main.id, id, at);
+  const chain = sentBy(page, isCreditChainOf(main.id, id), at);
+  const card = await creditCardOf(page);
+  record('SCN-21', { phase: 'over', chain: chain.map(payLine(main.id, id)), card });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 409 amount_exceeds_remaining'], 'P2-42: the other session\'s credit landed first: the server refused this issue');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'goodwill' });
+  assert.deepEqual({ buttons: names(card.buttons).filter((x) => x !== CN_SAID.hide), credited: await textOf(page, 'issued-payments-credited'), remaining: await textOf(page, 'issued-payments-remaining') },
+    { buttons: [CN_SAID.find], credited: '$40.00', remaining: '$2.00' }, 'P2-42: overRemaining with Look up attempt; the amounts read again');
+  assert.deepEqual((await storedCreditsOf(id, [attemptId, theirs.attemptId])).notes, [{ attempt: 'attempt 2', number: 1, gross: 4000, reason: 'service_issue' }], 'the other owner\'s note only');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-22', 'M7B-CREDITNOTES CN-P2 P2-23 P2-79 P2-86 (B) TWO DEVICES, ONE OWNER: A CHECK AGAIN NEVER RUNS ON, AND ANOTHER NOTE IS SHOWN BEFORE CONTINUING — $10.00 Goodwill reviewed (the list read to the end: no note) and signed in; the register request is lost before the entry (regUnknown); the same owner on another device (direct HTTP) registers, issues and confirms $5.00 Pricing error (CN-1); Check again replays the register, which now runs (201): registeredOnly, the review read again, no proof and no issue; Continue issuing re-reads and compares the list with the one read before the first send: anotherNoteFound listing CN-1, focus on Look up attempt, Issue another credit note (anotherHint) in place of Continue issuing, nothing written; Issue another credit note sends ONE proof and ONE issue: issued (CN-2); the database holds both notes', async () => {
+  const { tenant, main, boss, ids: [id] } = await voidShop('n22', 1);
+  const page = await voidPage(boss, main.id, 1);
+  await creditReady(page, main.id, id, 1, boss, '10.00', 'goodwill');
+  const at = st.api.length;
+  await losingOne(page, isCreditRegisterOf(main.id, id), 'request', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.regUnknown, 30_000, 'regUnknown said');
+  });
+  const attemptId = jsonOf(sentBy(page, isCreditRegisterOf(main.id, id), at)[0].body, 'the register body').attemptId;
+  st.secrets.add(attemptId);
+  const firstSend = st.api.indexOf(sentBy(page, isCreditRegisterOf(main.id, id), at)[0]);
+  assert.ok(sentBy(page, isCreditListOf(main.id, id)).some((r) => st.api.indexOf(r) < firstSend && r.status === 200 && jsonOf(r.replied.text, 'a list page').creditNotes.length === 0 && jsonOf(r.replied.text, 'a list page').nextCursor === null),
+    'P2-79: the baseline — this invoice\'s list read to its end, empty, before the register\'s first send');
+  const theirs = await creditNoteVia(await directLogin(boss), tenant, main.id, id, 500, 'pricing_error');
+
+  const checkAt = await pressCard(page, 'check', (c) => c?.text === CN_SAID.registeredOnly(true), 'registeredOnly with Continue issuing');
+  record('SCN-22', { phase: 'check again', sent: sentBy(page, () => true, checkAt).map(apiLine) });
+  assert.deepEqual(sentBy(page, isCreditChainOf(main.id, id), checkAt).map(payLine(main.id, id)), ['POST /credit-note-registrations 201'], 'P2-23: the replayed register ran now (201); no proof, no issue: a Check again never runs on');
+  await page.waitFor(() => reviewRead(sentBy(page, () => true, st.api.indexOf(sentBy(page, isCreditRegisterOf(main.id, id), checkAt)[0]) + 1), main.id, id), 15_000, 'P2-23: the review (with the list) read again after the Check-again 201');
+  await quiet(page, checkAt);
+
+  const contAt = await pressCard(page, 'continue', (c) => c?.text === CN_SAID.anotherNoteFound, 'anotherNoteFound said');
+  await page.waitFor(async () => (await creditCardOf(page))?.focus === `${CARD}-find`, 5_000, 'focus on Look up attempt');
+  const found = await creditCardOf(page);
+  record('SCN-22', { phase: 'another note', sent: sentBy(page, () => true, contAt).map(apiLine), card: found });
+  assert.ok(sentBy(page, isCreditListOf(main.id, id), contAt).some((r) => r.status === 200), 'P2-79: the Continue issuing press read the list again (the current set)');
+  assert.deepEqual({ writes: sentBy(page, isWrite, contAt).map(apiLine), notes: found.notes.map((n) => `${n.number} ${n.id === theirs.id ? '(the other device\'s)' : '(another)'}`), buttons: found.buttons.filter((b) => b.text !== CN_SAID.hide), focus: found.focus }, {
+    writes: [], notes: ['CN-1 (the other device\'s)'], buttons: [{ text: CN_SAID.issueAnother, why: CN_SAID.anotherHint }, { text: CN_SAID.find, why: '' }], focus: `${CARD}-find`,
+  }, 'P2-79 P2-86: the list compared with the one read before the first send — anotherNoteFound listing CN-1, Issue another credit note (anotherHint) in place of Continue issuing, focus on Look up attempt, nothing written');
+
+  const anotherAt = await pressCard(page, 'another', (c) => c?.state === 'issued', 'issued');
+  const issued = sentBy(page, isCreditChainOf(main.id, id), anotherAt);
+  record('SCN-22', { phase: 'issue another', chain: issued.map(payLine(main.id, id)) });
+  assert.deepEqual(issued.map(payLine(main.id, id)), ['GET /credit-note-registration-proof 200', 'POST /credit-notes 201'], 'P2-86: Issue another credit note sends exactly ONE issue (after its proof)');
+  assert.deepEqual(await storedCreditsOf(id, [attemptId, theirs.attemptId]), {
+    notes: [{ attempt: 'attempt 2', number: 1, gross: 500, reason: 'pricing_error' }, { attempt: 'attempt 1', number: 2, gross: 1000, reason: 'goodwill' }],
+    registrations: [{ attempt: 'attempt 2', state: 'confirmed' }, { attempt: 'attempt 1', state: 'issued' }],
+  }, 'both notes: the other device\'s CN-1 and this attempt\'s CN-2');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCN-23', 'M7B-CREDITNOTES CN-P2 CA-35 P2-37 (B) AN OLDER TAB\'S RETRY OF A COMPLETED ISSUE WHILE CREDIT-NOTE WRITES ARE OFF — as SCN-17 up to the lost issue answer: the issue commits (ONE note, the register and issue audits) and the page shows unresolved with Check again and Look up attempt; with the same page, session and database the primary entry restarts with TMPOS_CREDIT_NOTE_WRITES=off (its startup_ready line says off); Check again is ONE issue with the SAME key and bytes, answered 503 by that entry itself (its request line: credit_note_writes_disabled), with no idempotent-replayed; Look up attempt sends no write and lists THIS attempt issued (Issued, not confirmed, with Confirm credit note); the database still holds ONE note and only the register and issue audits; every request of the page reached the primary entry; the primary entry is restored to on in finally', async () => {
+  const lineOf = (line) => { try { return JSON.parse(line); } catch { return null; } };
+  const { tenant, main, boss, ids: [id] } = await voidShop('n23', 1);
+  const page = await voidPage(boss, main.id, 1);
+  assert.ok(!st.second.has(page.frameId), 'the page is bound to the primary entry, not entry2');
+  await creditReady(page, main.id, id, 1, boss, '12.50', 'billing_error');
+  const at = st.api.length;
+  await losingOne(page, isCreditIssueOf(main.id, id), 'response', async () => {
+    await sendCredit(page);
+    await page.waitFor(async () => (await creditCardOf(page))?.text === CN_SAID.unresolved(true), 30_000, 'unresolved said');
+  });
+  await quiet(page, at);
+  await page.settle();
+  const chain = sentBy(page, isCreditChainOf(main.id, id), at);
+  const lost = await creditCardOf(page);
+  record('SCN-23', { phase: 'lost', chain: chain.map(payLine(main.id, id)), card: lost });
+  assert.deepEqual(chain.map(payLine(main.id, id)), ['POST /credit-note-registrations 201', 'GET /credit-note-registration-proof 200', 'POST /credit-notes 201 (response lost)'], 'the issue committed (201); its answer lost at the front');
+  const attemptId = assertCreditChain(tenant, { reg: chain[0], proof: chain[1], issue: chain[2] }, { grossCents: 1250, reason: 'billing_error' });
+  assert.deepEqual({ text: lost?.text, buttons: names(lost?.buttons ?? []) }, { text: CN_SAID.unresolved(true), buttons: [CN_SAID.checkAgain, CN_SAID.find, CN_SAID.hide] },
+    'the page holds the attempt unresolved, with Check again and Look up attempt');
+  const committed = { notes: [{ attempt: 'attempt 1', number: 1, gross: 1250, reason: 'billing_error' }], registrations: [{ attempt: 'attempt 1', state: 'issued' }] };
+  assert.deepEqual({ stored: await storedCreditsOf(id, [attemptId]), audits: await creditAuditsOf(tenant) }, { stored: committed, audits: ['register', 'issue'] },
+    'the real issue committed ONE note, with the register and issue audits');
+
+  try {
+    // The same page, its session and the database stay; only the primary entry is replaced, by one started with writes off.
+    await stopEntry();
+    await startEntry('off');
+    const ready = entry.cap.lines.map(lineOf).filter((l) => l?.event === 'startup_ready');
+    record('SCN-23', { phase: 'restarted', startupReady: ready.map((l) => ({ creditNoteWrites: l.creditNoteWrites })) });
+    assert.deepEqual(ready.map((l) => l.creditNoteWrites), ['off'], 'CA-35: the restarted primary entry\'s one startup_ready line says writes off');
+    assert.equal((await creditCardOf(page))?.text, CN_SAID.unresolved(true), 'the same page still holds the unresolved attempt (no reload)');
+
+    const checkAt = await pressCard(page, 'check', () => true, 'Check again pressed');
+    await page.waitFor(() => sentBy(page, isCreditIssueOf(main.id, id), checkAt).some((r) => r.status !== null), 30_000, 'the retry answered');
+    await quiet(page, checkAt);
+    await page.settle();
+    const retry = sentBy(page, isCreditChainOf(main.id, id), checkAt);
+    const after = await creditCardOf(page);
+    const refusals = entry.cap.lines.map(lineOf).filter((l) => l?.event === 'request' && l.status === 503);
+    record('SCN-23', { phase: 'check again (writes off)', chain: retry.map(payLine(main.id, id)), via: retry.map((r) => r.via), replayed: retry.map((r) => r.replied?.headers['idempotent-replayed'] ?? null),
+      entryRefusals: refusals.map((l) => `${l.method} ${l.route} ${l.status} ${l.reason}`), card: after });
+    assert.deepEqual(retry.map(payLine(main.id, id)), ['POST /credit-notes 503 service_unavailable'], 'CA-35: Check again is ONE issue, answered 503 — no proof, no settlement');
+    assert.ok(retry[0].via === 1 && retry[0].body === chain[2].body && retry[0].headers['idempotency-key'] === chain[2].headers['idempotency-key'],
+      'the SAME key and exact bytes as the lost issue, to the primary entry (compared, never printed)');
+    assert.equal(retry[0].replied.headers['idempotent-replayed'], undefined, 'no replay header: the write gate answered before any key lookup');
+    assert.deepEqual(refusals.map((l) => [l.method, l.reason]), [['POST', 'credit_note_writes_disabled']], 'the off entry itself answered the 503 (its own request line)');
+    assert.ok(names(after?.buttons ?? []).includes(CN_SAID.find), 'Look up attempt still offered');
+
+    const findAt = await pressCard(page, 'find', () => true, 'Look up attempt pressed');
+    await page.waitFor(() => sentBy(page, isCreditLookupOf(main.id), findAt).some((r) => r.status !== null), 30_000, 'Look up attempt read');
+    await quiet(page, findAt);
+    await page.waitFor(async () => (await creditIssueOf(page)).rows.some((r) => r.state === 'issued'), 30_000, 'the lookup row: issued');
+    await page.settle();
+    const shown = await creditIssueOf(page);
+    const lookups = sentBy(page, isCreditLookupOf(main.id), findAt);
+    const listed = lookups.filter((r) => r.status === 200).flatMap((r) => (lineOf(r.replied.text)?.attempts ?? []).filter((a) => a.invoiceId === id));
+    record('SCN-23', { phase: 'look up attempt', lookups: lookups.map(answered), writes: sentBy(page, isWrite, findAt).map(apiLine), rows: shown.rows,
+      listed: listed.map((a) => ({ mine: a.attemptId === attemptId, state: a.state })) });
+    assert.deepEqual(sentBy(page, isWrite, findAt).map(apiLine), [], 'CA-35: Look up attempt sends no write');
+    assert.ok(lookups.length > 0 && lookups.every((r) => r.status === 200), 'the lookup read answered 200');
+    assert.ok(listed.length > 0 && listed.every((a) => a.attemptId === attemptId && a.state === 'issued'), 'the lookup lists THIS attempt, issued (compared, never printed)');
+    assert.deepEqual(shown.rows.map((r) => ({ state: r.state, said: r.said, amount: r.amount, buttons: names(r.buttons) })),
+      [{ state: 'issued', said: CN_SAID.rowIssued, amount: '$12.50', buttons: [CN_SAID.confirm] }], 'CA-35: the issued row shown — Issued, not confirmed, with Confirm credit note');
+    assert.deepEqual({ stored: await storedCreditsOf(id, [attemptId]), audits: await creditAuditsOf(tenant) }, { stored: committed, audits: ['register', 'issue'] },
+      'still ONE note and only the register and issue audits: the retry and the lookup wrote nothing');
+    assert.ok(sentBy(page, () => true, 0).every((r) => r.via === 1), 'every request of the page reached the primary entry');
+    await assertNoLeak(page);
+  } finally {
+    // Restore the primary entry to on whatever failed above (the scenario cleanup only restarts a stopped entry).
+    try {
+      if (entry !== null && entry.writes !== 'on') await stopEntry();
+    } finally {
+      if (entry === null) await startEntry();
+      record('SCN-23', { phase: 'cleanup', primaryWrites: entry?.writes ?? null,
+        startupReady: (entry?.cap.lines ?? []).map(lineOf).filter((l) => l?.event === 'startup_ready').map((l) => l.creditNoteWrites) });
+    }
+  }
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Doc 18 (M7B credit activity) — the shop slice, AUTHORED AND UNRUN: the issued-invoices section's "Credit activity"
+// sub-section reads GET /api/v1/stores/{id}/credit-notes for the chosen store (newest number first, 50 a page). The
+// literals are the shop's own texts (ServerIssuedInvoices.tsx ACTIVITY_TEXT, CREDIT_TEXT). Every scenario marked
+// CONTROLLED tampers ONE request at the front with st.tamper (the suite's existing facility): it is not live runtime
+// coverage. Not authored at B: a read-only store (no fixture makes the directory say readOnly here; layer C covers CA-42's
+// first half), CA-15b's live same-token race and CA-32's same-token integration (doc 18 §13: OPEN).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const ACTIVITY_SAID = Object.freeze({
+  title: 'Credit activity', intro: 'Credit notes issued at this store, newest first. Use it to spot a credit note issued twice. It does not stop one being issued.',
+  empty: 'No credit notes have been issued at this store yet.', refresh: 'Refresh', showMore: 'Show more',
+});
+const isActivityOf = (store) => (r) => r.method === 'GET' && r.path === `${STORES}/${store}/credit-notes`;
+/** The activity sub-section as shown (null: not rendered): heading, intro, state, list, items, buttons, its text outside its list. */
+const activityOf = (page) => page.evaluate(`(() => {
+  const box = document.querySelector('[data-testid="issued-credit-activity"]');
+  if (box === null) return null;
+  const el = (n, id) => n.querySelector('[data-testid="' + id + '"]');
+  const t = (n, id) => el(n, id)?.textContent.trim() ?? null;
+  const h = el(box, 'issued-credit-activity-title'), s = el(box, 'issued-credit-activity-state'), ul = el(box, 'issued-credit-activity-list');
+  const outside = box.cloneNode(true);
+  outside.querySelector('[data-testid="issued-credit-activity-list"]')?.remove();
+  return {
+    heading: { tag: h?.tagName ?? null, text: h?.textContent.trim() ?? null, section: document.getElementById('issued-title')?.tagName ?? null },
+    intro: t(box, 'issued-credit-activity-intro'),
+    state: { phase: s?.dataset.phase ?? null, role: s?.getAttribute('role') ?? null, text: s?.textContent.trim() ?? null },
+    list: ul === null ? null : { tag: ul.tagName, labelledBy: ul.getAttribute('aria-labelledby'), children: ul.children.length, allLi: [...ul.children].every((c) => c.tagName === 'LI') },
+    items: [...box.querySelectorAll('[data-testid="issued-credit-activity-item"]')].map((li) => ({
+      id: li.dataset.id, number: t(li, 'issued-credit-activity-number'), invoice: t(li, 'issued-credit-activity-invoice'), status: t(li, 'issued-credit-activity-status'),
+      issuedAt: li.querySelector('time[data-testid="issued-credit-activity-issued-at"]')?.getAttribute('datetime') ?? null,
+    })),
+    buttons: [...box.querySelectorAll('button')].map((b) => b.textContent.trim()),
+    // The list line by line (each item's own lines), as the component test reads it: the list's whole textContent runs
+    // adjacent block lines together ("…name" + "Withdrawn <time>", "Wrong amount" + "Withdrawn by"), which no user reads.
+    text: box.innerText, listText: ul === null ? '' : [...ul.children].flatMap((li) => [...li.childNodes].map((n) => n.textContent)).join('\\n'), outside: outside.textContent,
+  };
+})()`);
+const activityReady = (page, label, n = null) => page.waitFor(async () => { const a = await activityOf(page); return a?.state.phase === 'ready' && (n === null || a.items.length === n); }, 30_000, label);
+
+scenario('SCA-01', 'M7B CREDIT ACTIVITY (doc 18 §4; shop slice AUTHORED, NOT RUN) CA-21 CA-22 CA-24 CA-45 (B) THE OWNER\'S STORE-WIDE VIEW — 102 credit notes seeded by owner SQL on one issued invoice (CN-2 withdrawn): choosing the store reads ONE activity page one (no cursor, 200); "Credit activity" is an h4 under the section\'s h3 with the intro and a ul of 50 li, newest number first, each "Invoice 1", the status in words and a time holding the stored instant; Show more from the keyboard reads after the 50th id, says "50 more loaded." and keeps focus; again: "2 more loaded.", it goes and focus moves to the heading; Refresh from the keyboard reads page one again and replaces the chain (50), focus kept on it; the view passes NOT_SAID and says "withdraw" only inside its list; every request is a GET', async () => {
+  const { main, boss, notes } = await creditShop('a1', ({ clerk }) => Array.from({ length: 102 }, (_, k) => ({ gross: 25, reason: CN_REASONS[k % 4], by: clerk, withdrawal: k === 1 ? { reason: 'wrong_amount', by: clerk } : null })));
+  const from = st.api.length;
+  const page = await voidPage(boss, main.id, 1);
+  await activityReady(page, 'the activity read answered');
+  await quiet(page, from);
+  await page.settle();
+  const newest = [...notes].sort((a, b) => b.number - a.number);
+  const shown = await activityOf(page);
+  const firstReads = sentBy(page, isActivityOf(main.id), from);
+  record('SCA-01', { phase: 'chosen', reads: firstReads.map(readLine), heading: shown.heading, state: shown.state, list: shown.list, buttons: shown.buttons });
+  assert.deepEqual(firstReads.map(readLine), [`${STORES}/${main.id}/credit-notes 200`], 'CA-21: ONE page one, no cursor');
+  assert.deepEqual({ heading: shown.heading, intro: shown.intro, list: shown.list, role: shown.state.role, buttons: shown.buttons }, {
+    heading: { tag: 'H4', text: ACTIVITY_SAID.title, section: 'H3' }, intro: ACTIVITY_SAID.intro, list: { tag: 'UL', labelledBy: 'issued-credit-activity-title', children: 50, allLi: true },
+    role: 'status', buttons: [ACTIVITY_SAID.refresh, ACTIVITY_SAID.showMore],
+  }, 'CA-21 CA-22: one level under the section, the intro, a ul of one li per note, Refresh and Show more');
+  assert.deepEqual(shown.items.map((i) => [i.id, i.number, i.invoice, i.status, i.issuedAt]),
+    newest.slice(0, 50).map((n) => [n.id, `CN-${n.number}`, 'Invoice 1', n.withdrawnAt === null ? CREDIT_SAID.active : CREDIT_SAID.withdrawn, n.issuedAt]), 'newest number first, each as stored');
+
+  const more1 = st.api.length;
+  await page.call(by('issued-credit-activity-more'), function () { this.focus(); });
+  await page.press('Enter');
+  await page.waitFor(async () => (await textOf(page, 'issued-credit-activity-state')) === CREDIT_SAID.loaded(50), 30_000, '"50 more loaded." said');
+  await quiet(page, more1);
+  await page.settle();
+  const paged = { reads: sentBy(page, isActivityOf(main.id), more1).map(readLine), count: (await activityOf(page)).items.length, focus: await focusOf(page) };
+  record('SCA-01', { phase: 'show more', ...paged });
+  assert.deepEqual(paged, { reads: [`${STORES}/${main.id}/credit-notes?after=${newest[49].id} 200`], count: 100, focus: 'issued-credit-activity-more' }, 'CA-22: Show more reads after the last id shown and keeps focus');
+  const more2 = st.api.length;
+  await page.press('Enter');
+  await page.waitFor(async () => (await textOf(page, 'issued-credit-activity-state')) === CREDIT_SAID.loaded(2), 30_000, '"2 more loaded." said');
+  await quiet(page, more2);
+  await page.settle();
+  const all = await activityOf(page);
+  const ended = { reads: sentBy(page, isActivityOf(main.id), more2).map(readLine), count: all.items.length, more: all.buttons.includes(ACTIVITY_SAID.showMore), focus: await focusOf(page) };
+  record('SCA-01', { phase: 'last page', ...ended });
+  assert.deepEqual(ended, { reads: [`${STORES}/${main.id}/credit-notes?after=${newest[99].id} 200`], count: 102, more: false, focus: 'issued-credit-activity-title' },
+    'CA-22: the last page; Show more gone, focus on the heading');
+  assert.deepEqual(all.items.map((i) => i.id), newest.map((n) => n.id), 'all 102, strictly newest first, none twice');
+  // While all 102 are shown — the withdrawn CN-2 among them — the words (CA-21):
+  const words = all;
+  assert.ok(!NOT_SAID.test(words.text), 'CA-21: no word NOT_SAID names in the sub-section');
+  assert.deepEqual([...new Set(words.listText.match(/\w*withdraw\w*/gi) ?? [])], ['Withdrawn'], 'CA-21: inside its list "withdraw" only as "Withdrawn" (the widened scope)');
+  assert.ok(!/withdraw/i.test(words.outside), 'CA-21: nowhere outside its list');
+
+  const refreshAt = st.api.length;
+  await page.call(by('issued-credit-activity-refresh'), function () { this.focus(); });
+  await page.press('Enter');
+  await activityReady(page, 'Refresh: page one again', 50);
+  await quiet(page, refreshAt);
+  await page.settle();
+  const refreshed = { reads: sentBy(page, isActivityOf(main.id), refreshAt).map(readLine), count: (await activityOf(page)).items.length, focus: await focusOf(page) };
+  record('SCA-01', { phase: 'refresh', ...refreshed });
+  assert.deepEqual(refreshed, { reads: [`${STORES}/${main.id}/credit-notes 200`], count: 50, focus: 'issued-credit-activity-refresh' }, 'CA-45: page one again, the chain replaced, focus kept');
+
+  const reads = sentBy(page, isActivityOf(main.id), from);
+  assert.ok(reads.length === 4 && reads.every((r) => r.headers[SESSION_CSRF] === reads[0].headers[SESSION_CSRF]), 'every page under the one session token (compared, never printed)');
+  assert.deepEqual(sentBy(page, (r) => r.method !== 'GET' && !isLogin(r), from).map(apiLine), [], 'CA-24: GETs only, nothing written');
+  await assertNoLeak(page);
+}, 240_000);
+
+scenario('SCA-02', 'M7B CREDIT ACTIVITY (doc 18 §4; shop slice AUTHORED, NOT RUN) CA-44 CA-27 (B) THE OWNER\'S OWN ISSUE AND A TOKEN CHANGE — an issued $42.00 invoice with no credit note: the view says Empty after its read; the confirmation\'s sign-in renews the session and the view reads page one ONCE under the new token; the shop\'s own issue (201) re-reads page one ONCE and CN-1 shows first; Confirm credit note (200) re-reads it ONCE more; the browser\'s session cookie then becomes another valid session of the same owner (made outside the page, as SCB-08 swaps one) and a window focus lets the page notice: the page adopts that token, the chosen store is cleared with the view, and choosing it again reads page one under the new token', async () => {
+  const { main, boss, id } = await creditShop('a2', () => []);
+  const page = await voidPage(boss, main.id, 1);
+  await activityReady(page, 'the activity read answered');
+  assert.equal((await activityOf(page)).state.text, ACTIVITY_SAID.empty, 'CA-21: Empty after the read to nextCursor null');
+  const before = sentBy(page, isActivityOf(main.id)).at(-1);
+  const signAt = st.api.length;
+  await creditReady(page, main.id, id, 1, boss, '5.00', 'goodwill');
+  await activityReady(page, 'the reload after the sign-in answered');
+  const renewed = sentBy(page, isActivityOf(main.id), signAt);
+  record('SCA-02', { phase: 'signed in', reads: renewed.map(readLine) });
+  assert.ok(renewed.length === 1 && renewed[0].status === 200 && renewed[0].headers[SESSION_CSRF] !== before.headers[SESSION_CSRF], 'CA-27: the renewal read page one ONCE under the new token (compared, never printed)');
+  const sendAt = st.api.length;
+  await sendCredit(page);
+  await page.waitFor(async () => (await creditCardOf(page))?.state === 'issued', 30_000, 'issued');
+  await page.waitFor(async () => (await activityOf(page))?.items[0]?.number === 'CN-1', 30_000, 'CA-44: CN-1 first in the view');
+  await quiet(page, sendAt);
+  await page.settle();
+  const afterIssue = sentBy(page, isActivityOf(main.id), sendAt).map(readLine);
+  record('SCA-02', { phase: 'issued', reads: afterIssue });
+  assert.deepEqual(afterIssue, [`${STORES}/${main.id}/credit-notes 200`], 'CA-44: ONE page one after the own 201');
+  const confirmAt = await pressCard(page, 'confirm', (c) => c?.text === CN_SAID.confirmed, 'Credit note confirmed.');
+  await page.waitFor(() => sentBy(page, isActivityOf(main.id), confirmAt).some((r) => r.status !== null), 30_000, 'CA-44: the view read again after the Confirm');
+  await quiet(page, confirmAt);
+  await page.settle();
+  const afterConfirm = sentBy(page, isActivityOf(main.id), confirmAt).map(readLine);
+  record('SCA-02', { phase: 'confirmed', reads: afterConfirm });
+  assert.deepEqual(afterConfirm, [`${STORES}/${main.id}/credit-notes 200`], 'CA-44: ONE page one after the own Confirm');
+  const switchAt = st.api.length;
+  // A token change, not a sign-out: another tab's sign-in first logs this session out and changes the shared sign-in, so
+  // this page sends its own logout and its section ends (no session to adopt). So the jar's cookie is swapped instead.
+  const swapped = await directLogin(boss);
+  await browser.send('Storage.setCookies', {
+    browserContextId: page.contextId,
+    cookies: [{ name: swapped.cookie.slice(0, swapped.cookie.indexOf('=')), value: cookieValue(swapped.cookie), url: `${SHOP}/`, path: '/', secure: true, httpOnly: true, sameSite: 'Strict' }],
+  });
+  await page.evaluate(`window.dispatchEvent(new Event('focus'))`);
+  await page.waitFor(async () => (await activityOf(page)) === null && (await page.evaluate(`${q('issued-store')}?.value ?? null`)) === '', 30_000, 'CA-27: the new token adopted, the store and the view cleared');
+  await waitData(page, 'issued-stores-state', 'phase', 'ready');
+  await quiet(page, switchAt);
+  const pickAt = st.api.length;
+  await pickIssuedStore(page, main.id);
+  await activityReady(page, 'the view read under the new token', 1);
+  const fresh = sentBy(page, isActivityOf(main.id), pickAt);
+  record('SCA-02', { phase: 'token change', reads: fresh.map(readLine) });
+  assert.ok(fresh.length === 1 && fresh[0].status === 200 && fresh[0].headers[SESSION_CSRF] !== renewed[0].headers[SESSION_CSRF], 'CA-27: page one once the store is chosen again, under the new token');
+  assert.ok(fresh[0].headers[SESSION_CSRF] === swapped.csrf && sentBy(page, isLogin, switchAt).length === 0, 'CA-27: that token is the swapped session\'s, adopted with no login (compared, never printed)');
+}, 240_000);
+
+scenario('SCA-03', 'M7B CREDIT ACTIVITY (doc 18 §8.4; shop slice AUTHORED, NOT RUN) CA-32 CA-42 (B) A CONTROLLED SAME-TOKEN 403 — not live runtime coverage (doc 18 §13 flag): the runner tampers ONE activity read\'s session-token header at the front, so the entry answers 403 forbidden while the page\'s session stands. (A): the one fresh check finds the same token and the directory read (GET /api/v1/stores, same token) still lists the store under the same tenant: the sub-section disappears with no text, the dialog\'s credit-note rows and lookup are untouched, the store stays chosen, and a focus sends no further activity read. (B2): on a new page the runner also sends that directory read under another principal\'s session (a tenant-scope owner: no store listed): D17 rule 4\'s second bullet — the lookup denied with no row and the list read again — no login, the store still chosen', async () => {
+  const { tenant, main, boss, id } = await creditShop('a3', clerkNotes(3));
+  const outcomes = {};
+  for (const variant of ['A', 'B2']) {
+    const page = await voidPage(boss, main.id, 1);
+    await activityReady(page, `${variant}: the activity read answered`, 3);
+    const opened = await openVoidable(page, main.id, id, 1);
+    await creditSettled(page, main.id, opened, 3);
+    const lookupBefore = await creditLookupOf(page);
+    const listsBefore = sentBy(page, isCreditListOf(main.id, id)).length;
+    const other = variant === 'B2' ? await directLogin(await actor('a3-tenant-owner', [grant(tenant, 'store_owner')], { role: 'store_owner' })) : null;
+    let refused = null;
+    st.tamper = async (rec, out) => {
+      if (rec.frameId !== page.frameId) return;
+      if (refused === null && isActivityOf(main.id)(rec)) { refused = rec; out[SESSION_CSRF] = 'x'.repeat(43); return; }
+      if (other !== null && refused !== null && isStoresRead(rec)) {
+        const name = other.cookie.split('=')[0];
+        out.cookie = [...(out.cookie ?? '').split(/;\s*/).filter((p) => p !== '' && !p.startsWith(`${name}=`)), other.cookie].join('; ');
+        out[SESSION_CSRF] = other.csrf;
+      }
+    };
+    const from = st.api.length;
+    try {
+      await page.call(by('issued-credit-activity-refresh'), function () { this.click(); }); // behind the dialog: clicked as a script does
+      await page.waitFor(async () => (await activityOf(page)) === null, 30_000, `${variant}: the sub-section hidden`);
+      await quiet(page, from);
+      await page.settle();
+    } finally {
+      st.tamper = null;
+    }
+    const seq = sentBy(page, (r) => isActivityOf(main.id)(r) || isSessionRead(r) || isStoresRead(r), from).map((r) => `${r.method} ${r.path} ${answered(r)}`);
+    outcomes[variant] = {
+      refused: refused === null ? null : answered(refused), sequence: seq.slice(0, 4), lookup: await creditLookupOf(page),
+      listedAgain: sentBy(page, isCreditListOf(main.id, id)).length > listsBefore, logins: sentBy(page, isLogin, from).length,
+      chosen: (await page.evaluate(`${q('issued-store')}?.value ?? null`)) === main.id, text: (await textOf(page, 'issued-section'))?.includes(ACTIVITY_SAID.title) ?? false,
+    };
+    if (variant === 'A') {
+      const focusAt = st.api.length;
+      await page.evaluate(`window.dispatchEvent(new Event('focus'))`);
+      await delay(1_500);
+      await quiet(page, focusAt);
+      outcomes.A.lookupKept = JSON.stringify(outcomes.A.lookup) === JSON.stringify(lookupBefore);
+      outcomes.A.afterFocus = sentBy(page, isActivityOf(main.id), focusAt).length;
+    }
+    record('SCA-03', { variant, ...outcomes[variant], sent: sentBy(page, () => true, from).map(apiLine) });
+    await page.close();
+  }
+  const sequence = [`GET /api/v1/session 200`, `GET ${STORES}/${main.id}/credit-notes 403 forbidden`, `GET /api/v1/session 200`, `GET ${STORES} 200`];
+  assert.deepEqual(outcomes.A, {
+    refused: '403 forbidden', sequence, lookup: outcomes.A.lookup, listedAgain: false, logins: 0, chosen: true, text: false, lookupKept: true, afterFocus: 0,
+  }, 'CA-32 (A), CONTROLLED: this view only; nothing else cleared; CA-42: no further activity read for the store in this generation');
+  assert.deepEqual({ ...outcomes.B2, lookup: outcomes.B2.lookup?.phase === 'denied' && outcomes.B2.lookup.rows === '0' }, {
+    refused: '403 forbidden', sequence, lookup: true, listedAgain: true, logins: 0, chosen: true, text: false,
+  }, 'CA-32 (B2), CONTROLLED: D17 rule 4 second bullet plus this view; no token adoption');
+}, 300_000);
+
+scenario('SCA-04', 'M7B CREDIT ACTIVITY (doc 18 §8.2; shop slice AUTHORED, NOT RUN) CA-15a (B) THE OWNER DEMOTED — 52 credit notes; the owner\'s view shows page one with Show more; the owner\'s grants become manager\'s (owner SQL, as SCN-06): Show more\'s own session check finds the session ended (401), so no activity page is sent; the section is signed out with every activity row dropped and Reconnect offered', async () => {
+  const { main, boss } = await creditShop('a4', clerkNotes(52));
+  const page = await voidPage(boss, main.id, 1);
+  await activityReady(page, 'the activity read answered', 50);
+  await owner`update user_membership set role_id = 'manager' where internal_user_id = ${boss.id}`;
+  const from = st.api.length;
+  await page.click(by('issued-credit-activity-more'));
+  await waitData(page, 'issued-stores-state', 'phase', 'signed-out');
+  await quiet(page, from);
+  await page.settle();
+  const ended = { sent: sentBy(page, () => true, from).map(apiLine), view: await activityOf(page), stores: await textOf(page, 'issued-stores-state'), reconnect: await textOf(page, 'issued-retry') };
+  record('SCA-04', ended);
+  assert.deepEqual(ended, { sent: ['GET /api/v1/session -> 401 unauthenticated'], view: null, stores: 'Your server session ended. Reconnect to see issued invoices.', reconnect: 'Reconnect' },
+    'CA-15a: the role change ended the session at the next read; every activity row dropped; nothing more sent');
+}, 240_000);

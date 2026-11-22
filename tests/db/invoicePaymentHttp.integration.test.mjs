@@ -41,7 +41,7 @@
 //
 // M7B-CREDITNOTES-P1 (migration 038) — WHAT CHANGED: the record now runs through record_v3 (its audit row keeps evaluated_by
 // m7b_invoice_payment_routine@v2), the void through void_v3, and the payments read's amounts are exactly { currency, dueCents,
-// creditedCents, appliedCents, remainingCents } (creditedCents 0 wherever no credit note exists); the table is forty-seven routes.
+// creditedCents, appliedCents, remainingCents } (creditedCents 0 wherever no credit note exists); the table is forty-eight routes (doc 18 adds the credit-activity read).
 //
 // It never touches a managed or remote database. Run: npx tsx scripts/run-db-tests.mjs tests/db/invoicePaymentHttp.integration.test.mjs
 
@@ -311,7 +311,7 @@ async function teardown() {
           where g.tgrelid in (${PAY_TABLE}::regclass, ${REV_TABLE}::regclass) and not g.tgisinternal) as triggers`;
       assert.deepEqual({ ...state }, {
         payments: 0, reversals: 0, payment_audits: 0, registrations: 0, registration_audits: 0, proof_keys: 0, registration_guards_always: true,
-        voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '038',
+        voids: 0, invoices: 0, drafts: 0, audits: 0, latest: '039',
         triggers: ['trg_invoice_payment_credit_note_barrier:A', 'trg_invoice_payment_guard:A', 'trg_invoice_payment_reversal_guard:A', 'trg_invoice_payment_reversal_truncate:A', 'trg_invoice_payment_truncate:A'].join(','),
       }, 'no payment, reversal, registration, proof key or payment/registration audit record anywhere, nothing of this suite left, and every payment and registration guard ALWAYS again');
     });
@@ -810,8 +810,8 @@ async function issuedBytesOf(ctx, s, store, invoice) {
 // IPH-00: the shipping table
 // ===========================================================================
 
-test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ships exactly 47 routes (M7B-CREDITNOTES-P1 adds seven), the five payment routes and 037\'s four registration routes among them with their body and idempotency', () => {
-  assert.equal(TENANT_SHIPPING_ROUTES.length, 47);
+test('IPH-00 (doc 15 §12.5 Composition; M7B-PAYMENTS-P2): the tenant entry ships exactly 48 routes (M7B-CREDITNOTES-P1 adds seven, doc 18\'s credit activity one), the five payment routes and 037\'s four registration routes among them with their body and idempotency', () => {
+  assert.equal(TENANT_SHIPPING_ROUTES.length, 48);
   const served = TENANT_SHIPPING_ROUTES.map((r) => `${r.method} ${r.path} ${r.body} ${r.idempotency}`);
   for (const want of [
     'GET /api/v1/stores/{storeId}/invoices/{id}/payment-eligibility none none',
