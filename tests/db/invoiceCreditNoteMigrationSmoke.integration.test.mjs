@@ -7,8 +7,9 @@
 //          resolved the routine before the registration, see ICS-02) -> issue; the payments read v2 shows the credit;
 //          withdraw; the read shows it gone; the down refuses (55000) while evidence exists.
 //
-// DISPOSABLE ONLY, DURABLE (proofs need fsync on). It leaves 001-038 applied and no credit note, registration, session, login
-// or fixture of its own.
+// DISPOSABLE ONLY, DURABLE (proofs need fsync on). It rolls back anything applied above 038 (039) at setup, runs on 001-038,
+// and re-applies it at teardown, so the ledger ends as it began; it leaves no credit note, registration, session, login or
+// fixture of its own.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

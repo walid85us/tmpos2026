@@ -28,13 +28,15 @@
 // transaction and asks ONCE more in a fresh one within the route's deadline; a second 'not_durable' is the port's bounded outage
 // (postgresInvoicePayments.ts's rule, restated). The attempts and the list are checked column for column and handed to the
 // runtime's own decoders, which must accept them. The list's names travel only when 038 says they are visible.
+// THE STORE ACTIVITY (docs/phase-4/18, migration 039): one fixed call into m7b_store_credit_activity under the same read
+// bounds, every row naming this scope's tenant and store, checked column for column and handed to the runtime's decoder.
 //
 // No driver error message, row value, key, proof or body is ever logged. IT CONSTRUCTS NOTHING AND READS NOTHING at import.
 import type { TransactionMutation } from '../runtime/commandTransaction.js';
 import {
   INVOICE_CREDIT_NOTES_ASK, INVOICE_CREDIT_NOTE_ATTEMPTS_ASK, INVOICE_CREDIT_NOTE_ISSUE_CONTRACT, INVOICE_CREDIT_NOTE_REGISTER_CONTRACT,
   INVOICE_CREDIT_NOTE_SETTLE_CONTRACT, INVOICE_CREDIT_NOTE_WITHDRAW_CONTRACT, creditNoteProofOf, invoiceCreditNoteAttemptsOf, invoiceCreditNotesOf,
-  isInvoiceCreditNoteReason, isInvoiceCreditNoteWithdrawalReason,
+  isInvoiceCreditNoteReason, isInvoiceCreditNoteWithdrawalReason, storeCreditActivityOf, StoreCreditActivityAnswerInvalid,
 } from '../runtime/invoiceCreditNotes.js';
 import type { InvoiceCreditNoteAttemptsCursor, InvoiceCreditNotesPort } from '../runtime/invoiceCreditNotes.js';
 import { isTrustedScope } from '../runtime/principals.js';
@@ -314,8 +316,51 @@ export function creditNotesListAnswerOf(rows: unknown, scope: TrustedScope, invo
   return answer;
 }
 
+const ACTIVITY_COLUMNS: readonly string[] = ['o_outcome', 'o_tenant_id', 'o_store_id', 'o_credit_note_id', 'o_credit_note_number', 'o_invoice_id',
+  'o_invoice_number', 'o_gross_cents', 'o_reason_code', 'o_issued_at', 'o_issued_by_name', 'o_withdrawn_at', 'o_withdrawal_reason_code', 'o_withdrawn_by_name'];
+
+/** 039's activity rows (none for an empty page) as the port's answer; anything out of shape is StoreCreditActivityAnswerInvalid. */
+export function storeCreditActivityAnswerOf(rows: unknown, scope: TrustedScope, after: string | null): unknown {
+  try {
+    return storeCreditActivityRowsOf(rows, scope, after);
+  } catch (err) {
+    // Only the checks' own fault() (a plain Error) is a refused answer; any other throw is a defect, left an outage.
+    if (err instanceof Error && Object.getPrototypeOf(err) === Error.prototype) throw new StoreCreditActivityAnswerInvalid();
+    throw err;
+  }
+}
+/** The row checks and the page decoder's recheck; each rejection is fault(). */
+function storeCreditActivityRowsOf(rows: unknown, scope: TrustedScope, after: string | null): unknown {
+  // The bound is checked before any row is read.
+  if (!Array.isArray(rows) || rows.length > INVOICE_CREDIT_NOTES_ASK) throw fault();
+  const all: Row[] = rows.map((row) => { if (!hasColumns(row, ACTIVITY_COLUMNS)) throw fault(); return row; });
+  const first = all[0];
+  if (first !== undefined && first.o_outcome !== 'credit_note') {
+    // A refusal is the routine's only row; 'cursor_unknown' only for a continuation.
+    const words = after !== null ? ['denied', 'cursor_unknown'] : ['denied'];
+    if (all.length !== 1 || !allNullBut(first, ACTIVITY_COLUMNS) || typeof first.o_outcome !== 'string' || !words.includes(first.o_outcome)) throw fault();
+    return Object.freeze({ outcome: first.o_outcome });
+  }
+  const creditNotes = all.map((row) => {
+    if (row.o_outcome !== 'credit_note' || row.o_tenant_id !== scope.tenant || row.o_store_id !== scope.store) throw fault();
+    const withdrawn = row.o_withdrawn_at !== null;
+    if (!withdrawn && (row.o_withdrawal_reason_code !== null || row.o_withdrawn_by_name !== null)) throw fault();
+    return {
+      id: row.o_credit_note_id, number: exactOf(row.o_credit_note_number, 1), invoiceId: row.o_invoice_id, invoiceNumber: exactOf(row.o_invoice_number, 1),
+      grossCents: exactOf(row.o_gross_cents, 1), reason: row.o_reason_code, issuedAt: row.o_issued_at, issuedByName: row.o_issued_by_name,
+      withdrawal: !withdrawn ? null : { withdrawnAt: row.o_withdrawn_at, reason: row.o_withdrawal_reason_code, withdrawnByName: row.o_withdrawn_by_name },
+    };
+  });
+  const answer = Object.freeze({ outcome: 'credit_notes', storeId: scope.store, creditNotes });
+  // The runtime's own decoder must accept it as a page (never as a refusal word).
+  const judged = storeCreditActivityOf(answer, scope.store as string, after);
+  if (typeof judged !== 'object' || judged === null) throw fault();
+  return answer;
+}
+
 /**
- * The proof, attempts and list reads over `client` (038's session-bound routines, under the read bounds; none writes). The proof
+ * The proof, attempts and list reads over `client` (038's session-bound routines, under the read bounds; none writes), and
+ * the store activity (039's, the same bounds). The proof
  * is at most TWO transactions within `deadlineMs` of the call: each waits clamp(remaining - reserve, 0, 1000) ms; a second only
  * after the first answered 'not_durable' AND committed, and only while more than the reserve remains. A raise is never retried.
  */
@@ -367,6 +412,17 @@ export function createPostgresInvoiceCreditNotes(deps: { readonly client: Superv
           from tmpos_invoice_credit_note.m7b_invoice_credit_notes_list(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${invoiceId}::uuid,
             ${after}::uuid, ${INVOICE_CREDIT_NOTES_ASK}::integer)`,
         scope, invoiceId, after,
+      ));
+    },
+    async storeActivity(rawScope: TrustedScope, sessionKey: string, after: string | null, signal: AbortSignal): Promise<unknown> {
+      const scope = scopeOf(rawScope, sessionKey);
+      if (after !== null && !isUuid(after)) throw fault();
+      return client.transaction(signal, INVOICE_DRAFT_READ_BOUNDS, async (sql) => storeCreditActivityAnswerOf(
+        await sql`select o_outcome, o_tenant_id, o_store_id, o_credit_note_id, o_credit_note_number, o_invoice_id, o_invoice_number, o_gross_cents,
+            o_reason_code, o_issued_at, o_issued_by_name, o_withdrawn_at, o_withdrawal_reason_code, o_withdrawn_by_name
+          from tmpos_invoice_credit_note.m7b_store_credit_activity(${sessionKey}::text, ${scope.tenant}::uuid, ${scope.store}::uuid, ${after}::uuid,
+            ${INVOICE_CREDIT_NOTES_ASK}::integer)`,
+        scope, after,
       ));
     },
   });

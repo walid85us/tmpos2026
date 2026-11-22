@@ -141,6 +141,13 @@
 // tenant OWNER_ONLY_ROUTE_PERMISSIONS. A manager with Invoices Full is DENIED: Full is not owner-only. The store guard admits
 // exactly these three by name, in exactly that shape; Full anywhere else still refuses to load. No role data, catalog default,
 // ordering or D2/D3 grant diff changes.
+//
+// M7B CREDIT ACTIVITY UPDATE (docs/phase-4/18 §8.1, D-CA-1 A) — A FOURTH OWNER-ONLY STORE KEY: view_store_credit_activity
+// (NOT sensitive: GET /api/v1/stores/{storeId}/credit-notes, the store-wide credit-activity read), parent Invoices, threshold
+// Full recorded but not compared, no corequisite, added to the same closed owner-only map so the unchanged store owner rule
+// decides it: store_owner at limitation 'none' at store scope only. Every other role is denied, and so is the owner of a
+// read-only or overdue tenant or store (limitation read_only; adopted, §8.3). No role data, catalog default, ordering or
+// D2/D3 grant diff changes.
 import {
   PLATFORM_PERMISSION_DEPENDENCIES,
   PLATFORM_ROLE_FEATURE_DEFAULTS,
@@ -342,16 +349,19 @@ export const STORE_ROUTE_PERMISSIONS: ReadonlyMap<string, CanonicalPermission> =
   ['issue_invoice_credit_notes', Object.freeze({ key: 'issue_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'full' as const })],
   ['withdraw_invoice_credit_notes', Object.freeze({ key: 'withdraw_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: true, threshold: 'full' as const })],
   ['recover_invoice_credit_notes', Object.freeze({ key: 'recover_invoice_credit_notes', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'full' as const })],
+  // Doc 18 D-CA-1 A: the store-wide credit-activity read, owner-only by the same rule.
+  ['view_store_credit_activity', Object.freeze({ key: 'view_store_credit_activity', plane: 'tenant' as const, parent: 'invoices', sensitive: false, threshold: 'full' as const })],
 ]));
 
 /**
  * The store route permissions decided by the STORE OWNER RULE rather than a level (M7B-CREDITNOTES-P1, D-CN-7 A,
- * CN-I1), each with the exact `sensitive` it must carry: the credit-note keys. Granted only to store_owner at limitation 'none'
- * on a store-scope grant (evaluateCanonicalPermission), its levels readable; every other role — the manager at Full included —
- * is denied.
+ * CN-I1), each with the exact `sensitive` it must carry: the credit-note keys, and (doc 18 D-CA-1 A) the non-sensitive
+ * credit-activity key. Granted only to store_owner at limitation 'none' on a store-scope grant (evaluateCanonicalPermission),
+ * its levels readable; every other role — the manager at Full included — is denied.
  */
 const STORE_OWNER_ONLY_ROUTE_PERMISSIONS: ReadonlyMap<string, boolean> = new Map<string, boolean>([
   ['issue_invoice_credit_notes', true], ['withdraw_invoice_credit_notes', true], ['recover_invoice_credit_notes', false],
+  ['view_store_credit_activity', false],
 ]);
 
 const STORE_ROUTE_THRESHOLDS: ReadonlySet<PermissionLevelValue> = new Set<PermissionLevelValue>(['view', 'create', 'edit']);

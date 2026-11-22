@@ -1,6 +1,6 @@
 // QA-INTERACTIVE-P1 — bounded, read-only backend evidence from the QA run's own database. Every query runs in a READ ONLY
-// transaction as the fixture owner, names its columns from migrations 001–035, and returns only the rows of the
-// fixtures or ids asked for (plus per-tenant counts). Session material, keys and idempotency digests are never returned.
+// transaction as the fixture owner, names its columns from migrations 001–038, and returns only the rows of the
+// fixtures or ids asked for (plus per-tenant counts). Session material, keys, proofs, session digests and idempotency digests are never returned.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function auditsOf(sql, column, id) {
@@ -34,7 +34,52 @@ async function invoiceOf(sql, id) {
   if (!row) return null;
   const [voided] = await sql`select reason_code, to_char(voided_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as voided_at
     from tmpos_invoice_void.issued_invoice_void where invoice_id = ${id}`;
-  return { kind: 'issued invoice', ...row, state: voided ? 'voided' : 'issued', void: voided ?? null, audits: await auditsOf(sql, 'subject_issued_invoice_id', id) };
+  return {
+    kind: 'issued invoice', ...row, state: voided ? 'voided' : 'issued', void: voided ?? null, audits: await auditsOf(sql, 'subject_issued_invoice_id', id),
+    creditNotes: await creditNoteCountsOf(sql, id),
+  };
+}
+
+// Credit notes (migration 038): counts by state per invoice. Gross amounts only; no session digest, proof or key column is read.
+async function creditNoteCountsOf(sql, invoiceId) {
+  const [n] = await sql`select
+      count(*) filter (where w.credit_note_id is null)::int as issued,
+      count(*) filter (where w.credit_note_id is not null)::int as withdrawn,
+      coalesce(sum(c.gross_cents) filter (where w.credit_note_id is null), 0)::text as active_gross_cents
+    from tmpos_invoice_credit_note.invoice_credit_note c
+    left join tmpos_invoice_credit_note.invoice_credit_note_withdrawal w on w.credit_note_id = c.credit_note_id
+    where c.invoice_id = ${invoiceId}`;
+  const [r] = await sql`select
+      count(*) filter (where credit_note_id is null and acknowledged_at is null)::int as registered_open,
+      count(*) filter (where credit_note_id is not null and acknowledged_at is null)::int as issued_unsettled,
+      count(*) filter (where acknowledged_at is not null)::int as settled
+    from tmpos_invoice_credit_note.invoice_credit_note_registration where invoice_id = ${invoiceId}`;
+  return { creditNotes: n, registrations: r };
+}
+
+async function creditNoteOf(sql, id) {
+  const [row] = await sql`select c.credit_note_id as id, c.invoice_id, c.tenant_id, c.store_id, c.credit_note_number::text as number,
+      c.gross_cents::text as gross_cents, c.tax_cents::text as tax_cents, c.net_cents::text as net_cents, c.reason_code,
+      to_char(c.issued_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as issued_at,
+      w.reason_code as withdrawal_reason,
+      to_char(w.withdrawn_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as withdrawn_at
+    from tmpos_invoice_credit_note.invoice_credit_note c
+    left join tmpos_invoice_credit_note.invoice_credit_note_withdrawal w on w.credit_note_id = c.credit_note_id
+    where c.credit_note_id = ${id}`;
+  if (!row) return null;
+  const { withdrawal_reason: reason, withdrawn_at: at, ...note } = row;
+  return { kind: 'credit note', ...note, state: at ? 'withdrawn' : 'issued', withdrawal: at ? { reason_code: reason, withdrawn_at: at } : null,
+    audits: await auditsOf(sql, 'subject_invoice_credit_note_id', id) };
+}
+
+async function creditNoteRegistrationOf(sql, id) {
+  const [row] = await sql`select registration_id as id, invoice_id, tenant_id, store_id, gross_cents::text as gross_cents, reason_code,
+      credit_note_id, to_char(registered_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as registered_at,
+      to_char(acknowledged_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as acknowledged_at
+    from tmpos_invoice_credit_note.invoice_credit_note_registration where registration_id = ${id}`;
+  if (!row) return null;
+  const state = row.acknowledged_at ? 'settled' : row.credit_note_id ? 'issued, unsettled' : 'registered';
+  return { kind: 'credit-note registration', ...row, state, audits: await auditsOf(sql, 'subject_invoice_credit_note_registration_id', id) };
 }
 
 async function tenantSummary(sql, tenantId) {
@@ -44,7 +89,11 @@ async function tenantSummary(sql, tenantId) {
       (select count(*)::int from tmpos_invoice_draft.invoice_draft where tenant_id = ${tenantId} and status = 'discarded') as drafts_discarded,
       (select count(*)::int from tmpos_invoice_draft.invoice_draft where tenant_id = ${tenantId} and status = 'issued') as drafts_issued,
       (select count(*)::int from tmpos_invoice_issue.issued_invoice where tenant_id = ${tenantId}) as invoices_issued,
-      (select count(*)::int from tmpos_invoice_void.issued_invoice_void where tenant_id = ${tenantId}) as invoices_voided`;
+      (select count(*)::int from tmpos_invoice_void.issued_invoice_void where tenant_id = ${tenantId}) as invoices_voided,
+      (select count(*)::int from tmpos_invoice_credit_note.invoice_credit_note_registration where tenant_id = ${tenantId}
+        and credit_note_id is null and acknowledged_at is null) as credit_registrations_open,
+      (select count(*)::int from tmpos_invoice_credit_note.invoice_credit_note where tenant_id = ${tenantId}) as credit_notes,
+      (select count(*)::int from tmpos_invoice_credit_note.invoice_credit_note_withdrawal where tenant_id = ${tenantId}) as credit_notes_withdrawn`;
   const audits = await sql`select action_id, count(*)::int as n from public.audit_event where tenant_id = ${tenantId} group by action_id order by action_id`;
   const levels = await sql`select l.role_id, l.domain, coalesce(l.level, '(default)') as level, v.version
     from tmpos_role.tenant_role_level l
@@ -82,8 +131,9 @@ export async function collectEvidence(owner, reg, { targets = [], recent = false
         found.push({ target, error: 'not a fixture label or a record id' });
         continue;
       }
-      const row = (await customerOf(sql, id)) ?? (await draftOf(sql, id)) ?? (await invoiceOf(sql, id));
-      found.push(row ? { target, ...row } : { target, error: 'no such customer, draft or issued invoice in this QA database' });
+      const row = (await customerOf(sql, id)) ?? (await draftOf(sql, id)) ?? (await invoiceOf(sql, id))
+        ?? (await creditNoteOf(sql, id)) ?? (await creditNoteRegistrationOf(sql, id));
+      found.push(row ? { target, ...row } : { target, error: 'no such customer, draft, issued invoice, credit note or registration in this QA database' });
     }
     return found;
   });

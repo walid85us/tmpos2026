@@ -21,6 +21,12 @@ import {
   paymentSettlementPathOf, recordBodyOf, registerBodyOf, settleBodyOf, type RecordFields,
 } from './invoiceIssuingClient';
 import { paymentReversalEligibilityPathOf, paymentReversalPathOf, reverseBodyOf } from './invoiceIssuingClient';
+import {
+  CREDIT_NOTES_PAGE_SIZE, CREDIT_NOTE_ATTEMPTS_PAGE_SIZE, CREDIT_NOTE_ATTEMPT_VERSIONS, CREDIT_NOTE_NAME_MAX_LENGTH, INVOICE_CREDIT_NOTE_REASONS,
+  INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, creditNoteAttemptsFollow, creditNoteAttemptsPathOf, creditNoteIssueBodyOf, creditNoteProofPathOf, creditNoteRegisterBodyOf,
+  creditNoteRegistrationsPathOf, creditNoteSettlementPathOf, creditNotesFollow, creditNotesPathOf, evidenceOf, proofEvidenceOf, type CreditNoteCommandResult, type CreditNoteIssueFields,
+  storeCreditActivityFollows, storeCreditActivityPathOf,
+} from './invoiceIssuingClient';
 import { formatCents } from './invoiceDraftsClient';
 import { normalizeIssuingStoreName, normalizeLegalName, normalizePostalAddress as serverPostalAddress, normalizeTaxRegistrationId, taxSettingOf } from '../../server/runtime/issuingSettings';
 import { invoiceTaxOf, issueAmountsOf } from '../../server/runtime/invoiceIssuing';
@@ -30,6 +36,11 @@ import {
   INVOICE_PAYMENT_STATUSES as SERVER_PAYMENT_STATUSES, INVOICE_PAYMENT_ATTEMPTS_PAGE_SIZE, INVOICE_PAYMENT_ATTEMPT_STATES,
   INVOICE_PAYMENT_REVERSAL_ELIGIBILITY_PATH, INVOICE_PAYMENT_REVERSE_PATH,
 } from '../../server/runtime/invoicePayments';
+import {
+  INVOICE_CREDIT_NOTES_PAGE_SIZE, INVOICE_CREDIT_NOTES_PATH, INVOICE_CREDIT_NOTE_ATTEMPTS_PAGE_SIZE, INVOICE_CREDIT_NOTE_ATTEMPTS_PATH, INVOICE_CREDIT_NOTE_ATTEMPT_STATES,
+  INVOICE_CREDIT_NOTE_NAME_MAX_LENGTH, INVOICE_CREDIT_NOTE_PROOF_PATH, INVOICE_CREDIT_NOTE_REASONS as SERVER_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_REGISTER_PATH,
+  INVOICE_CREDIT_NOTE_SETTLE_PATH, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS as SERVER_WITHDRAWAL_REASONS, STORE_CREDIT_ACTIVITY_PATH,
+} from '../../server/runtime/invoiceCreditNotes';
 
 const cp = (code: number): string => String.fromCodePoint(code);
 const unit = (code: number): string => String.fromCharCode(code);
@@ -1745,4 +1756,445 @@ test('IIC-50. every reversal answer is ONE outcome by status AND word AND envelo
   }) as typeof globalThis.fetch });
   assert.deepEqual(await hanging.reversePayment(STORE, INVOICE, PAYMENT, KEY, REVERSE_BODY, CSRF), { kind: 'unknown', responded: false });
   assert.equal(hung, 1);
+});
+
+// ---- M7B-CREDITNOTES-CN-P2: the credit-note client (doc 17 §1.1, §2.6 item 4, §3.3, §4.1) ----
+
+const CN_ID = uuid(0xc1d);
+const CN_REGISTER_BODY = `{"expectedTenant":"${TENANT}","attemptId":"${ATTEMPT}","grossCents":1250,"reason":"goodwill"}`;
+const CN_ISSUE_FIELDS: CreditNoteIssueFields = Object.freeze({ expectedTenant: TENANT, registrationId: REG, attemptId: ATTEMPT, grossCents: 1250, reason: 'goodwill', registrationProof: PROOF });
+const CN_ISSUE_BODY = `{"expectedTenant":"${TENANT}","registrationId":"${REG}","attemptId":"${ATTEMPT}","grossCents":1250,"reason":"goodwill","registrationProof":"${PROOF}"}`;
+const cnRegistered = (over: Record<string, unknown> = {}) => ({ registration: { id: REG, invoiceId: INVOICE, attemptId: ATTEMPT, grossCents: 1250, reason: 'goodwill', state: 'open', ...over } });
+const cnIssued = (over: Record<string, unknown> = {}) => ({ creditNote: { id: CN_ID, invoiceId: INVOICE, attemptId: ATTEMPT, grossCents: 1250, reason: 'goodwill', ...over } });
+const cnSettled = (state: string, over: Record<string, unknown> = {}) => ({ settlement: { invoiceId: INVOICE, attemptId: ATTEMPT, state, ...over } });
+const cnAttempt = (n: number, over: Record<string, unknown> = {}) => ({
+  invoiceId: INVOICE, invoiceNumber: 7, attemptId: uuid(0xb000 + n), state: 'open', version: 1, registeredAt: at(n), settledAt: null, grossCents: 1250, reason: 'goodwill',
+  creditNote: null as unknown, ...over,
+});
+const cnNote = (n: number, over: Record<string, unknown> = {}) => ({
+  id: uuid(0xd000 + n), number: n, grossCents: 1250, taxCents: 100, netCents: 1150, reason: 'pricing_error', issuedAt: at(n), withdrawal: null as unknown, ...over,
+});
+const named = (n: number, over: Record<string, unknown> = {}) => cnNote(n, { issuedByName: 'Owner One', ...over });
+const notesPage = (creditNotes: unknown[], nextCursor: string | null = null, invoice: unknown = { id: INVOICE }) => json(200, { invoice, creditNotes, nextCursor });
+type CnClient = ReturnType<typeof scripted>['client'];
+const cnRegister = (c: CnClient) => c.registerCreditNote(STORE, INVOICE, KEY, CN_REGISTER_BODY, CSRF);
+const cnIssue = (c: CnClient) => c.issueCreditNote(STORE, INVOICE, KEY, CN_ISSUE_BODY, CSRF);
+const cnSettle = (v: 1 | 2) => (c: CnClient) => c.settleCreditNote(STORE, INVOICE, KEY, SETTLE_BODY(v), CSRF);
+const refusal = (status: number, error: string, sealedShape: boolean, replayed = false, retryAfterSeconds: number | null = null) =>
+  ({ kind: 'refused', status, error, sealed: sealedShape, replayed, retryAfterSeconds });
+
+test('IIC-51. CN-P2: the credit-note paths are the server\'s templates filled in (the issue and the list share credit-notes); the page sizes, the four attempt states with their versions, the reason keys in the server\'s order and the name bound restate the server\'s', () => {
+  const fill = (template: string): string => template.replace(/\{(\w+)\}/g, (_m, name: string) => ({ storeId: STORE, id: INVOICE } as Record<string, string>)[name]);
+  assert.equal(creditNoteRegistrationsPathOf(STORE, INVOICE), `${BASE}/credit-note-registrations`);
+  assert.equal(creditNoteRegistrationsPathOf(STORE, INVOICE), fill(INVOICE_CREDIT_NOTE_REGISTER_PATH));
+  assert.equal(creditNoteProofPathOf(STORE, INVOICE), fill(INVOICE_CREDIT_NOTE_PROOF_PATH));
+  assert.equal(creditNotesPathOf(STORE, INVOICE), fill(INVOICE_CREDIT_NOTES_PATH));
+  assert.equal(creditNoteSettlementPathOf(STORE, INVOICE), fill(INVOICE_CREDIT_NOTE_SETTLE_PATH));
+  assert.equal(creditNoteAttemptsPathOf(STORE), fill(INVOICE_CREDIT_NOTE_ATTEMPTS_PATH));
+  assert.equal(CREDIT_NOTES_PAGE_SIZE, INVOICE_CREDIT_NOTES_PAGE_SIZE);
+  assert.equal(CREDIT_NOTE_ATTEMPTS_PAGE_SIZE, INVOICE_CREDIT_NOTE_ATTEMPTS_PAGE_SIZE);
+  assert.equal(CREDIT_NOTE_NAME_MAX_LENGTH, INVOICE_CREDIT_NOTE_NAME_MAX_LENGTH);
+  assert.deepEqual(Object.keys(CREDIT_NOTE_ATTEMPT_VERSIONS), [...INVOICE_CREDIT_NOTE_ATTEMPT_STATES]);
+  assert.deepEqual(Object.values(CREDIT_NOTE_ATTEMPT_VERSIONS), [1, 2, 3, 3]);
+  assert.deepEqual(Object.keys(INVOICE_CREDIT_NOTE_REASONS), [...SERVER_CREDIT_NOTE_REASONS]);
+  assert.deepEqual(Object.keys(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS), [...SERVER_WITHDRAWAL_REASONS]);
+  // RULES: no label may say "credit" or "withdraw" (the Payments button guard).
+  for (const label of [...Object.values(INVOICE_CREDIT_NOTE_REASONS), ...Object.values(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS)]) assert.doesNotMatch(label, /credit|withdraw/i);
+});
+
+test('IIC-52. CN-P2: the register and issue bodies are built ONCE in their fixed key order, the settlement reuses settleBodyOf; a bad value builds nothing, and a body not byte for byte its builder\'s, a bad key or an id outside its grammar sends NOTHING (not-sent)', async () => {
+  assert.ok(creditNoteRegisterBodyOf(TENANT, ATTEMPT, 1250, 'goodwill') === CN_REGISTER_BODY, 'the register bytes');
+  assert.ok(creditNoteIssueBodyOf(CN_ISSUE_FIELDS) === CN_ISSUE_BODY, 'the issue bytes'); // compared, never printed: it carries the proof
+  for (const reason of Object.keys(INVOICE_CREDIT_NOTE_REASONS)) assert.equal(JSON.parse(creditNoteRegisterBodyOf(TENANT, ATTEMPT, 1, reason) ?? '{}').reason, reason);
+  for (const [t, a, g, r] of [[TENANT.toUpperCase(), ATTEMPT, 1, 'goodwill'], [TENANT, 'x', 1, 'goodwill'], [TENANT, ATTEMPT, 0, 'goodwill'], [TENANT, ATTEMPT, 1.5, 'goodwill'],
+    [TENANT, ATTEMPT, MAX + 1, 'goodwill'], [TENANT, ATTEMPT, '1', 'goodwill'], [TENANT, ATTEMPT, 1, 'toString'], [TENANT, ATTEMPT, 1, 'entered_in_error'], [TENANT, ATTEMPT, -0, 'goodwill']] as Array<[string, string, number, string]>) {
+    assert.equal(creditNoteRegisterBodyOf(t, a, g, r), null, `${t.length} ${a} ${g} ${r}`);
+  }
+  assert.ok(creditNoteRegisterBodyOf(TENANT, ATTEMPT, MAX, 'billing_error') !== null, 'the largest amount');
+  for (const over of [{ registrationProof: PROOF.toUpperCase() }, { registrationProof: PROOF.slice(1) }, { registrationId: 'x' }, { grossCents: 0 }, { reason: 'other' }, { expectedTenant: '' }]) {
+    assert.ok(creditNoteIssueBodyOf({ ...CN_ISSUE_FIELDS, ...over } as CreditNoteIssueFields) === null, JSON.stringify(Object.keys(over)));
+  }
+  const { calls, client } = scripted();
+  const notSent = { kind: 'not-sent' };
+  for (const [i, body] of [`${CN_REGISTER_BODY} `, CN_REGISTER_BODY.replace('1250', '1250.0'), CN_REGISTER_BODY.replace('}', ',"x":1}'), REGISTER_BODY,
+    `{"attemptId":"${ATTEMPT}","expectedTenant":"${TENANT}","grossCents":1250,"reason":"goodwill"}`, ''].entries()) {
+    assert.deepEqual(await client.registerCreditNote(STORE, INVOICE, KEY, body, CSRF), notSent, `register body row ${i}`);
+  }
+  for (const [i, body] of [CN_ISSUE_BODY.replace(PROOF, PROOF.toUpperCase()), CN_ISSUE_BODY.replace('goodwill', 'other'), ` ${CN_ISSUE_BODY}`, RECORD_BODY].entries()) {
+    assert.deepEqual(await client.issueCreditNote(STORE, INVOICE, KEY, body, CSRF), notSent, `issue body row ${i}`);
+  }
+  assert.deepEqual(await client.settleCreditNote(STORE, INVOICE, KEY, SETTLE_BODY(1).replace(':1}', ':3}'), CSRF), notSent);
+  for (const key of [KEY.toUpperCase(), KEY.replace('-4a6b-', '-1a6b-'), '', 'x']) {
+    assert.deepEqual(await client.registerCreditNote(STORE, INVOICE, key, CN_REGISTER_BODY, CSRF), notSent, `key ${key.length}`);
+    assert.deepEqual(await client.issueCreditNote(STORE, INVOICE, key, CN_ISSUE_BODY, CSRF), notSent, `key ${key.length}`);
+    assert.deepEqual(await client.settleCreditNote(STORE, INVOICE, key, SETTLE_BODY(2), CSRF), notSent, `key ${key.length}`);
+  }
+  for (const [store, invoice] of [['x', INVOICE], [STORE.toUpperCase(), INVOICE], [STORE, 'x'], [STORE, `${INVOICE}/x`], [STORE, uuid(0x1a1).replace('-4000-', '-0000-')]]) {
+    assert.deepEqual(await client.registerCreditNote(store, invoice, KEY, CN_REGISTER_BODY, CSRF), notSent);
+    assert.deepEqual(await client.issueCreditNote(store, invoice, KEY, CN_ISSUE_BODY, CSRF), notSent);
+    assert.deepEqual(await client.settleCreditNote(store, invoice, KEY, SETTLE_BODY(1), CSRF), notSent);
+    assert.deepEqual(await client.creditNoteProof(store, invoice, REG, ATTEMPT, CSRF), notSent);
+  }
+  assert.deepEqual(await client.creditNoteProof(STORE, INVOICE, `${REG}&x=1`, ATTEMPT, CSRF), notSent);
+  assert.deepEqual(await client.creditNoteAttempts('x', null, CSRF), { kind: 'unavailable' }, 'a local grammar failure is never a denial (rule 4)');
+  for (const after of ['', 'x', INVOICE, `${INVOICE}.${ATTEMPT}.x`, `${INVOICE}.${ATTEMPT.toUpperCase()}`]) assert.deepEqual(await client.creditNoteAttempts(STORE, after, CSRF), { kind: 'bad-cursor' }, after);
+  assert.deepEqual(await client.listCreditNotes(STORE, 'x', null, CSRF), { kind: 'unavailable' });
+  for (const after of ['', 'x', CN_ID.toUpperCase(), `${CN_ID}&x=1`]) assert.deepEqual(await client.listCreditNotes(STORE, INVOICE, after, CSRF), { kind: 'bad-cursor' }, after);
+  assert.equal(calls.length, 0);
+});
+
+test('IIC-53. CN-P2: each credit-note request is ONE fetch to its route — the three commands POST with exactly the five command headers and the caller\'s exact bytes, the proof, lookup and list GET with the session token alone; the commands and the proof are never aborted by a timeout of their own (doc 17 §2.6 item 5) while the lookup and list keep the shared one', async () => {
+  const no = () => refused(503, 'service_unavailable');
+  const { calls, client } = scripted(no(), no(), no(), no(), no(), no(), no(), no(), no());
+  await client.registerCreditNote(STORE, INVOICE, KEY, CN_REGISTER_BODY, CSRF);
+  await client.creditNoteProof(STORE, INVOICE, REG, ATTEMPT, CSRF);
+  await client.issueCreditNote(STORE, INVOICE, KEY, CN_ISSUE_BODY, CSRF);
+  await client.settleCreditNote(STORE, INVOICE, KEY, SETTLE_BODY(1), CSRF);
+  await client.creditNoteAttempts(STORE, null, CSRF);
+  await client.creditNoteAttempts(STORE, `${INVOICE}.${ATTEMPT}`, CSRF);
+  await client.listCreditNotes(STORE, INVOICE, null, CSRF);
+  await client.listCreditNotes(STORE, INVOICE, CN_ID, CSRF);
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url}`), [
+    `POST ${BASE}/credit-note-registrations`, `GET ${BASE}/credit-note-registration-proof?registration=${REG}`, `POST ${BASE}/credit-notes`, `POST ${BASE}/credit-note-settlement`,
+    `GET /api/v1/stores/${STORE}/credit-note-attempts`, `GET /api/v1/stores/${STORE}/credit-note-attempts?after=${INVOICE}.${ATTEMPT}`,
+    `GET ${BASE}/credit-notes`, `GET ${BASE}/credit-notes?after=${CN_ID}`,
+  ]);
+  const READ = [['accept', 'application/json'], ['x-tmpos-session-csrf', CSRF]];
+  const COMMAND = [['accept', 'application/json'], ['content-type', 'application/json'], ['idempotency-key', KEY], ['x-tmpos-csrf', '1'], ['x-tmpos-session-csrf', CSRF]];
+  calls.forEach((call, i) => {
+    assert.ok(call.init.credentials === 'include' && call.init.mode === 'same-origin' && call.init.cache === 'no-store' && call.init.redirect === 'error' && call.init.referrerPolicy === 'no-referrer', `options ${i}`);
+    assert.ok(JSON.stringify([...headersOf(call).entries()]) === JSON.stringify(call.init.method === 'POST' ? COMMAND : READ), `headers of request ${i}`);
+  });
+  assert.ok(calls[0].init.body === CN_REGISTER_BODY && calls[2].init.body === CN_ISSUE_BODY && calls[3].init.body === SETTLE_BODY(1), 'the caller\'s exact bytes');
+  assert.equal(calls[1].init.body, undefined);
+  assert.deepEqual([client.registerCreditNote.length, client.issueCreditNote.length, client.settleCreditNote.length, client.creditNoteProof.length], [5, 5, 5, 5]);
+  // A 30 ms answer under a 5 ms shared timeout: every command and the proof still get it, the lookup and list give up (nothing retried).
+  let fetched = 0;
+  const slow = createInvoiceIssuingClient({ timeoutMs: 5, fetch: (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    fetched += 1;
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(refused(503, 'service_unavailable')), 30);
+      init.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('aborted', 'AbortError')); });
+    });
+  }) as typeof globalThis.fetch });
+  const answered = refusal(503, 'service_unavailable', false);
+  assert.deepEqual(await slow.registerCreditNote(STORE, INVOICE, KEY, CN_REGISTER_BODY, CSRF), answered);
+  assert.deepEqual(await slow.issueCreditNote(STORE, INVOICE, KEY, CN_ISSUE_BODY, CSRF), answered);
+  assert.deepEqual(await slow.settleCreditNote(STORE, INVOICE, KEY, SETTLE_BODY(2), CSRF), answered);
+  assert.deepEqual(await slow.creditNoteProof(STORE, INVOICE, REG, ATTEMPT, CSRF), answered, 'the proof outlives the shared timeout');
+  assert.deepEqual(await slow.creditNoteAttempts(STORE, null, CSRF), { kind: 'unavailable' });
+  assert.deepEqual(await slow.listCreditNotes(STORE, INVOICE, null, CSRF), { kind: 'unavailable' });
+  assert.equal(fetched, 6);
+});
+
+test('IIC-54. CN-P2: a success counts ONLY exactly — register 201 echoing the invoice, attempt, amount and reason sent with state open; issue 201 naming a credit note (no number) for what was sent; settlement 200 released for version 1 and confirmed for 2, the same body applied or unchanged — the replay header absent or "true"; any other 2xx is malformed (fail closed), never unknown', async () => {
+  const one = async <T>(reply: Response, call: (c: CnClient) => Promise<T>): Promise<T> => call(scripted(reply).client);
+  const MALFORMED = { kind: 'malformed' };
+  assert.deepEqual(await one(json(201, cnRegistered()), cnRegister), { kind: 'registered', registrationId: REG, replayed: false });
+  assert.deepEqual(await one(json(201, cnRegistered(), { 'idempotent-replayed': 'true' }), cnRegister), { kind: 'registered', registrationId: REG, replayed: true });
+  for (const [name, r] of [
+    ['200', json(200, cnRegistered())], ['204', new Response(null, { status: 204 })], ['header false', json(201, cnRegistered(), { 'idempotent-replayed': 'false' })],
+    ['amount', json(201, cnRegistered({ grossCents: 1251 }))], ['reason', json(201, cnRegistered({ reason: 'service_issue' }))], ['state', json(201, cnRegistered({ state: 'issued' }))],
+    ['invoice', json(201, cnRegistered({ invoiceId: uuid(9) }))], ['attempt', json(201, cnRegistered({ attemptId: uuid(9) }))], ['id', json(201, cnRegistered({ id: REG.toUpperCase() }))],
+    ['payment shape', json(201, registered())], ['proof key', json(201, cnRegistered({ proof: PROOF }))], ['extra', json(201, { ...cnRegistered(), x: 1 })], ['text', new Response('ok', { status: 201 })],
+  ] as Array<[string, Response]>) assert.deepEqual(await one(r, cnRegister), MALFORMED, `register ${name}`);
+  assert.deepEqual(await one(json(201, cnIssued()), cnIssue), { kind: 'issued', creditNoteId: CN_ID, replayed: false });
+  assert.deepEqual(await one(json(201, cnIssued(), { 'idempotent-replayed': 'true' }), cnIssue), { kind: 'issued', creditNoteId: CN_ID, replayed: true });
+  for (const [name, r] of [
+    ['number', json(201, cnIssued({ number: 3 }))], ['tax', json(201, cnIssued({ taxCents: 0 }))], ['amount', json(201, cnIssued({ grossCents: 1 }))], ['reason', json(201, cnIssued({ reason: 'pricing_error' }))],
+    ['attempt', json(201, cnIssued({ attemptId: uuid(9) }))], ['invoice', json(201, cnIssued({ invoiceId: uuid(9) }))], ['id', json(201, cnIssued({ id: 'x' }))], ['200', json(200, cnIssued())],
+    ['header yes', json(201, cnIssued(), { 'idempotent-replayed': 'yes' })], ['registration', json(201, cnRegistered())],
+  ] as Array<[string, Response]>) assert.deepEqual(await one(r, cnIssue), MALFORMED, `issue ${name}`);
+  assert.deepEqual(await one(json(200, cnSettled('released')), cnSettle(1)), { kind: 'settled', state: 'released', replayed: false });
+  assert.deepEqual(await one(json(200, cnSettled('confirmed'), { 'idempotent-replayed': 'true' }), cnSettle(2)), { kind: 'settled', state: 'confirmed', replayed: true });
+  for (const [name, v, r] of [
+    ['released for 2', 2, json(200, cnSettled('released'))], ['confirmed for 1', 1, json(200, cnSettled('confirmed'))], ['withdrawn', 1, json(200, cnSettled('withdrawn'))],
+    ['attempt', 2, json(200, cnSettled('confirmed', { attemptId: uuid(9) }))], ['invoice', 2, json(200, cnSettled('confirmed', { invoiceId: uuid(9) }))],
+    ['unchanged key', 2, json(200, cnSettled('confirmed', { unchanged: true }))], ['201', 2, json(201, cnSettled('confirmed'))],
+  ] as Array<[string, 1 | 2, Response]>) assert.deepEqual(await one(r, cnSettle(v)), MALFORMED, `settle ${name}`);
+});
+
+test('IIC-55. CN-P2: every other command answer is kept whole — status, word, sealed ({error}, only a 409) or the chain\'s, the replay header and a 429\'s Retry-After; any 422 whatever its body; 403 step_up_required and forbidden stay apart; a sealed body on any other status, a replayed chain refusal, an unnamed shape or replay header is unknown (responded); no answer is unknown (not responded); ONE fetch each, no proof in any outcome', async () => {
+  const rows: Array<[Response | Error, unknown]> = [
+    [sealed(409, 'write_conflict'), refusal(409, 'write_conflict', true)], [refused(409, 'write_conflict'), refusal(409, 'write_conflict', false)],
+    [json(409, { error: 'invalid_state' }, { 'idempotent-replayed': 'true' }), refusal(409, 'invalid_state', true, true)], [sealed(409, 'already_issued'), refusal(409, 'already_issued', true)],
+    [sealed(409, 'amount_exceeds_remaining'), refusal(409, 'amount_exceeds_remaining', true)], [refused(409, 'request_in_progress'), refusal(409, 'request_in_progress', false)],
+    [refused(403, 'step_up_required'), refusal(403, 'step_up_required', false)], [refused(403, 'forbidden'), refusal(403, 'forbidden', false)],
+    [refused(401, 'unauthenticated'), refusal(401, 'unauthenticated', false)], [refused(400, 'invalid_request'), refusal(400, 'invalid_request', false)],
+    [refused(404, 'not_found'), refusal(404, 'not_found', false)], [refused(422, 'idempotency_key_reused'), refusal(422, 'idempotency_key_reused', false)],
+    [refused(429, 'rate_limited', { 'retry-after': '9' }), refusal(429, 'rate_limited', false, false, 9)], [refused(429, 'rate_limited'), { kind: 'unknown', responded: true }],
+    [refused(429, 'rate_limited', { 'retry-after': 'soon' }), { kind: 'unknown', responded: true }], [refused(429, 'rate_limited', { 'retry-after': '' }), { kind: 'unknown', responded: true }],
+    [refused(503, 'service_unavailable'), refusal(503, 'service_unavailable', false)], [refused(413, 'content_too_large'), refusal(413, 'content_too_large', false)],
+    [sealed(404, 'not_found'), { kind: 'unknown', responded: true }], [sealed(422, 'idempotency_key_reused'), refusal(422, 'idempotency_key_reused', false)], [new Response('busy', { status: 422 }), refusal(422, '', false)], [sealed(503, 'service_unavailable'), { kind: 'unknown', responded: true }],
+    [refused(409, 'write_conflict', { 'idempotent-replayed': 'true' }), { kind: 'unknown', responded: true }],
+    [json(409, { error: 'write_conflict', x: 1 }), { kind: 'unknown', responded: true }], [refused(409, 'write_conflict', { 'idempotent-replayed': 'yes' }), { kind: 'unknown', responded: true }],
+    [new Response('<html>bad gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }), { kind: 'unknown', responded: true }], [network(), { kind: 'unknown', responded: false }],
+  ];
+  for (const [command, run] of [['register', cnRegister], ['issue', cnIssue], ['settle', cnSettle(1)]] as Array<[string, (c: CnClient) => Promise<unknown>]>) {
+    for (const [reply, outcome] of rows) {
+      const name = `${command} ${await rowName(reply)}`;
+      const { calls, client } = scripted(reply instanceof Response ? reply.clone() : reply);
+      const got = await run(client);
+      assert.deepEqual(got, outcome, name);
+      assert.equal(calls.length, 1, name);
+      assert.ok(!JSON.stringify(got).includes(PROOF), name);
+    }
+  }
+  // The retry wait: the shared parser's bounds (1..300 s); a 429 without a valid one is undecided, never a wait.
+  assert.deepEqual(await cnIssue(scripted(refused(429, 'rate_limited', { 'retry-after': '9999' })).client), refusal(429, 'rate_limited', false, false, 300));
+});
+
+test('IIC-56. CN-P2: the proof counts ONLY as an exact 200 naming the registration, attempt and invoice asked with a 64 lowercase-hex proof (never printed); any other 2xx is malformed; refusals are kept whole like the commands\'', async () => {
+  const prf = (r: Response | Error) => scripted(r).client.creditNoteProof(STORE, INVOICE, REG, ATTEMPT, CSRF);
+  const got = await prf(json(200, proofBody()));
+  assert.ok(got.kind === 'proof' && got.proof === PROOF, 'the proof accepted');
+  for (const [name, r] of [
+    ['registration', json(200, proofBody({ id: uuid(9) }))], ['attempt', json(200, proofBody({ attemptId: uuid(9) }))], ['invoice', json(200, proofBody({ invoiceId: uuid(9) }))],
+    ['upper', json(200, proofBody({}, PROOF.toUpperCase()))], ['short', json(200, proofBody({}, PROOF.slice(2)))], ['state', json(200, proofBody({ state: 'open' }))],
+    ['extra', json(200, { ...proofBody(), x: 1 })], ['201', json(201, proofBody())],
+  ] as Array<[string, Response]>) {
+    const answer = await prf(r);
+    assert.ok(answer.kind === 'malformed', `proof ${name}`);
+  }
+  for (const [reply, outcome] of [
+    [refused(404, 'not_found'), refusal(404, 'not_found', false)], [refused(403, 'forbidden'), refusal(403, 'forbidden', false)], [refused(401, 'unauthenticated'), refusal(401, 'unauthenticated', false)],
+    [refused(400, 'invalid_request'), refusal(400, 'invalid_request', false)], [refused(429, 'rate_limited', { 'retry-after': '3' }), refusal(429, 'rate_limited', false, false, 3)],
+    [refused(503, 'service_unavailable'), refusal(503, 'service_unavailable', false)], [sealed(404, 'not_found'), { kind: 'unknown', responded: true }], [network(), { kind: 'unknown', responded: false }],
+  ] as Array<[Response | Error, unknown]>) { const name = await rowName(reply); assert.deepEqual(await prf(reply), outcome, name); }
+});
+
+test('IIC-57. CN-P2: the attempts lookup counts ONLY exactly — state, version, settlement time and credit note agree (open 1, issued 2, released/confirmed 3), times in order, known reason, ordered by (registeredAt, invoiceId, attemptId), ≤ 50, the cursor only behind a full page; a malformed page is its own kind (lookupFailed), a 400 to a cursor bad-cursor, refusals each by status and word', async () => {
+  const page = (attempts: unknown[], nextCursor: string | null = null) => json(200, { attempts, nextCursor });
+  const read = async (reply: Response | Error, after: string | null = null) => scripted(reply).client.creditNoteAttempts(STORE, after, CSRF);
+  const note = (issuedAt: string, withdrawnAt: string | null = null) => ({ id: CN_ID, issuedAt, withdrawnAt });
+  const rows = [cnAttempt(1), cnAttempt(2, { state: 'issued', version: 2, creditNote: note(at(3)) }), cnAttempt(4, { state: 'released', version: 3, settledAt: at(5) }),
+    cnAttempt(6, { state: 'confirmed', version: 3, settledAt: at(8), creditNote: note(at(7), at(9)) })];
+  const ok = await read(page(rows));
+  assert.ok(ok.kind === 'ok' && ok.nextCursor === null, 'a page');
+  if (ok.kind === 'ok') {
+    assert.deepEqual(ok.attempts.map((a) => [a.state, a.version, a.creditNote?.withdrawnAt ?? null, a.grossCents, a.reason]),
+      [['open', 1, null, 1250, 'goodwill'], ['issued', 2, null, 1250, 'goodwill'], ['released', 3, null, 1250, 'goodwill'], ['confirmed', 3, at(9), 1250, 'goodwill']]);
+    assert.ok(Object.isFrozen(ok.attempts) && Object.isFrozen(ok.attempts[1].creditNote), 'Object.isFrozen(ok.attempts) && Object.isFrozen(ok.attempts[1].creditN');
+  }
+  const full = Array.from({ length: 50 }, (_, i) => cnAttempt(i + 1));
+  assert.equal((await read(page(full, `${INVOICE}.${uuid(0xb000 + 50)}`))).kind, 'ok');
+  for (const [name, reply] of [
+    ['open version 2', page([cnAttempt(1, { version: 2 })])], ['issued without note', page([cnAttempt(1, { state: 'issued', version: 2 })])], ['open with note', page([cnAttempt(1, { creditNote: note(at(2)) })])],
+    ['released with note', page([cnAttempt(1, { state: 'released', version: 3, settledAt: at(2), creditNote: note(at(2)) })])], ['confirmed without time', page([cnAttempt(1, { state: 'confirmed', version: 3, creditNote: note(at(2)) })])],
+    ['open with time', page([cnAttempt(1, { settledAt: at(2) })])], ['settled before registered', page([cnAttempt(5, { state: 'released', version: 3, settledAt: at(1) })])],
+    ['issued before registered', page([cnAttempt(5, { state: 'issued', version: 2, creditNote: note(at(1)) })])], ['confirmed before issued', page([cnAttempt(1, { state: 'confirmed', version: 3, settledAt: at(2), creditNote: note(at(3)) })])],
+    ['withdrawn before issued', page([cnAttempt(1, { state: 'issued', version: 2, creditNote: note(at(3), at(2)) })])], ['note extra key', page([cnAttempt(1, { state: 'issued', version: 2, creditNote: { ...note(at(2)), number: 1 } })])],
+    ['registration id', page([cnAttempt(1, { registrationId: REG })])], ['payment key', page([cnAttempt(1, { payment: null })])], ['reason', page([cnAttempt(1, { reason: 'other' })])],
+    ['amount 0', page([cnAttempt(1, { grossCents: 0 })])], ['state withdrawn', page([cnAttempt(1, { state: 'withdrawn', version: 3, settledAt: at(2) })])], ['number', page([cnAttempt(1, { invoiceNumber: 0 })])],
+    ['order', page([cnAttempt(2), cnAttempt(1)])], ['twice', page([cnAttempt(1), cnAttempt(1)])], ['51', page([...full, cnAttempt(51)])],
+    ['cursor short page', page([cnAttempt(1)], `${INVOICE}.${uuid(0xb001)}`)], ['cursor other row', page(full, `${INVOICE}.${uuid(0xb001)}`)], ['extra', json(200, { attempts: [], nextCursor: null, x: 1 })],
+    ['204', new Response(null, { status: 204 })],
+  ] as Array<[string, Response]>) assert.deepEqual(await read(reply), { kind: 'malformed' }, name);
+  assert.deepEqual(await read(page([cnAttempt(1)]), `${INVOICE}.${uuid(0xb001)}`), { kind: 'malformed' }, 'the cursor\'s own row again');
+  for (const [reply, after, outcome] of [
+    [refused(400, 'invalid_request'), `${INVOICE}.${ATTEMPT}`, { kind: 'bad-cursor' }], [refused(400, 'invalid_request'), null, { kind: 'unavailable' }], [sealed(400, 'invalid_request'), `${INVOICE}.${ATTEMPT}`, { kind: 'unavailable' }],
+    [refused(403, 'forbidden'), null, { kind: 'denied' }], [refused(401, 'unauthenticated'), null, { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '5' }), null, { kind: 'rate-limited', retryAfterSeconds: 5 }],
+    [refused(429, 'rate_limited'), null, { kind: 'unavailable' }],
+    [refused(503, 'service_unavailable'), null, { kind: 'unavailable' }], [network(), null, { kind: 'unavailable' }],
+  ] as Array<[Response | Error, string | null, unknown]>) { const name = await rowName(reply); assert.deepEqual(await read(reply, after), outcome, name); }
+});
+
+test('IIC-58. CN-P2: the list counts ONLY exactly — the invoice asked, gross = tax + net (checked, never kept), known reasons, a withdrawal not before the issue, names present on every item or none (mixed is malformed), a name ≤ 1,000 units with no control character, numbers and ids distinct, (issuedAt, id) ascending, ≤ 50, the cursor only behind a full page naming its last id; 404, a 400 to a cursor and the refusals each their own kind', async () => {
+  const read = async (reply: Response | Error, after: string | null = null) => scripted(reply).client.listCreditNotes(STORE, INVOICE, after, CSRF);
+  const withdrawal = (over: Record<string, unknown> = {}) => ({ withdrawnAt: at(30), reason: 'wrong_amount', ...over });
+  const plain = await read(notesPage([cnNote(1), cnNote(2, { withdrawal: withdrawal() })]));
+  assert.ok(plain.kind === 'ok', 'an unnamed page');
+  if (plain.kind === 'ok') {
+    assert.equal(plain.page.named, false);
+    assert.deepEqual(plain.page.creditNotes, [
+      { id: uuid(0xd001), number: 1, grossCents: 1250, reason: 'pricing_error', issuedAt: at(1), withdrawal: null },
+      { id: uuid(0xd002), number: 2, grossCents: 1250, reason: 'pricing_error', issuedAt: at(2), withdrawal: { withdrawnAt: at(30), reason: 'wrong_amount' } },
+    ]);
+    assert.ok(!('issuedByName' in plain.page.creditNotes[0]) && !('taxCents' in plain.page.creditNotes[0]) && !('netCents' in plain.page.creditNotes[0]), 'absent names; tax and net not kept');
+  }
+  const owner = await read(notesPage([named(1, { issuedByName: null }), named(2, { withdrawal: withdrawal({ withdrawnByName: 'Owner Two' }) })]));
+  assert.ok(owner.kind === 'ok' && owner.page.named === true, 'a named page');
+  if (owner.kind === 'ok') {
+    assert.equal(owner.page.creditNotes[0].issuedByName, null);
+    assert.deepEqual(owner.page.creditNotes[1].withdrawal, { withdrawnAt: at(30), reason: 'wrong_amount', withdrawnByName: 'Owner Two' });
+  }
+  const empty = await read(notesPage([]));
+  assert.ok(empty.kind === 'ok' && empty.page.named === null && empty.page.creditNotes.length === 0 && empty.page.nextCursor === null, 'an empty page decides no view');
+  const full = Array.from({ length: 50 }, (_, i) => cnNote(i + 1));
+  const last = uuid(0xd000 + 50);
+  const paged = await read(notesPage(full, last));
+  assert.ok(paged.kind === 'ok' && paged.page.nextCursor === last, 'a full page with its cursor');
+  assert.equal((await read(notesPage([named(1, { issuedByName: 'x'.repeat(1000) })]))).kind, 'ok');
+  for (const [name, reply] of [
+    ['mixed names', notesPage([named(1), cnNote(2)])], ['mixed names reversed', notesPage([cnNote(1), named(2)])], ['named withdrawal without its name', notesPage([named(1, { withdrawal: withdrawal() })])],
+    ['unnamed withdrawal with a name', notesPage([cnNote(1, { withdrawal: withdrawal({ withdrawnByName: null }) })])], ['name too long', notesPage([named(1, { issuedByName: 'x'.repeat(1001) })])],
+    ['name control', notesPage([named(1, { issuedByName: `Ada${unit(0x0a)}` })])], ['name U+2028', notesPage([named(1, { issuedByName: `Ada${unit(0x2028)}` })])], ['name number', notesPage([named(1, { issuedByName: 7 })])],
+    ['tax over gross', notesPage([cnNote(1, { taxCents: 1251, netCents: 0 })])], ['net not gross minus tax', notesPage([cnNote(1, { netCents: 1151 })])], ['tax missing', notesPage([{ ...cnNote(1), taxCents: undefined }])],
+    ['negative tax', notesPage([cnNote(1, { taxCents: -1, netCents: 1251 })])], ['number 0', notesPage([cnNote(1, { number: 0 })])], ['gross 0', notesPage([cnNote(1, { grossCents: 0, taxCents: 0, netCents: 0 })])],
+    ['reason', notesPage([cnNote(1, { reason: 'other' })])], ['withdrawal reason', notesPage([cnNote(1, { withdrawal: withdrawal({ reason: 'goodwill' }) })])],
+    ['withdrawn before issued', notesPage([cnNote(5, { withdrawal: withdrawal({ withdrawnAt: at(4) }) })])], ['status key', notesPage([cnNote(1, { status: 'active' })])],
+    ['number twice', notesPage([cnNote(1), cnNote(2, { number: 1 })])], ['order', notesPage([cnNote(2), cnNote(1)])], ['twice', notesPage([cnNote(1), cnNote(1)])], ['51', notesPage([...full, cnNote(51)])],
+    ['cursor short page', notesPage([cnNote(1)], uuid(0xd001))], ['cursor not last', notesPage(full, uuid(0xd001))], ['empty with cursor', notesPage([], uuid(0xd001))],
+    ['other invoice', notesPage([cnNote(1)], null, { id: uuid(9) })], ['invoice extra', notesPage([cnNote(1)], null, { id: INVOICE, status: 'issued' })], ['extra', json(200, { invoice: { id: INVOICE }, creditNotes: [], nextCursor: null, namesVisible: true })],
+    ['201', json(201, { invoice: { id: INVOICE }, creditNotes: [], nextCursor: null })],
+  ] as Array<[string, Response]>) assert.deepEqual(await read(reply), { kind: 'malformed' }, name);
+  assert.deepEqual(await read(notesPage([cnNote(1)]), uuid(0xd001)), { kind: 'malformed' }, 'the cursor\'s own note again');
+  for (const [reply, after, outcome] of [
+    [refused(404, 'not_found'), null, { kind: 'not-found' }], [sealed(404, 'not_found'), null, { kind: 'unavailable' }], [refused(400, 'invalid_request'), CN_ID, { kind: 'bad-cursor' }],
+    [refused(400, 'invalid_request'), null, { kind: 'unavailable' }], [refused(403, 'forbidden'), null, { kind: 'denied' }], [refused(401, 'unauthenticated'), null, { kind: 'signed-out' }],
+    [refused(429, 'rate_limited', { 'retry-after': '2' }), null, { kind: 'rate-limited', retryAfterSeconds: 2 }], [refused(429, 'rate_limited', { 'retry-after': 'x' }), null, { kind: 'unavailable' }], [refused(503, 'service_unavailable'), null, { kind: 'unavailable' }], [network(), null, { kind: 'unavailable' }],
+  ] as Array<[Response | Error, string | null, unknown]>) { const name = await rowName(reply); assert.deepEqual(await read(reply, after), outcome, name); }
+});
+
+test('IIC-59. CN-P2: across pages — a list page joins a chain only in the same view (a changed view says so, an empty page decides none) and strictly after its last note; a lookup page only strictly after its last row', async () => {
+  const pageOf = async (notes: unknown[], nextCursor: string | null = null) => {
+    const r = await scripted(notesPage(notes, nextCursor)).client.listCreditNotes(STORE, INVOICE, null, CSRF);
+    assert.equal(r.kind, 'ok');
+    return r.kind === 'ok' ? r.page : (undefined as never);
+  };
+  const first = await pageOf([cnNote(1), cnNote(2)]);
+  assert.equal(creditNotesFollow(null, [], first), 'follows');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([cnNote(3)])), 'follows');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([named(3)])), 'view-changed');
+  assert.equal(creditNotesFollow(true, first.creditNotes, await pageOf([cnNote(3)])), 'view-changed');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([])), 'follows');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([cnNote(2)])), 'broken');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([cnNote(1, { issuedAt: at(2), id: uuid(0xd000) })])), 'broken');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([cnNote(1, { issuedAt: at(9) })])), 'broken', 'a loaded id again, later');
+  assert.equal(creditNotesFollow(false, first.creditNotes, await pageOf([cnNote(3), cnNote(9, { number: 2 })])), 'broken', 'a loaded number again');
+  const attemptsOf = async (rows: unknown[]) => {
+    const r = await scripted(json(200, { attempts: rows, nextCursor: null })).client.creditNoteAttempts(STORE, null, CSRF);
+    return r.kind === 'ok' ? r.attempts : (assert.fail('a page') as never);
+  };
+  const a = await attemptsOf([cnAttempt(1), cnAttempt(2)]);
+  assert.equal(creditNoteAttemptsFollow(a, await attemptsOf([cnAttempt(3)])), true);
+  assert.equal(creditNoteAttemptsFollow(a, await attemptsOf([])), true);
+  assert.equal(creditNoteAttemptsFollow([], a), true);
+  assert.equal(creditNoteAttemptsFollow(a, await attemptsOf([cnAttempt(2)])), false);
+  assert.equal(creditNoteAttemptsFollow(a, await attemptsOf([cnAttempt(1)])), false);
+  assert.equal(creditNoteAttemptsFollow(a, await attemptsOf([cnAttempt(3), cnAttempt(1, { registeredAt: at(9) })])), false, 'a loaded pair again, later');
+});
+
+test('IIC-60. CN-P2 (doc 17 §2.6 item 4): evidenceOf — stored: an exact success or any sealed 409, in either column; unstored only for a first send while no Check again was sent (401, 403 step-up or forbidden, 400, 404, the chain\'s 409 write_conflict, a 429); fail closed: a malformed 2xx or a first send\'s 422 while no Check again was sent; everything else (413/415 included) provisional. The proof decides no issue: open, neutral (404) or provisional; malformed fails closed', async () => {
+  const FIRST = { firstSend: true, replaySent: false };
+  const FIRST_AFTER_REPLAY = { firstSend: true, replaySent: true };
+  const REPLAY = { firstSend: false, replaySent: true };
+  const r = (status: number, error: string, sealedShape: boolean): CreditNoteCommandResult => refusal(status, error, sealedShape) as CreditNoteCommandResult;
+  const table: Array<[string, CreditNoteCommandResult, [string, string, string]]> = [
+    ['registered', { kind: 'registered', registrationId: REG, replayed: false }, ['stored', 'stored', 'stored']],
+    ['issued replayed', { kind: 'issued', creditNoteId: CN_ID, replayed: true }, ['stored', 'stored', 'stored']],
+    ['settled', { kind: 'settled', state: 'confirmed', replayed: false }, ['stored', 'stored', 'stored']],
+    ['sealed write_conflict', r(409, 'write_conflict', true), ['stored', 'stored', 'stored']],
+    ['sealed amount_exceeds_remaining', r(409, 'amount_exceeds_remaining', true), ['stored', 'stored', 'stored']],
+    ['sealed already_issued', r(409, 'already_issued', true), ['stored', 'stored', 'stored']],
+    ['chain write_conflict', r(409, 'write_conflict', false), ['unstored', 'provisional', 'provisional']],
+    ['request_in_progress', r(409, 'request_in_progress', false), ['provisional', 'provisional', 'provisional']],
+    ['step_up_required', r(403, 'step_up_required', false), ['unstored', 'provisional', 'provisional']],
+    ['forbidden', r(403, 'forbidden', false), ['unstored', 'provisional', 'provisional']],
+    ['401', r(401, 'unauthenticated', false), ['unstored', 'provisional', 'provisional']],
+    ['400', r(400, 'invalid_request', false), ['unstored', 'provisional', 'provisional']],
+    ['413', r(413, 'content_too_large', false), ['provisional', 'provisional', 'provisional']],
+    ['415', r(415, 'unsupported_media_type', false), ['provisional', 'provisional', 'provisional']],
+    ['404', r(404, 'not_found', false), ['unstored', 'provisional', 'provisional']],
+    ['429', r(429, 'rate_limited', false), ['unstored', 'provisional', 'provisional']],
+    ['422', r(422, 'idempotency_key_reused', false), ['fail-closed', 'provisional', 'provisional']],
+    ['503', r(503, 'service_unavailable', false), ['provisional', 'provisional', 'provisional']],
+    ['malformed', { kind: 'malformed' }, ['fail-closed', 'fail-closed', 'fail-closed']],
+    ['unknown responded', { kind: 'unknown', responded: true }, ['provisional', 'provisional', 'provisional']],
+    ['no answer', { kind: 'unknown', responded: false }, ['provisional', 'provisional', 'provisional']],
+    ['not-sent', { kind: 'not-sent' }, ['unstored', 'provisional', 'provisional']],
+  ];
+  for (const [name, result, [first, firstAfterReplay, replay]] of table) {
+    assert.deepEqual([evidenceOf(result, FIRST), evidenceOf(result, FIRST_AFTER_REPLAY), evidenceOf(result, REPLAY)], [first, firstAfterReplay, replay], name);
+  }
+  // Through the client: the decoded answer is what evidenceOf reads.
+  assert.equal(evidenceOf(await cnIssue(scripted(json(201, cnIssued({ number: 1 }))).client), FIRST), 'fail-closed');
+  assert.equal(evidenceOf(await cnSettle(2)(scripted(json(200, cnSettled('confirmed'), { 'idempotent-replayed': 'true' })).client), REPLAY), 'stored');
+  assert.equal(evidenceOf(await cnRegister(scripted(sealed(404, 'not_found')).client), FIRST), 'provisional');
+  assert.equal(evidenceOf(await cnIssue(scripted(new Response('busy', { status: 422 })).client), FIRST), 'fail-closed', 'a 422 in no envelope');
+  assert.equal(evidenceOf(await cnIssue(scripted(refused(429, 'rate_limited')).client), FIRST), 'provisional', 'a 429 naming no wait');
+  const proof = (reply: Response | Error) => scripted(reply).client.creditNoteProof(STORE, INVOICE, REG, ATTEMPT, CSRF);
+  assert.equal(proofEvidenceOf(await proof(json(200, proofBody()))), 'open');
+  assert.equal(proofEvidenceOf(await proof(refused(404, 'not_found'))), 'neutral');
+  assert.equal(proofEvidenceOf(await proof(json(200, proofBody({ id: uuid(9) })))), 'fail-closed');
+  for (const reply of [refused(403, 'forbidden'), refused(401, 'unauthenticated'), refused(503, 'service_unavailable'), refused(429, 'rate_limited'), sealed(404, 'not_found'), network()]) {
+    const name = await rowName(reply);
+    assert.equal(proofEvidenceOf(await proof(reply)), 'provisional', name);
+  }
+});
+
+// ---- doc 18: the store-wide credit activity (shop slice; AUTHORED, NOT RUN) ----
+const activityNote = (n: number, over: Record<string, unknown> = {}) => ({
+  id: uuid(0xe000 + n), number: n, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1250, reason: 'pricing_error', issuedAt: at(100 - n), issuedByName: 'Owner One',
+  withdrawal: null as unknown, ...over,
+});
+const activityPage = (creditNotes: unknown[], nextCursor: string | null = null, store: unknown = { id: STORE }) => json(200, { store, creditNotes, nextCursor });
+
+test('IIC-CA-24. doc 18 §5.1: the activity path is the server\'s template filled in (no invoice segment); ONE GET with the session token alone and the shared options, no body, query none or exactly after=<id>; a local grammar failure sends nothing', async () => {
+  assert.equal(storeCreditActivityPathOf(STORE), `/api/v1/stores/${STORE}/credit-notes`);
+  assert.equal(storeCreditActivityPathOf(STORE), STORE_CREDIT_ACTIVITY_PATH.replace('{storeId}', STORE));
+  const no = () => refused(503, 'service_unavailable');
+  const { calls, client } = scripted(no(), no());
+  await client.storeCreditActivity(STORE, null, CSRF);
+  await client.storeCreditActivity(STORE, CN_ID, CSRF);
+  assert.deepEqual(calls.map((c) => `${c.init.method} ${c.url}`), [`GET /api/v1/stores/${STORE}/credit-notes`, `GET /api/v1/stores/${STORE}/credit-notes?after=${CN_ID}`]);
+  for (const call of calls) {
+    assert.ok(call.init.credentials === 'include' && call.init.mode === 'same-origin' && call.init.cache === 'no-store' && call.init.redirect === 'error' && call.init.referrerPolicy === 'no-referrer');
+    assert.equal(JSON.stringify([...headersOf(call).entries()]), JSON.stringify([['accept', 'application/json'], ['x-tmpos-session-csrf', CSRF]]));
+    assert.equal(call.init.body, undefined);
+  }
+  const quiet = scripted();
+  assert.deepEqual(await quiet.client.storeCreditActivity('x', null, CSRF), { kind: 'unavailable' }, 'never `denied`, which reads as a loss of access');
+  for (const after of ['', 'x', CN_ID.toUpperCase(), `${CN_ID}&limit=1`]) assert.deepEqual(await quiet.client.storeCreditActivity(STORE, after, CSRF), { kind: 'bad-cursor' }, after);
+  assert.equal(quiet.calls.length, 0);
+});
+
+test('IIC-CA-20. doc 18 §4.4 (CA-11, CA-12, CA-20): a page counts ONLY exactly — the store asked, exact keys, positive numbers, gross 1..2^53-1, known reasons, names always present (a string ≤ 1,000 units with no control character, or null), a withdrawal not before the issue, ≤ 50 notes, numbers strictly descending, ids distinct and never the cursor, the cursor only behind a full page naming its last id; the refusals each their own kind', async () => {
+  const read = async (reply: Response | Error, after: string | null = null) => scripted(reply).client.storeCreditActivity(STORE, after, CSRF);
+  const withdrawal = (over: Record<string, unknown> = {}) => ({ withdrawnAt: at(99), reason: 'wrong_amount', withdrawnByName: null, ...over });
+  const two = await read(activityPage([activityNote(2, { issuedByName: null }), activityNote(1, { withdrawal: withdrawal() })]));
+  assert.deepEqual(two, { kind: 'ok', page: { storeId: STORE, nextCursor: null, creditNotes: [
+    { id: uuid(0xe002), number: 2, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1250, reason: 'pricing_error', issuedAt: at(98), issuedByName: null, withdrawal: null },
+    { id: uuid(0xe001), number: 1, invoiceId: INVOICE, invoiceNumber: 7, grossCents: 1250, reason: 'pricing_error', issuedAt: at(99), issuedByName: 'Owner One', withdrawal: { withdrawnAt: at(99), reason: 'wrong_amount', withdrawnByName: null } },
+  ] } });
+  assert.deepEqual(await read(activityPage([])), { kind: 'ok', page: { storeId: STORE, creditNotes: [], nextCursor: null } });
+  const full = Array.from({ length: 50 }, (_, i) => activityNote(60 - i));
+  const paged = await read(activityPage(full, uuid(0xe000 + 11)));
+  assert.ok(paged.kind === 'ok' && paged.page.nextCursor === uuid(0xe000 + 11), 'a full page with its last id as the cursor');
+  assert.equal((await read(activityPage([activityNote(1, { issuedByName: 'x'.repeat(CREDIT_NOTE_NAME_MAX_LENGTH), grossCents: Number.MAX_SAFE_INTEGER })]))).kind, 'ok');
+  for (const [name, reply] of [
+    ['other store', activityPage([activityNote(1)], null, { id: OTHER_STORE })], ['store extra', activityPage([], null, { id: STORE, tenantId: TENANT })], ['top extra', json(200, { store: { id: STORE }, creditNotes: [], nextCursor: null, x: 1 })],
+    ['top missing', json(200, { store: { id: STORE }, creditNotes: [] })], ['name missing', activityPage([{ ...activityNote(1), issuedByName: undefined }])],
+    ['tax key', activityPage([activityNote(1, { taxCents: 0 })])], ['name too long', activityPage([activityNote(1, { issuedByName: 'x'.repeat(1001) })])],
+    ['name control', activityPage([activityNote(1, { issuedByName: `Ada${unit(0x07)}` })])], ['name U+2028', activityPage([activityNote(1, { issuedByName: `Ada${unit(0x2028)}` })])],
+    ['withdrawn name too long', activityPage([activityNote(1, { withdrawal: withdrawal({ withdrawnByName: 'x'.repeat(1001) }) })])], ['withdrawal name missing', activityPage([activityNote(1, { withdrawal: { withdrawnAt: at(99), reason: 'wrong_amount' } })])],
+    ['withdrawn before issued', activityPage([activityNote(1, { withdrawal: withdrawal({ withdrawnAt: at(1) }) })])], ['withdrawal reason', activityPage([activityNote(1, { withdrawal: withdrawal({ reason: 'goodwill' }) })])],
+    ['reason', activityPage([activityNote(1, { reason: 'other' })])], ['number 0', activityPage([activityNote(1, { number: 0 })])], ['invoice number 0', activityPage([activityNote(1, { invoiceNumber: 0 })])],
+    ['gross 0', activityPage([activityNote(1, { grossCents: 0 })])], ['gross over 2^53-1', activityPage([activityNote(1, { grossCents: Number.MAX_SAFE_INTEGER + 1 })])], ['gross fraction', activityPage([activityNote(1, { grossCents: 1.5 })])],
+    ['invoice id', activityPage([activityNote(1, { invoiceId: 'x' })])], ['ascending', activityPage([activityNote(1), activityNote(2)])], ['equal numbers', activityPage([activityNote(2), activityNote(2, { id: uuid(0xe0ff) })])],
+    ['twice', activityPage([activityNote(2), activityNote(1, { id: uuid(0xe002) })])], ['51', activityPage([...full, activityNote(10)])],
+    ['cursor short page', activityPage([activityNote(1)], uuid(0xe001))], ['cursor not last', activityPage(full, uuid(0xe000 + 60))], ['empty with cursor', activityPage([], uuid(0xe001))],
+    ['201', json(201, { store: { id: STORE }, creditNotes: [], nextCursor: null })], ['text', new Response('ok', { status: 200 })],
+  ] as Array<[string, Response]>) assert.deepEqual(await read(reply), { kind: 'malformed' }, name);
+  assert.deepEqual(await read(activityPage([activityNote(1)]), uuid(0xe001)), { kind: 'malformed' }, 'the cursor\'s own note again');
+  for (const [reply, after, outcome] of [
+    [refused(404, 'not_found'), null, { kind: 'not-found' }], [sealed(404, 'not_found'), null, { kind: 'unavailable' }], [refused(400, 'invalid_request'), CN_ID, { kind: 'bad-cursor' }],
+    [refused(400, 'invalid_request'), null, { kind: 'unavailable' }], [refused(403, 'forbidden'), null, { kind: 'denied' }], [refused(401, 'unauthenticated'), null, { kind: 'signed-out' }],
+    [refused(429, 'rate_limited', { 'retry-after': '2' }), null, { kind: 'rate-limited', retryAfterSeconds: 2 }], [refused(429, 'rate_limited'), null, { kind: 'unavailable' }],
+    [refused(503, 'service_unavailable'), null, { kind: 'unavailable' }], [refused(500, 'internal_error'), null, { kind: 'unavailable' }], [network(), null, { kind: 'unavailable' }],
+  ] as Array<[Response | Error, string | null, unknown]>) { const name = await rowName(reply); assert.deepEqual(await read(reply, after), outcome, name); }
+});
+
+test('IIC-CA-07. doc 18 §4.4 across pages: a page joins the loaded traversal only when every id is new and its first number is below the last loaded one; an empty page joins nothing', async () => {
+  const pageOf = async (notes: unknown[], nextCursor: string | null = null) => {
+    const r = await scripted(activityPage(notes, nextCursor)).client.storeCreditActivity(STORE, null, CSRF);
+    return r.kind === 'ok' ? r.page : (assert.fail('a page') as never);
+  };
+  const first = await pageOf([activityNote(9), activityNote(8)]);
+  assert.equal(storeCreditActivityFollows([], first), true);
+  assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(7), activityNote(1)])), true);
+  assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([])), true);
+  assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(8)])), false, 'a loaded number: not strictly descending');
+  assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(10)])), false, 'a higher number: re-sorted chains never join');
+  assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(7, { id: uuid(0xe009) })])), false, 'a loaded id again');
 });
