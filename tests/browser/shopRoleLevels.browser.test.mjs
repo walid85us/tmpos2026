@@ -12739,8 +12739,8 @@ async function ageSessionOf(page) {
  * moved `ms` ahead; 0 puts it back. Only the shop's own stamp ages: the server and the identity provider keep real time.
  */
 const shiftWallClock = (page, ms) => page.evaluate(`(() => { window.__cnRealNow ??= Date.now; Date.now = ${ms} === 0 ? window.__cnRealNow : () => window.__cnRealNow() + ${ms}; return true; })()`);
-/** A page's buttons whose name says credit or withdraw and is not one of the three allowed names (DIS-16): none. */
-const creditNamedOutside = (page) => page.evaluate(`[...document.querySelectorAll('button')].map((b) => b.textContent.trim()).filter((t) => /credit|withdraw/i.test(t) && !${JSON.stringify(CN_BUTTONS)}.includes(t))`);
+/** A page's buttons whose name says credit or withdraw and is not one of the three allowed names (DIS-16): none. CN-P3: the owner's row action is the one exception. */
+const creditNamedOutside = (page) => page.evaluate(`[...document.querySelectorAll('button:not([data-testid="issued-payments-cn-withdraw"])')].map((b) => b.textContent.trim()).filter((t) => /credit|withdraw/i.test(t) && !${JSON.stringify(CN_BUTTONS)}.includes(t))`);
 /** Every credit-note control's and card's text on the page (the issue side and the list): CN-27b's and P2-60's scan surface. */
 const creditWordsOf = (page) => page.evaluate(`[...document.querySelectorAll('[data-testid^="issued-payments-credit"], [data-testid^="issued-credit"]')].map((n) => n.innerText ?? n.textContent).join('\\n')`);
 
@@ -12900,7 +12900,7 @@ scenario('SCN-08', 'M7B-CREDITNOTES CN-P2 P2-01 P2-08 P2-10 P2-11 P2-12 P2-15 P2
   assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'the register, issue and settle audits, once each');
 
   // P2-60 CN-27b: the wording scans.
-  const words = await creditWordsOf(page);
+  const words = (await creditWordsOf(page)).replaceAll('Withdraw credit note…', ''); // CN-P3: the owner's row action on the active CN-1
   assert.ok(!/\b(paid|unpaid|refunded|refund)\b/i.test(words) && !/withdraw/i.test(words), `CN-27b P2-60: no credit-note text says paid, unpaid, refunded, refund or withdraw (${words.match(/\b(paid|unpaid|refunded|refund)\b|withdraw/i)?.[0]})`);
   assert.deepEqual(await creditNamedOutside(page), [], 'P2-60: no button names credit or withdraw beyond the three allowed');
   await assertNoLeak(page);

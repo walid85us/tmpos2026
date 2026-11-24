@@ -91,7 +91,11 @@ import {
   INVOICE_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, creditNoteAttemptsFollow, creditNotesFollow, type CreditNoteAttempt, type InvoiceCreditNote,
   creditNoteIssueBodyOf, creditNoteRegisterBodyOf, type CreditNoteCommandResult, type CreditNoteProofResult, type InvoiceCreditNoteReason,
   storeCreditActivityFollows, type StoreCreditNote,
+  creditNoteWithdrawBodyOf, type InvoiceCreditNoteWithdrawalReason, type WithdrawCreditNoteResult,
 } from './invoiceIssuingClient';
+import {
+  isLiveWithdrawal, seeWithdrawal, settleWithdrawal, withdrawalHolds as shopWithdrawalHolds, type HeldWithdrawal, type WithdrawalHoldStore,
+} from './invoiceCreditNoteWithdrawalHold';
 import {
   CREDIT_NOTE_FIRST_SEND_MS, CREDIT_NOTE_REPLAY_MS, CREDIT_NOTE_SETTLE_REPLAY_MS, CREDIT_NOTE_STAGE_WAIT_MS, creditNoteElapsed, creditNoteHolds as shopCreditNoteHolds,
   isLiveCreditNote, isOpenCreditNote, replayWindowOpen, sendBlockOf, signInFresh,
@@ -674,6 +678,59 @@ export const REVERSE_TEXT = Object.freeze({
   coolDown: 'The server is busy: Retry reversal comes back in a moment.',
 });
 
+/**
+ * The shop's credit-note withdrawal (M7B-CREDITNOTES-CN-P3): the store owner withdraws a whole active credit note. It
+ * returns no money. Its own block: CREDIT_TEXT (CN-P2) is unchanged.
+ */
+export const WITHDRAW_TEXT = Object.freeze({
+  open: 'Withdraw credit note…',
+  forNote: (n: number, amount: string) => `CN-${n}, ${amount}`,
+  reviewing: 'Checking this credit note…',
+  voided: 'This invoice was voided.',
+  gone: 'This invoice is no longer available.',
+  missing: 'This credit note is no longer listed for this invoice.',
+  alreadyWithdrawn: 'This credit note is already withdrawn.',
+  unconfirmed: "This credit note couldn't be checked right now. Try again.",
+  title: 'Withdraw this credit note?',
+  consequence: 'The whole credit note will be withdrawn. No money will be returned.',
+  keep: 'Keep credit note',
+  close: 'Close',
+  reasonLegend: 'Reason (required)',
+  reasons: Object.freeze({ entered_in_error: 'Entered in error', wrong_amount: 'Wrong amount', wrong_invoice: 'Wrong invoice' }),
+  chooseReason: 'Choose a reason first.',
+  send: 'Withdraw credit note',
+  sending: 'Withdrawing…',
+  pending: 'Another request is waiting to be confirmed.',
+  otherFirst: 'Another review is open. Close it first, then try again.',
+  signingIn: 'Not sent: a sign-in is in progress.',
+  notSendable: 'Not sent: this store could not be confirmed. Close this and choose the store again.',
+  staleReview: 'Not sent: the session changed after this review. Open it again.',
+  rateLimited: (seconds: number) => `Not withdrawn: too many requests. Wait ${seconds} second${seconds === 1 ? '' : 's'}, then try again.`,
+  denied: 'Not withdrawn: the server refused this request.',
+  notRun: 'Not withdrawn: the server did not accept this request.',
+  stepUp: 'Not withdrawn: confirm your sign-in to withdraw this credit note.',
+  stepUpNoMethod: 'Not withdrawn: your sign-in is too old to withdraw credit notes here.',
+  renewing: 'Signed in again. Checking this credit note…',
+  renewed: 'Signed in again. Choose a reason, then press Withdraw credit note.',
+  withdrawn: 'Credit note withdrawn.',
+  seenWithdrawn: 'This credit note shows as withdrawn now.',
+  cannotNow: "This credit note can't be withdrawn now.",
+  closeWarning: "Closing doesn't cancel the withdrawal. It may still go through.",
+  cardTitle: 'Withdrawal not confirmed',
+  cardSending: 'Withdrawing the credit note…',
+  cardUnresolved: (n: number) => `The withdrawal of CN-${n} was not confirmed. The server may have withdrawn it anyway.`,
+  cardDetached: 'Your session, store or invoice changed before the answer came back, so it was not used. Check the credit note status to see what the server holds.',
+  cardRefusedTitle: 'Withdrawal refused',
+  cardRefused: "Not withdrawn: this credit note can't be withdrawn now.",
+  seenActive: 'This credit note is still active as of this read. The request may still be processed.',
+  seenUnconfirmed: "The credit note couldn't be confirmed right now.",
+  checkDetached: "This check began under an earlier sign-in, so its answer isn't used. Check again.",
+  check: 'Check credit note status',
+  checking: 'Checking the credit note…',
+  dismiss: 'Dismiss',
+  dismissWarning: "Dismissing only stops tracking it here. It doesn't cancel the request.",
+});
+
 /** What a refused void attempt says: this request did not void the invoice — never "rolled back", never another request's outcome. */
 export const VOID_REFUSED_TEXT: Readonly<Record<VoidRefusal, string>> = Object.freeze({
   'already-void': 'Not voided: this invoice is already void.',
@@ -753,6 +810,8 @@ export interface ServerIssuedInvoicesProps {
   readonly reversalHolds?: ReversalHoldStore;
   /** The credit-note hold (default the shop's one, invoiceCreditNoteHold.ts): tests give each rig its own. */
   readonly creditNoteHolds?: CreditNoteHoldStore;
+  /** The credit-note withdrawal hold (default the shop's one, invoiceCreditNoteWithdrawalHold.ts): tests give each rig its own. */
+  readonly withdrawalHolds?: WithdrawalHoldStore;
   /** Handed the section's credit-note reads while mounted (null on unmount): the component tests drive the refresh with it; the shop passes none. */
   readonly creditReads?: (reads: CreditReads | null) => void;
   /**
@@ -782,11 +841,12 @@ export function ServerIssuedInvoices(props: ServerIssuedInvoicesProps) {
   const payHolds = props.paymentHolds ?? shopPaymentHolds;
   const revHolds = props.reversalHolds ?? shopReversalHolds;
   const cnHolds = props.creditNoteHolds ?? shopCreditNoteHolds;
+  const wdHolds = props.withdrawalHolds ?? shopWithdrawalHolds;
   useLayoutEffect(() => {
-    holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); revHolds.detachOthers(props.uid); cnHolds.detachOthers(props.uid);
-  }, [holds, payHolds, revHolds, cnHolds, props.uid]);
+    holds.detachOthers(props.uid); payHolds.detachOthers(props.uid); revHolds.detachOthers(props.uid); cnHolds.detachOthers(props.uid); wdHolds.detachOthers(props.uid);
+  }, [holds, payHolds, revHolds, cnHolds, wdHolds, props.uid]);
   if (props.uid === null) return null;
-  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} reversalHolds={revHolds} creditNoteHolds={cnHolds} />;
+  return <IssuedSection key={props.uid} {...props} uid={props.uid} voidHolds={holds} paymentHolds={payHolds} reversalHolds={revHolds} creditNoteHolds={cnHolds} withdrawalHolds={wdHolds} />;
 }
 
 type Phase = 'idle' | 'loading' | 'ready' | 'denied' | 'signed-out' | 'rate-limited' | 'unavailable';
@@ -875,7 +935,7 @@ function sessionFailure(s: Exclude<SessionResult, { kind: 'ok' }>): Failure {
 
 function IssuedSection({
   uid, session = tenantSession, issuing = issuingClient, drafts = draftsClient, identity = firebaseShopIdentity, now, wallNow, newKey, voidHolds: holds = shopVoidHolds, paymentHolds: payHolds = shopPaymentHolds,
-  reversalHolds: revHolds = shopReversalHolds, creditNoteHolds: cnHolds = shopCreditNoteHolds, creditReads, creditActivity = true,
+  reversalHolds: revHolds = shopReversalHolds, creditNoteHolds: cnHolds = shopCreditNoteHolds, withdrawalHolds: wdHolds = shopWithdrawalHolds, creditReads, creditActivity = true,
 }: ServerIssuedInvoicesProps & { readonly uid: string }) {
   const [open, setOpen] = useState(false);
   const [stores, setStoresState] = useState<StoresState>(STORES_IDLE);
@@ -936,6 +996,13 @@ function IssuedSection({
   const revChecking = useRef<string | null>(null);
   const revReading = useRef<string | null>(null);
   const revFindCtl = useRef<AbortController | null>(null);
+  // The credit-note withdrawal attempt (CN-P3): held in the withdrawal hold for this uid (the reversal's model, no Retry).
+  const wdHeld = useSyncExternalStore(wdHolds.subscribe, () => wdHolds.get(uid));
+  const [wdCheck, setWdCheck] = useState<{ readonly key: string; readonly text: string } | null>(null);
+  const [wdFinding, setWdFinding] = useState<string | null>(null);
+  const wdSending = useRef(false);
+  const wdReading = useRef<string | null>(null);
+  const wdFindCtl = useRef<AbortController | null>(null);
   // The payment attempt (M7B-PAYMENTS-P2B): held in the payment hold for this uid; the lookup the section ran for the open
   // dialog's invoice; a ref that holds every second payment press back while one chain is out (one chain per press).
   const payHeld = useSyncExternalStore(payHolds.subscribe, () => payHolds.get(uid));
@@ -1053,7 +1120,11 @@ function IssuedSection({
     // And an ended credit-note attempt of the closing invoice (CN-P2): an open one stays (its card, its blockers).
     const cn = cnHolds.get(uid);
     if (cn !== undefined && cnEnded(cn) && closing !== null && cn.storeId === closing.storeId && cn.invoiceId === closing.invoiceId) cnHolds.remove(uid, cn.attemptId);
+    // And a settled withdrawal of the closing invoice (CN-P3): an unresolved one stays (its card when it is opened again).
+    const wd = wdHolds.get(uid);
+    if (wd !== undefined && (wd.state === 'withdrawn' || wd.state === 'refused') && closing !== null && wd.storeId === closing.storeId && wd.invoiceId === closing.invoiceId) wdHolds.remove(uid, wd.key);
     revFindCtl.current?.abort();
+    wdFindCtl.current?.abort();
     viewRef.current = null;
     setViewState(null);
   };
@@ -1136,6 +1207,8 @@ function IssuedSection({
     if (r !== undefined && r.csrf !== null && r.csrf !== csrf) detachRev(); // and a reversal attempt (P2C)
     const c = cnHolds.get(uid);
     if (c !== undefined && c.csrf !== null && c.csrf !== csrf) cnHolds.detach(uid); // and a credit-note attempt (doc 17 §3.6 rule 3)
+    const w = wdHolds.get(uid);
+    if (w !== undefined && w.csrf !== null && w.csrf !== csrf) wdHolds.detach(uid); // and a withdrawal attempt (CN-P3)
   }
   /** Detach the reversal attempt for good (token change, sign-out, store switch): one still out is never left sending. */
   function detachRev(): void {
@@ -1315,6 +1388,7 @@ function IssuedSection({
       // R8 (review F3): never a payment on an invoice while a reversal of one of its payments is unresolved.
       const r = revHolds.get(uid);
       if (isLiveReversal(r) && r.storeId === store.id && r.invoiceId === press.invoiceId) return REVERSE_TEXT.pending;
+      if (withdrawingHere(store.id, press.invoiceId)) return REVERSE_TEXT.pending; // nor while a withdrawal on it is unresolved (CN-P3)
       if (h === undefined || !isOpenPayment(h)) return null;
       if (isPaymentHeldElsewhere(h, store.id, press.invoiceId)) return finishOnText(h, store.id);
       if (isBlockingPayment(h) && h.storeId === store.id) return SETTINGS_TEXT.busy;
@@ -1424,7 +1498,7 @@ function IssuedSection({
   async function settleRow(row: PaymentAttempt, version: 1 | 2): Promise<void> {
     const l = lookupRef.current;
     // R8 (fix2 item 3): no attempt on an invoice is settled while a reversal of one of its payments is unresolved.
-    const reversingHere = (storeId: string): boolean => { const r = revHolds.get(uid); return isLiveReversal(r) && r.storeId === storeId && r.invoiceId === row.invoiceId; };
+    const reversingHere = (storeId: string): boolean => { const r = revHolds.get(uid); return (isLiveReversal(r) && r.storeId === storeId && r.invoiceId === row.invoiceId) || withdrawingHere(storeId, row.invoiceId); };
     if (paying.current || waitRef.current || l === null || l.invoiceId !== row.invoiceId || storeRef.current !== l.storeId || reversingHere(l.storeId)) return;
     const store = storesRef.current.stores.find((entry) => entry.id === l.storeId);
     if (store === undefined) return;
@@ -2817,6 +2891,7 @@ function IssuedSection({
     if (payHolds.get(uid)?.storeId !== id) detachPay();
     if (revHolds.get(uid)?.storeId !== id) detachRev(); // the same rule for a reversal attempt (P2C)
     if (cnHolds.get(uid)?.storeId !== id) cnHolds.detach(uid); // and a credit-note attempt (doc 17 §3.6)
+    if (wdHolds.get(uid)?.storeId !== id) wdHolds.detach(uid); // and a withdrawal attempt (CN-P3)
     closeView();
     // The previous store's pages go (a read still out for it is cancelled; its late page finds another store).
     ctl.current.list?.abort();
@@ -3222,7 +3297,7 @@ function IssuedSection({
     const voidedHere = (): boolean => { const h = holds.get(uid); return voidedBy(h) && h.storeId === store.id && h.invoiceId === press.invoiceId; };
     if (voidedHere()) return notSent(VOID_TEXT.alreadyVoided);
     // R8 (review F3): never a void of an invoice while a reversal of one of its payments is unresolved.
-    const reversingHere = (): boolean => { const r = revHolds.get(uid); return isLiveReversal(r) && r.storeId === store.id && r.invoiceId === press.invoiceId; };
+    const reversingHere = (): boolean => { const r = revHolds.get(uid); return (isLiveReversal(r) && r.storeId === store.id && r.invoiceId === press.invoiceId) || withdrawingHere(store.id, press.invoiceId); };
     if (reversingHere()) return notSent(REVERSE_TEXT.pending);
     voidSending.current = true; // a ref: a second activation in the same task sends nothing
     try {
@@ -3490,7 +3565,9 @@ function IssuedSection({
   // ---- reversing a payment (M7B-PAYMENTS-P2C) ----
 
   /** R8: any unresolved record, reversal or void attempt of this user, for any invoice — Reverse shows nowhere then. */
-  const reverseBlockedNow = (): boolean => isLiveVoid(holds.get(uid)) || isLiveReversal(revHolds.get(uid)) || isOpenPayment(payHolds.get(uid));
+  const reverseBlockedNow = (): boolean => isLiveVoid(holds.get(uid)) || isLiveReversal(revHolds.get(uid)) || isOpenPayment(payHolds.get(uid)) || isLiveWithdrawal(wdHolds.get(uid));
+  /** CN-P3: an unresolved withdrawal on this invoice holds back its other writes, as an unresolved reversal does. */
+  function withdrawingHere(storeId: string, invoiceId: string): boolean { const w = wdHolds.get(uid); return isLiveWithdrawal(w) && w.storeId === storeId && w.invoiceId === invoiceId; }
 
   /** The dialog's reversal eligibility (R1): 'allowed' only for the exact allowed; every other answer 'not'. */
   async function readReversalEligibility(viewId: number, storeId: string, invoiceId: string, signal: AbortSignal): Promise<'allowed' | 'not' | null> {
@@ -3697,6 +3774,156 @@ function IssuedSection({
     if (h === undefined || (h.csrf !== null && (h.state === 'sending' || h.state === 'checking')) || revReading.current === h.key) return;
     revHolds.remove(uid, h.key);
     setRevCheck(null);
+  }
+
+  // ---- withdrawing a credit note (M7B-CREDITNOTES-CN-P3; the reversal's model, without Retry) ----
+
+  /**
+   * The exact credit note, read-only: the invoice's list from page one following nextCursor (creditNotesFollow), all under
+   * one generation, store and invoice (`stands`), at most REVERSAL_LOOKUP_PAGE_CAP pages. Found: that row as read; `missing`
+   * only after a complete traversal; anything else `unconfirmed`. Null when the context that asked is gone.
+   */
+  async function findWithdrawalNote(storeId: string, invoiceId: string, creditNoteId: string, stands: () => boolean, signal: AbortSignal): Promise<WithdrawFind | null> {
+    const unconfirmed: WithdrawFind = { kind: 'unconfirmed' };
+    if (waitRef.current) return unconfirmed;
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    const stale = (): boolean => !alive.current || signal.aborted || !stands() || mine !== gen.current.n || since !== sessionEndsSoFar() || storeRef.current !== storeId;
+    const csrf = await payConnect(() => !stale());
+    if (csrf === null) return stale() ? null : unconfirmed;
+    if (adopt(csrf)) return null;
+    let named: boolean | null = null;
+    let notes: readonly InvoiceCreditNote[] = [];
+    let after: string | null = null;
+    for (let n = 0; n < REVERSAL_LOOKUP_PAGE_CAP; n += 1) {
+      const answer = await issuing.listCreditNotes(storeId, invoiceId, after, csrf, signal);
+      if (stale()) return null;
+      if (answer.kind === 'signed-out') { failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended }); return null; }
+      if (answer.kind === 'rate-limited') { startWait(answer.retryAfterSeconds); return unconfirmed; }
+      if (answer.kind !== 'ok' || creditNotesFollow(named, notes, answer.page) !== 'follows') return unconfirmed;
+      const { page } = answer;
+      notes = [...notes, ...page.creditNotes];
+      named = page.named ?? named;
+      const hit = page.creditNotes.find((x) => x.id === creditNoteId);
+      if (hit !== undefined) return { kind: 'found', note: hit };
+      if (page.nextCursor === null) return { kind: 'missing' };
+      after = page.nextCursor;
+    }
+    return unconfirmed; // the cap: never a guess past it
+  }
+
+  /**
+   * One press of the confirmation's "Withdraw credit note": ONE POST under ONE new key, held BEFORE it leaves. The guards run
+   * before and again after the session check: the review's generation, the confirmation open, no wait, no sign-in out, no
+   * live attempt of this user, no credit-note attempt here. No AbortSignal: closing never cancels it.
+   */
+  async function sendWithdrawal(viewId: number, store: StoreEntry, press: WithdrawPress): Promise<ReverseSendOutcome | null> {
+    const notSent = (text: string): ReverseSendOutcome => ({ kind: 'not-sent', text });
+    if (wdSending.current) return notSent(WITHDRAW_TEXT.pending);
+    if (signingIn.current !== null) return notSent(WITHDRAW_TEXT.signingIn);
+    if (press.reviewGen !== gen.current.n) return { kind: 'stale' };
+    if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+    if (reverseBlockedNow() || press.blocked()) return notSent(WITHDRAW_TEXT.pending);
+    wdSending.current = true;
+    try {
+      const mine = gen.current.n;
+      const since = sessionEndsSoFar();
+      // The attempt's binding: this section, the same dialog on the same invoice, the same store (the hold binds user and token).
+      const viewStands = (): boolean => alive.current && viewRef.current?.id === viewId && viewRef.current.invoiceId === press.invoiceId && storeRef.current === store.id;
+      const s = await connect();
+      if (!viewStands() || since !== sessionEndsSoFar()) return null;
+      if (s.kind !== 'ok') {
+        const failure = sessionFailure(s);
+        if (failure.kind === 'signed-out') { failSession(failure); return null; }
+        return notSent(`Not sent. ${failure.seconds !== undefined ? pickerWaitText(startWait(failure.seconds)) : ISSUED_TEXT.unavailable}`);
+      }
+      if (adopt(s.csrf) || gen.current.n !== mine) return null;
+      if (press.reviewGen !== gen.current.n) return { kind: 'stale' };
+      if (!press.open()) return null;
+      if (waitRef.current) return notSent(`Not sent. ${pickerWaitText(waitLeft())}`);
+      if (signingIn.current !== null) return notSent(WITHDRAW_TEXT.signingIn);
+      if (reverseBlockedNow() || press.blocked()) return notSent(WITHDRAW_TEXT.pending);
+      const body = creditNoteWithdrawBodyOf(store.tenantId, press.reason);
+      if (body === null || !isVoidTarget(press.invoiceId) || !isVoidTarget(press.note.id)) return notSent(WITHDRAW_TEXT.notSendable);
+      const key = nextKey();
+      const attempt: HeldWithdrawal = {
+        key, body: '', storeId: store.id, invoiceId: press.invoiceId, number: press.number, creditNoteId: press.note.id, creditNoteNumber: press.note.number,
+        grossCents: press.note.grossCents, reason: press.reason, csrf: s.csrf, state: 'sending', refusal: null, attributed: false, seen: null,
+      };
+      if (!wdHolds.put(uid, attempt)) return notSent(WITHDRAW_TEXT.pending); // HELD BEFORE IT LEAVES
+      setWdCheck(null);
+      press.held(key);
+      const answer = await issuing.withdrawCreditNote(store.id, press.invoiceId, press.note.id, key, body, s.csrf); // NO AbortSignal
+      return answerWithdrawal(key, answer, { csrf: s.csrf, since, mine }, viewStands(), press.open());
+    } finally {
+      wdSending.current = false;
+    }
+  }
+
+  /**
+   * One withdrawal answer: settled BY KEY (settleWithdrawal: a changed token, sign-out count, store or invoice detaches it
+   * and the answer is not used); then, only while the session it went with stands, a 429 starts the wait and a 401 ends
+   * the session. A first send's outcome comes back to the confirmation to say.
+   */
+  function answerWithdrawal(key: string, answer: WithdrawCreditNoteResult, sent: { readonly csrf: string; readonly since: number; readonly mine: number }, stands: boolean, open: boolean): ReverseSendOutcome | null {
+    const same = (): boolean => alive.current && gen.current.n === sent.mine && gen.current.csrf === sent.csrf && sent.since === sessionEndsSoFar();
+    settleWithdrawal(wdHolds, uid, key, answer, { csrf: sent.csrf, since: sent.since }, stands, open);
+    // A reply for a context that no longer stands (user, session, store or invoice) only detached the attempt: no wait, no
+    // session end, nothing said.
+    if (!stands || !same()) return null;
+    const h = wdHolds.get(uid);
+    if (answer.kind === 'rate-limited') startWait(answer.retryAfterSeconds);
+    if (answer.kind === 'signed-out') failSession({ kind: 'signed-out', text: ISSUED_TEXT.ended });
+    if (h?.key === key && isLiveWithdrawal(h)) return { kind: 'sent' }; // unresolved: the card's
+    switch (answer.kind) {
+      case 'not-sent': return { kind: 'not-sent', text: WITHDRAW_TEXT.notSendable };
+      case 'step-up': return { kind: 'step-up', method: identity.reauthMethod(uid) };
+      case 'signed-out': return null;
+      case 'rate-limited': return { kind: 'not-run', text: WITHDRAW_TEXT.rateLimited(answer.retryAfterSeconds) };
+      case 'denied': return { kind: 'not-run', text: WITHDRAW_TEXT.denied };
+      case 'not-found': case 'tenant-conflict': case 'invalid': return { kind: 'not-run', text: WITHDRAW_TEXT.notRun };
+      case 'invalid-state': case 'write-conflict': return { kind: 'refused' };
+      default: return { kind: 'sent' };
+    }
+  }
+
+  /** "Check credit note status": read-only; only a fresh read showing the note withdrawn settles it (not attributed). */
+  async function findWithdrawal(): Promise<void> {
+    const h = wdHolds.get(uid);
+    if (h === undefined || !isLiveWithdrawal(h) || (h.state === 'sending' && h.csrf !== null) || wdReading.current !== null || waitRef.current) return;
+    const { key } = h;
+    const attached = h.csrf !== null;
+    const mine = gen.current.n;
+    const since = sessionEndsSoFar();
+    wdReading.current = key;
+    setWdFinding(key);
+    setWdCheck(null);
+    wdFindCtl.current?.abort();
+    const controller = new AbortController();
+    wdFindCtl.current = controller;
+    try {
+      // Within the attempt's own store and invoice, never the ones chosen now.
+      const found = await findWithdrawalNote(h.storeId, h.invoiceId, h.creditNoteId, () => wdHolds.get(uid)?.key === key, controller.signal);
+      const now = wdHolds.get(uid);
+      if (attached && now?.key === key && now.csrf === null) { if (alive.current) setWdCheck({ key, text: WITHDRAW_TEXT.checkDetached }); return; }
+      if (found === null || mine !== gen.current.n || since !== sessionEndsSoFar()) return;
+      seeWithdrawal(wdHolds, uid, key, found.kind !== 'found' ? 'unconfirmed' : found.note.withdrawal !== null ? 'withdrawn' : 'active', attached);
+    } finally {
+      if (wdReading.current === key) wdReading.current = null;
+      if (alive.current) setWdFinding((was) => (was === key ? null : was));
+    }
+  }
+
+  /**
+   * "Dismiss": stop tracking it here — never a cancel and never a resend. Never for a LIVE attempt still attached to this
+   * context (owner rule: a second withdrawal stays held back while it is unresolved here); only a settled or refused one, or
+   * one detached by a change of session or store.
+   */
+  function dismissWithdrawal(): void {
+    const h = wdHolds.get(uid);
+    if (h === undefined || (isLiveWithdrawal(h) && h.csrf !== null) || wdReading.current === h.key) return;
+    wdHolds.remove(uid, h.key);
+    setWdCheck(null);
   }
 
   // ---- the settings panel ----
@@ -4161,7 +4388,7 @@ function IssuedSection({
   const reversingOf = (v: ViewOpen, store: StoreEntry): IssuedReversalCapability => ({
     store,
     held: revHeld !== undefined && revHeld.storeId === v.storeId ? revHeld : undefined,
-    blocked: isLiveVoid(voidHeld) || isLiveReversal(revHeld) || isOpenPayment(payHeld),
+    blocked: isLiveVoid(voidHeld) || isLiveReversal(revHeld) || isOpenPayment(payHeld) || isLiveWithdrawal(wdHeld),
     expired: revHeld !== undefined && reversalExpired(revHeld, clock(), wall()),
     cooling: revHeld !== undefined && revCool === revHeld.key, finding: revHeld !== undefined && revFinding === revHeld.key,
     checkText: revHeld !== undefined && revCheck?.key === revHeld.key ? revCheck.text : '',
@@ -4172,6 +4399,22 @@ function IssuedSection({
     retry: () => { if (!waitRef.current && revCoolRef.current === null) void retryReversal(); },
     check: () => { if (!waitRef.current) void findReversal(); },
     dismiss: dismissReversal,
+    signIn: (secret) => signInForVoid(v.id, secret),
+    stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
+  });
+  /** The Issued section's credit-note withdrawal for the dialog it opened (CN-P3). */
+  const withdrawingOf = (v: ViewOpen, store: StoreEntry): IssuedWithdrawCapability => ({
+    held: wdHeld !== undefined && wdHeld.storeId === v.storeId ? wdHeld : undefined,
+    blocked: isLiveVoid(voidHeld) || isLiveReversal(revHeld) || isOpenPayment(payHeld) || isLiveWithdrawal(wdHeld),
+    finding: wdHeld !== undefined && wdFinding === wdHeld.key,
+    checkText: wdHeld !== undefined && wdCheck?.key === wdHeld.key ? wdCheck.text : '',
+    signingIn: voidSigning, generation: () => gen.current.n,
+    find: (creditNoteId, signal) => findWithdrawalNote(v.storeId, v.invoiceId, creditNoteId, () => viewRef.current?.id === v.id, signal),
+    send: (press) => sendWithdrawal(v.id, store, press),
+    check: () => { if (!waitRef.current) void findWithdrawal(); },
+    dismiss: dismissWithdrawal,
+    // The list from the server again; after this tab's own withdrawal also CA-44's page one of a loaded activity view.
+    refresh: (own) => { void readCreditList(v.storeId, v.invoiceId, 'first', null); if (own) activityAfterOwnWrite(v.storeId); },
     signIn: (secret) => signInForVoid(v.id, secret),
     stopSignIn: () => dropSignIn({ kind: 'failed', text: VOID_TEXT.signInStopped }, v.id),
   });
@@ -4232,7 +4475,7 @@ function IssuedSection({
     const here = (x: { readonly storeId: string; readonly invoiceId: string; readonly csrf: string | null }): boolean => x.csrf !== null || (x.storeId === v.storeId && x.invoiceId === v.invoiceId);
     const out = (state: string): boolean => state === 'sending' || state === 'checking' || state === 'unresolved';
     return (payHeld !== undefined && isOpenPayment(payHeld) && here(payHeld)) || (revHeld !== undefined && out(revHeld.state) && here(revHeld))
-      || (voidHeld !== undefined && out(voidHeld.state) && here(voidHeld));
+      || (voidHeld !== undefined && out(voidHeld.state) && here(voidHeld)) || (isLiveWithdrawal(wdHeld) && here(wdHeld));
   };
   const cnHereOf = (v: { readonly storeId: string; readonly invoiceId: string }): boolean => cnHeld !== undefined && cnHeld.storeId === v.storeId && cnHeld.invoiceId === v.invoiceId;
   /**
@@ -4359,6 +4602,18 @@ function IssuedSection({
     const at = document.activeElement;
     if (at === null || at === document.body) heading.current?.focus();
   }, [revSectionKey]);
+  // CN-P3: the same for a LIVE withdrawal attempt: reachable (Check credit note status, Dismiss) with no dialog open, in its own store.
+  const wdSectionHeld = view === null && !signedOut && isLiveWithdrawal(wdHeld) && wdHeld.storeId === storeId ? wdHeld : undefined;
+  const wdSectionKey = wdSectionHeld?.key ?? null;
+  const wdSectionHeading = useRef<HTMLHeadingElement | null>(null);
+  const wdSectionWas = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const was = wdSectionWas.current;
+    wdSectionWas.current = wdSectionKey;
+    if (was === null || wdSectionKey !== null) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) heading.current?.focus();
+  }, [wdSectionKey]);
   const track = (target: EventTarget | null): void => {
     if (target instanceof Element && section.current?.contains(target) === true) keepFocus.current = { from: target, inPanel: target.closest('[data-testid="issued-settings"]') !== null };
   };
@@ -4416,6 +4671,13 @@ function IssuedSection({
           onRetry={() => { if (waitRef.current || revCoolRef.current !== null) return; revSectionHeading.current?.focus(); void retryReversal(); }}
           onCheck={() => { if (waitRef.current) return; revSectionHeading.current?.focus(); void findReversal(); }}
           onDismiss={() => { heading.current?.focus(); dismissReversal(); }}
+        />
+      )}
+      {wdSectionHeld !== undefined && (
+        <WithdrawalCard
+          held={wdSectionHeld} waiting={waiting} finding={wdFinding === wdSectionHeld.key} checkText={wdCheck?.key === wdSectionHeld.key ? wdCheck.text : ''} headingRef={wdSectionHeading}
+          onCheck={() => { if (waitRef.current) return; wdSectionHeading.current?.focus(); void findWithdrawal(); }}
+          onDismiss={() => { heading.current?.focus(); dismissWithdrawal(); }}
         />
       )}
 
@@ -4571,6 +4833,7 @@ function IssuedSection({
           current={() => alive.current && viewRef.current?.id === view.id && storeRef.current === view.storeId}
           voiding={view.store === null ? undefined : voidingOf(view, view.store)}
           reversing={view.store === null ? undefined : reversingOf(view, view.store)}
+          withdrawing={view.store === null ? undefined : withdrawingOf(view, view.store)}
           crediting={creditingOf(view)}
           payments={{
             read: (after, signal) => readPayments(view.id, view.storeId, view.invoiceId, after, signal),
@@ -4865,6 +5128,38 @@ export interface IssuedReversalCapability {
   readonly stopSignIn: () => void;
 }
 
+/** CN-P3: the exact credit note as read, `missing` after a complete traversal, or `unconfirmed`. */
+export type WithdrawFind = { readonly kind: 'found'; readonly note: InvoiceCreditNote } | { readonly kind: 'missing' | 'unconfirmed' };
+/** One press of the withdrawal confirmation (CN-P3): the note as the review read it. */
+export interface WithdrawPress {
+  readonly invoiceId: string;
+  readonly number: number;
+  readonly note: InvoiceCreditNote;
+  readonly reason: InvoiceCreditNoteWithdrawalReason;
+  readonly open: () => boolean;
+  /** A credit-note issue attempt here, or one a sign-in would detach, holds it back (asked at the press). */
+  readonly blocked: () => boolean;
+  readonly held: (key: string) => void;
+  readonly reviewGen: number;
+}
+/** The Issued section's credit-note withdrawal for the one dialog it opened (M7B-CREDITNOTES-CN-P3). */
+export interface IssuedWithdrawCapability {
+  readonly held: HeldWithdrawal | undefined;
+  /** An unresolved void, payment, reversal or withdrawal attempt of this user: Withdraw shows nowhere. */
+  readonly blocked: boolean;
+  readonly finding: boolean;
+  readonly checkText: string;
+  readonly signingIn: boolean;
+  readonly generation: () => number;
+  readonly find: (creditNoteId: string, signal: AbortSignal) => Promise<WithdrawFind | null>;
+  readonly send: (press: WithdrawPress) => Promise<ReverseSendOutcome | null>;
+  readonly check: () => void;
+  readonly dismiss: () => void;
+  readonly refresh: (own: boolean) => void;
+  readonly signIn: (secret: string | null) => Promise<VoidSignIn | null>;
+  readonly stopSignIn: () => void;
+}
+
 export interface IssuedInvoiceDialogProps {
   readonly storeId: string;
   readonly invoiceId: string;
@@ -4896,6 +5191,8 @@ export interface IssuedInvoiceDialogProps {
   readonly payments?: IssuedPaymentsCapability;
   /** The reversal action (M7B-PAYMENTS-P2C): only the Issued section gives one, with `payments`. */
   readonly reversing?: IssuedReversalCapability;
+  /** The credit-note withdrawal (M7B-CREDITNOTES-CN-P3): only the Issued section gives one, with `crediting`. */
+  readonly withdrawing?: IssuedWithdrawCapability;
   /** The credit-note list and lookup (M7B-CREDITNOTES-CN-P2): only the Issued section gives them, with `payments`. */
   readonly crediting?: IssuedCreditCapability;
 }
@@ -4971,7 +5268,7 @@ interface VoidConfirm {
   readonly decided: boolean;
 }
 /** Each void-side read of the dialog has its own abort (design R9); the detail reads among them share one sequence (F1). */
-type VoidReadKind = 'elig' | 'review' | 'after' | 'load' | 'renew' | 'renewElig' | 'revElig' | 'revFind';
+type VoidReadKind = 'elig' | 'review' | 'after' | 'load' | 'renew' | 'renewElig' | 'revElig' | 'revFind' | 'wdFind';
 /**
  * The detail reads of one open — its first read and Try again, the review, the post-void read, Load again and the sign-in's
  * re-read — share ONE sequence: only the latest started may set what is shown, so a review answered before a void's commit
@@ -4995,14 +5292,14 @@ const DETAIL_KINDS: ReadonlySet<VoidReadKind> = new Set(['review', 'after', 'loa
  * retries only that GET). A late answer of any of these reads changes nothing once its open, its kind's latest read or
  * its context is gone.
  */
-export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments, reversing, crediting }: IssuedInvoiceDialogProps) {
+export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting, onClose, returnFocus, voiding, payments, reversing, withdrawing, crediting }: IssuedInvoiceDialogProps) {
   const closeButton = useRef<HTMLButtonElement | null>(null);
   const [state, setState] = useState<ViewState>(VIEW_OPENING);
   const alive = useRef(false);
   const seq = useRef(0);
   const ctl = useRef<AbortController | null>(null);
-  const owner = useRef({ read, current, voiding, payments, reversing, crediting });
-  useLayoutEffect(() => { owner.current = { read, current, voiding, payments, reversing, crediting }; });
+  const owner = useRef({ read, current, voiding, payments, reversing, withdrawing, crediting });
+  useLayoutEffect(() => { owner.current = { read, current, voiding, payments, reversing, withdrawing, crediting }; });
   // The void action (idle, and nothing of it rendered, without `voiding`).
   // The eligibility answer AND the section generation it was read under (review B1 R3-1b): only an 'allowed' read under
   // the generation that stands now permits the action; an older one counts as not yet known.
@@ -5027,8 +5324,8 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const pressing = useRef(false);
   const afterFor = useRef<string | null>(null);
   const liveSeen = useRef(new Set<string>()); // attempts for this invoice seen out (or pressed) while this dialog was open
-  const vseq = useRef<Record<VoidReadKind, number>>({ elig: 0, review: 0, after: 0, load: 0, renew: 0, renewElig: 0, revElig: 0, revFind: 0 });
-  const vctl = useRef<Record<VoidReadKind, AbortController | null>>({ elig: null, review: null, after: null, load: null, renew: null, renewElig: null, revElig: null, revFind: null });
+  const vseq = useRef<Record<VoidReadKind, number>>({ elig: 0, review: 0, after: 0, load: 0, renew: 0, renewElig: 0, revElig: 0, revFind: 0, wdFind: 0 });
+  const vctl = useRef<Record<VoidReadKind, AbortController | null>>({ elig: null, review: null, after: null, load: null, renew: null, renewElig: null, revElig: null, revFind: null, wdFind: null });
   const setElig = (value: 'allowed' | 'not', gen: number): void => { const next = { value, gen }; eligRef.current = next; setEligState(next); };
   const setRenewal = (out: boolean): void => { renewalRef.current = out; if (alive.current) setRenewalOutState(out); };
   /** An 'allowed' eligibility read under the generation that stands now (R3-1b). */
@@ -5081,6 +5378,25 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const [revFocusRow, setRevFocusRow] = useState<{ readonly id: string } | null>(null);
   const revCardHeading = useRef<HTMLHeadingElement | null>(null);
   const revLiveSeen = useRef(new Set<string>());
+  // Withdrawing a credit note (CN-P3): the review out (its note id), what it said, the confirmation, focus requests.
+  const [wdReviewing, setWdReviewing] = useState<string | null>(null);
+  const wdReviewingRef = useRef(false);
+  const [wdSay, setWdSay] = useState<{ readonly alert: boolean; readonly text: string } | null>(null);
+  const [wdConfirm, setWdConfirmState] = useState<WithdrawConfirm | null>(null);
+  const wdConfirmRef = useRef<WithdrawConfirm | null>(null);
+  const putWdConfirm = (next: WithdrawConfirm | null): void => { wdConfirmRef.current = next; setWdConfirmState(next); };
+  const patchWdConfirm = (id: number, next: Partial<WithdrawConfirm>): boolean => {
+    const c = wdConfirmRef.current;
+    if (c === null || c.id !== id) return false;
+    putWdConfirm({ ...c, ...next });
+    return true;
+  };
+  const wdPressing = useRef(false);
+  const [wdFocusReasons, setWdFocusReasons] = useState(0);
+  const [wdFocusSignIn, setWdFocusSignIn] = useState(0);
+  const [wdFocusCard, setWdFocusCard] = useState(0);
+  const wdCardHeading = useRef<HTMLHeadingElement | null>(null);
+  const wdLiveSeen = useRef(new Set<string>());
   // Issuing a credit note (CN-P2): the confirmation (its values, its sign-in), Continue's review being out, what the review
   // said, and focus requests (the card's heading, the sign-in, "Don't issue"); a ref holds a second press back.
   const [cnConfirm, setCnConfirmState] = useState<CreditConfirm | null>(null);
@@ -5258,6 +5574,26 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     if (payStarted.current) void loadPayments(null, true);
   }, [revDoneKey]);
   useEffect(() => { if (revFocusCard > 0) (revCardHeading.current ?? payHeading.current)?.focus(); }, [revFocusCard]);
+  // CN-P3: this invoice's withdrawal attempt, seen live while this dialog was open, settling as withdrawn — by its own answer
+  // or a status read — says so and reads the detail, the payments and the credit notes again ONCE.
+  const wdHere = withdrawing?.held !== undefined && withdrawing.held.storeId === storeId && withdrawing.held.invoiceId === invoiceId ? withdrawing.held : undefined;
+  if (wdHere !== undefined && isLiveWithdrawal(wdHere)) wdLiveSeen.current.add(wdHere.key);
+  const wdDoneKey = wdHere !== undefined && wdHere.state === 'withdrawn' && wdLiveSeen.current.has(wdHere.key) ? wdHere.key : null;
+  useEffect(() => {
+    if (wdDoneKey === null) return;
+    wdLiveSeen.current.delete(wdDoneKey); // once per attempt
+    const own = owner.current.withdrawing?.held?.attributed === true;
+    setWdSay({ alert: false, text: own ? WITHDRAW_TEXT.withdrawn : WITHDRAW_TEXT.seenWithdrawn });
+    void reread('after');
+    if (payStarted.current) void loadPayments(null, true);
+    owner.current.withdrawing?.refresh(own);
+  }, [wdDoneKey]);
+  useEffect(() => { if (wdFocusCard > 0) (wdCardHeading.current ?? payHeading.current)?.focus(); }, [wdFocusCard]);
+  useLayoutEffect(() => {
+    if (wdDoneKey === null) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) payHeading.current?.focus();
+  }, [wdDoneKey]);
   // CN-P2: an outcome that changes this invoice's amounts or state reads its detail and payments again, once per bump.
   const cnRereads = crediting?.rereads ?? 0;
   const cnRereadsSeen = useRef(cnRereads);
@@ -5629,6 +5965,136 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
     setRevFocusReasons((x) => x + 1);
   }
 
+  // ---- withdrawing a credit note (M7B-CREDITNOTES-CN-P3; the reversal's pattern) ----
+
+  /** The review's checks, shared with the renewal: the detail (issued), then the exact note (found and active). Each failure is said. */
+  async function wdChecks(w: IssuedWithdrawCapability, noteId: string, kind: VoidReadKind, still?: () => boolean): Promise<{ readonly note: InvoiceCreditNote; readonly number: number } | null> {
+    const fail = (text: string, alert = true): null => { if (alive.current && (still?.() ?? true)) setWdSay({ alert, text }); return null; };
+    const detail = await readDetail(kind);
+    if (detail === null) return null;
+    if (detail.kind === 'not-found') { setState({ phase: 'not-found', text: VOID_TEXT.gone, invoice: null }); return fail(WITHDRAW_TEXT.gone); }
+    if (detail.kind !== 'ok') return fail(detail.kind === 'rate-limited' ? detail.text : WITHDRAW_TEXT.unconfirmed);
+    setState({ phase: 'ready', text: '', invoice: detail.invoice });
+    if (detail.invoice.status !== 'issued') return fail(WITHDRAW_TEXT.voided);
+    const found = await voidRead('wdFind', (signal) => w.find(noteId, signal));
+    if (found === null) return null;
+    if (found.kind !== 'found') return fail(found.kind === 'missing' ? WITHDRAW_TEXT.missing : WITHDRAW_TEXT.unconfirmed);
+    if (found.note.withdrawal !== null) { w.refresh(false); return fail(WITHDRAW_TEXT.alreadyWithdrawn, false); }
+    return { note: found.note, number: detail.invoice.number };
+  }
+
+  /** Never beside another review or confirmation in this dialog (void, reversal, credit note). */
+  const wdOtherOut = (): boolean => reviewingRef.current || confirmRef.current !== null || revReviewingRef.current || revConfirmRef.current !== null || cnConfirmRef.current !== null;
+
+  /** A row's "Withdraw credit note…": the checks above, while the trigger stays; the confirmation opens on what they read. */
+  async function reviewWithdraw(noteId: string): Promise<void> {
+    const w = owner.current.withdrawing;
+    if (w === undefined || wdReviewingRef.current || wdConfirmRef.current !== null || wdOtherOut() || w.signingIn || waiting) return;
+    wdReviewingRef.current = true;
+    setWdReviewing(noteId);
+    setWdSay(null);
+    const gen = w.generation();
+    try {
+      const fit = await wdChecks(w, noteId, 'review');
+      if (fit === null || !alive.current) return;
+      if (gen !== w.generation()) return setWdSay({ alert: true, text: WITHDRAW_TEXT.staleReview });
+      if (wdOtherOut()) return setWdSay({ alert: true, text: WITHDRAW_TEXT.otherFirst });
+      putWdConfirm({ id: ++confirmSeq.current, note: fit.note, number: fit.number, reason: null, invalid: false, gen, sending: false, status: null, stepUp: null, confirming: false, renewing: false });
+    } finally {
+      wdReviewingRef.current = false;
+      if (alive.current) setWdReviewing(null);
+    }
+  }
+
+  /** The confirmation's "Withdraw credit note": ONE send (a ref holds a second press back); its outcome said. */
+  async function pressWithdraw(): Promise<void> {
+    const w = owner.current.withdrawing;
+    const c = wdConfirmRef.current;
+    if (w === undefined || c === null || wdPressing.current || c.sending || c.stepUp !== null || c.renewing || c.confirming || waiting) return;
+    if (c.reason === null) { patchWdConfirm(c.id, { invalid: true, status: null }); return setWdFocusReasons((x) => x + 1); }
+    const { id } = c;
+    const open = (): boolean => alive.current && wdConfirmRef.current?.id === id;
+    const blocked = (): boolean => owner.current.crediting?.hidesHere === true || owner.current.crediting?.hidesSignIns === true;
+    wdPressing.current = true;
+    patchWdConfirm(id, { sending: true, status: null, invalid: false });
+    let out: ReverseSendOutcome | null;
+    try {
+      out = await w.send({ invoiceId, number: c.number, note: c.note, reason: c.reason, reviewGen: c.gen, open, blocked, held: (key) => { wdLiveSeen.current.add(key); } });
+    } catch {
+      out = { kind: 'not-sent', text: WITHDRAW_TEXT.notRun };
+    } finally {
+      wdPressing.current = false;
+    }
+    if (!alive.current || out === null) return void patchWdConfirm(id, { sending: false });
+    switch (out.kind) {
+      case 'stale': putWdConfirm(null); return setWdSay({ alert: true, text: WITHDRAW_TEXT.staleReview });
+      case 'not-sent': return void patchWdConfirm(id, { sending: false, status: { alert: true, text: out.text } });
+      case 'not-run':
+        // Nothing ran and the key is gone: another press needs a new review, so it closes and the section says why.
+        if (open()) putWdConfirm(null);
+        return setWdSay({ alert: true, text: out.text });
+      case 'step-up':
+        // Reactive: a first send's 403 step_up_required ran nothing; the sign-in group opens, and only a NEW press sends.
+        patchWdConfirm(id, { sending: false, stepUp: { method: out.method }, status: { alert: true, text: out.method === null ? WITHDRAW_TEXT.stepUpNoMethod : WITHDRAW_TEXT.stepUp } });
+        return setWdFocusSignIn((x) => x + 1);
+      case 'refused': {
+        // Sealed (invalid_state: already withdrawn): fresh reads of the note, the invoice and its credit notes say why.
+        if (open()) putWdConfirm(null);
+        const found = await voidRead('wdFind', (signal) => w.find(c.note.id, signal));
+        const fresh = await reread('after');
+        if (payStarted.current) void loadPayments(null, true);
+        w.refresh(false);
+        if (!alive.current) return;
+        if (found?.kind === 'found' && found.note.withdrawal !== null) return setWdSay({ alert: false, text: WITHDRAW_TEXT.alreadyWithdrawn });
+        if (fresh !== null && fresh.status !== 'issued') return setWdSay({ alert: true, text: WITHDRAW_TEXT.voided });
+        return setWdSay({ alert: true, text: WITHDRAW_TEXT.cannotNow });
+      }
+      default:
+        // Sent: the hold says what, by key. Withdrawn: the effect above says it and reads again; unresolved: its card.
+        if (!open()) return;
+        putWdConfirm(null);
+        setWdFocusCard((x) => x + 1);
+    }
+  }
+
+  /** The sign-in after a first send's step-up: success re-runs the checks and keeps the confirmation for a NEW press (never a send). */
+  async function signInWithdraw(): Promise<void> {
+    const w = owner.current.withdrawing;
+    const c = wdConfirmRef.current;
+    if (w === undefined || c === null || c.stepUp === null || c.stepUp.method === null || c.confirming || waiting) return;
+    const secret = c.stepUp.method === 'password' ? password : null;
+    if (secret === '') return;
+    const { id } = c;
+    const open = (): boolean => wdConfirmRef.current?.id === id;
+    setPassword('');
+    patchWdConfirm(id, { confirming: true, status: null });
+    let out: VoidSignIn | null;
+    try { out = await w.signIn(secret); } catch { out = { kind: 'failed', text: VOID_TEXT.reauthFailed }; }
+    if (!alive.current) return;
+    if (out === null) return void patchWdConfirm(id, { confirming: false });
+    if (out.kind === 'failed') {
+      if (!open()) return;
+      patchWdConfirm(id, { confirming: false, status: { alert: true, text: out.text } });
+      return setWdFocusSignIn((x) => x + 1);
+    }
+    const renewGen = out.gen;
+    const ours = (): boolean => alive.current && open();
+    if (!ours()) return;
+    if (renewGen !== w.generation()) return putWdConfirm(null);
+    patchWdConfirm(id, { confirming: false, stepUp: null, renewing: true, reason: null, invalid: false, status: { alert: false, text: WITHDRAW_TEXT.renewing } });
+    const fit = await wdChecks(w, c.note.id, 'renew', open);
+    if (!ours()) return;
+    if (fit === null || renewGen !== w.generation()) return putWdConfirm(null);
+    patchWdConfirm(id, { renewing: false, note: fit.note, number: fit.number, gen: renewGen, status: { alert: false, text: WITHDRAW_TEXT.renewed } });
+    setWdFocusReasons((x) => x + 1);
+  }
+
+  function closeWithdrawConfirm(): void {
+    owner.current.withdrawing?.stopSignIn(); // Keep or Escape while its sign-in is waited for: the wait ends here
+    putWdConfirm(null);
+    setPassword('');
+  }
+
   // ---- issuing a credit note (CN-P2, doc 17 §2.4-§2.6) ----
 
   /**
@@ -5780,15 +6246,23 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
   const eligOld = voiding !== undefined && elig.value === 'allowed' && elig.gen !== voiding.generation();
   // R8: while this invoice has an unresolved reversal attempt, neither Void nor Record payment shows on it.
   const revLiveHere = revHere !== undefined && isLiveReversal(revHere);
-  const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal && !revLiveHere
-    && revReviewing === null // nor while a reversal review is out (review F3)
+  const wdLiveHere = wdHere !== undefined && isLiveWithdrawal(wdHere); // CN-P3: the same for an unresolved withdrawal here
+  const showTrigger = voiding !== undefined && (eligNow || eligOld) && !gone && invoice !== null && invoice.status === 'issued' && !terminal && !revLiveHere && !wdLiveHere
+    && revReviewing === null && wdReviewing === null // nor while a reversal or withdrawal review is out (review F3)
     && crediting?.hidesHere !== true && crediting?.hidesSignIns !== true; // nor beside a credit-note attempt here, or one a sign-in would detach (D-P2-10 A)
   // R1: Reverse shows only on an 'allowed' read under this generation, an issued invoice whose payments page says issued and
   // is not loading, no unresolved record, reversal or void attempt of this user anywhere, and a dialog that is not terminal.
   const canReverse = reversing !== undefined && revElig.value === 'allowed' && revElig.gen === reversing.generation() && !reversing.blocked
     && invoice !== null && invoice.status === 'issued' && pay.phase === 'ready' && pay.page?.invoice.status === 'issued' && !terminal
     && !reviewing && confirm === null // nor while a void review or confirmation is out (review F3)
+    && wdReviewing === null && wdConfirm === null
     && crediting?.hidesHere !== true && crediting?.hidesSignIns !== true; // D-P2-10 A, as for Void
+  // CN-P3: Withdraw only for the store owner (the lookup answered 200: `owner`; anything else hides it), on an issued invoice,
+  // with no unresolved attempt of this user anywhere, no other review or confirmation here, and no credit-note attempt here or
+  // one a sign-in would detach. The server stays the judge of the write gate (the shop has no signal for it).
+  const canWithdraw = withdrawing !== undefined && crediting?.owner === true && !withdrawing.blocked && invoice !== null && invoice.status === 'issued' && !terminal
+    && !reviewing && confirm === null && revReviewing === null && revConfirm === null && cnConfirm === null
+    && crediting.hidesHere !== true && crediting.hidesSignIns !== true;
   // Once this invoice is known voided (a 200 or a sealed already-void for an attempt of this user), no confirmation is
   // shown — but the one that pressed an already-void, which says so — and it goes in the commit that hides the trigger
   // (design R17): focus then goes to Close, never to a control that is gone.
@@ -5929,7 +6403,7 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             {/* Above the state line and the list (R2 R6): what a re-read changes never moves the recording controls. */}
             {payments.recording !== undefined && (
               <PaymentRecorder
-                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed' && !revLiveHere && crediting?.hidesHere !== true} reversing={revLiveHere}
+                storeId={storeId} invoiceId={invoiceId} number={invoice.number} page={pay.phase === 'ready' ? pay.page : null} allowed={payElig === 'allowed' && !revLiveHere && !wdLiveHere && crediting?.hidesHere !== true} reversing={revLiveHere || wdLiveHere}
                 waiting={waiting} recording={payments.recording} headingRef={payHeading}
               />
             )}
@@ -6021,8 +6495,24 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             )}
             {pay.more && <span id="issued-payments-busy" className="sr-only">{PAYMENTS_TEXT.loading}</span>}
             {waiting && <span id="issued-payments-wait" className="sr-only">{PAYMENTS_TEXT.waiting}</span>}
+            {withdrawing !== undefined && (
+              // CN-P3: the withdrawal's always-mounted status and alert regions, and this invoice's held attempt (its card).
+              <div data-testid="issued-payments-cn-withdraw-area" className="space-y-2">
+                <p data-testid="issued-payments-cn-withdraw-status" role="status" className="text-sm font-bold text-emerald-800">{wdReviewing !== null ? WITHDRAW_TEXT.reviewing : wdSay !== null && !wdSay.alert ? wdSay.text : ''}</p>
+                <p data-testid="issued-payments-cn-withdraw-alert" role="alert" className="text-sm font-bold text-rose-800">{wdSay?.alert === true ? wdSay.text : ''}</p>
+                {wdHere !== undefined && wdHere.state !== 'withdrawn' && (
+                  <WithdrawalCard
+                    held={wdHere} waiting={waiting} finding={withdrawing.finding} checkText={withdrawing.checkText} headingRef={wdCardHeading}
+                    onCheck={() => { wdCardHeading.current?.focus(); withdrawing.check(); }} onDismiss={() => { payHeading.current?.focus(); withdrawing.dismiss(); }}
+                  />
+                )}
+              </div>
+            )}
             {crediting !== undefined && (
-              <CreditNotesSection list={crediting.list} owner={crediting.owner} waiting={waiting} paymentsHeading={payHeading} onMore={crediting.showMore} onRetry={crediting.retryList} />
+              <CreditNotesSection
+                list={crediting.list} owner={crediting.owner} waiting={waiting} paymentsHeading={payHeading} onMore={crediting.showMore} onRetry={crediting.retryList}
+                canWithdraw={canWithdraw} reviewingId={wdReviewing} onWithdraw={(id) => { void reviewWithdraw(id); }}
+              />
             )}
           </section>
         )}
@@ -6056,6 +6546,18 @@ export function IssuedInvoiceDialog({ storeId, invoiceId, read, current, waiting
             if (c !== null && !c.sending && c.stepUp === null && !c.renewing && !c.confirming) patchRevConfirm(c.id, { reason: code, invalid: false });
           }}
           onPress={() => { void pressReverse(); }} onClose={closeReverseConfirm} onSignIn={() => { void signInReverse(); }} onStopSignIn={reversing.stopSignIn}
+          returnFocus={payHeading}
+        />
+      )}
+      {withdrawing !== undefined && wdConfirm !== null && (
+        // Focus goes back to the row's Withdraw credit note… (what had it), else to the payments heading.
+        <WithdrawConfirmDialog
+          c={wdConfirm} waiting={waiting} password={password} focusReasons={wdFocusReasons} focusSignIn={wdFocusSignIn} onPassword={setPassword}
+          onReason={(code) => {
+            const c = wdConfirmRef.current;
+            if (c !== null && !c.sending && c.stepUp === null && !c.renewing && !c.confirming) patchWdConfirm(c.id, { reason: code, invalid: false });
+          }}
+          onPress={() => { void pressWithdraw(); }} onClose={closeWithdrawConfirm} onSignIn={() => { void signInWithdraw(); }} onStopSignIn={withdrawing.stopSignIn}
           returnFocus={payHeading}
         />
       )}
@@ -6127,9 +6629,11 @@ function CreditLookupState({ lookup, waiting, headingRef, onRetry, onContinue }:
  * a failed read never shows its rows as complete. Show more keeps focus and says "{n} more loaded."; if it goes, focus
  * moves to the first new item (tabindex -1 until it blurs), else to the list's heading.
  */
-function CreditNotesSection({ list, owner, waiting, paymentsHeading, onMore, onRetry }: {
+function CreditNotesSection({ list, owner, waiting, paymentsHeading, onMore, onRetry, canWithdraw = false, reviewingId = null, onWithdraw }: {
   readonly list: CreditNotesList | null; readonly owner: boolean; readonly waiting: boolean; readonly paymentsHeading: RefObject<HTMLHeadingElement | null>;
   readonly onMore: () => void; readonly onRetry: () => void;
+  /** CN-P3: each active note's "Withdraw credit note…" (the owner's, decided by the dialog); aria-disabled while a review is out. */
+  readonly canWithdraw?: boolean; readonly reviewingId?: string | null; readonly onWithdraw?: (id: string) => void;
 }) {
   const heading = useRef<HTMLHeadingElement | null>(null);
   const more = useRef<HTMLButtonElement | null>(null);
@@ -6190,6 +6694,18 @@ function CreditNotesSection({ list, owner, waiting, paymentsHeading, onMore, onR
               onBlur={() => { if (focusId === note.id) setFocusId(null); }} className={`px-4 py-3 text-sm min-w-0 break-words ${focusRing}`}
             >
               <CreditNoteFacts note={note} prefix="issued-payments-credit" />
+              {canWithdraw && note.withdrawal === null && onWithdraw !== undefined && (
+                <>
+                  <button
+                    type="button" data-testid="issued-payments-cn-withdraw" data-id={note.id} aria-haspopup="dialog" aria-describedby={`issued-cn-withdraw-for-${note.id}`}
+                    aria-disabled={reviewingId !== null || waiting} onClick={() => { if (reviewingId === null && !waiting) onWithdraw(note.id); }}
+                    className={`mt-1 ${quiet} ${waitable} ${fitsRow}`}
+                  >
+                    {WITHDRAW_TEXT.open}
+                  </button>
+                  <span id={`issued-cn-withdraw-for-${note.id}`} className="sr-only">{reviewingId === note.id ? WITHDRAW_TEXT.reviewing : WITHDRAW_TEXT.forNote(note.number, formatCents(note.grossCents))}</span>
+                </>
+              )}
             </li>
           ))}
         </ul>
@@ -7441,6 +7957,175 @@ function ReversalCard({ held, expired, waiting, cooling, finding, checkText, hea
         {(waiting || cooling) && <span id="issued-reverse-cool" className="sr-only">{waiting ? VOID_TEXT.waiting : REVERSE_TEXT.coolDown}</span>}
       </div>
       {live && <p id="issued-reverse-dismiss-warning" className={hintClass}>{REVERSE_TEXT.dismissWarning}</p>}
+    </div>
+  );
+}
+
+/** The withdrawal confirmation over the dialog (CN-P3): exactly the note its review read, the reason, the press. */
+interface WithdrawConfirm {
+  readonly id: number;
+  readonly note: InvoiceCreditNote;
+  /** The invoice's number. */
+  readonly number: number;
+  readonly reason: InvoiceCreditNoteWithdrawalReason | null;
+  readonly invalid: boolean;
+  /** The section generation its review read was made under. */
+  readonly gen: number;
+  readonly sending: boolean;
+  readonly status: { readonly alert: boolean; readonly text: string } | null;
+  readonly stepUp: { readonly method: 'password' | 'google' | null } | null;
+  readonly confirming: boolean;
+  readonly renewing: boolean;
+}
+const WITHDRAWAL_REASON_CODES = Object.keys(WITHDRAW_TEXT.reasons) as readonly InvoiceCreditNoteWithdrawalReason[];
+
+/** CN-P3: the withdrawal confirmation (ReverseConfirmDialog's structure): Keep first, the facts, a required reason (none chosen), the press. */
+function WithdrawConfirmDialog({ c, waiting, password, focusReasons, focusSignIn, onPassword, onReason, onPress, onClose, onSignIn, onStopSignIn, returnFocus }: {
+  readonly c: WithdrawConfirm; readonly waiting: boolean; readonly password: string;
+  readonly focusReasons: number; readonly focusSignIn: number;
+  readonly onPassword: (value: string) => void; readonly onReason: (code: InvoiceCreditNoteWithdrawalReason) => void; readonly onPress: () => void;
+  readonly onClose: () => void; readonly onSignIn: () => void; readonly onStopSignIn: () => void;
+  readonly returnFocus: RefObject<HTMLElement | null>;
+}) {
+  const keep = useRef<HTMLButtonElement | null>(null);
+  const firstReason = useRef<HTMLInputElement | null>(null);
+  const passwordRef = useRef<HTMLInputElement | null>(null);
+  const signInButton = useRef<HTMLButtonElement | null>(null);
+  const reasonsSeen = useRef(focusReasons);
+  const signInSeen = useRef(focusSignIn);
+  useEffect(() => {
+    if (focusReasons === reasonsSeen.current) return;
+    reasonsSeen.current = focusReasons;
+    firstReason.current?.focus();
+  }, [focusReasons]);
+  const method = c.stepUp?.method;
+  useEffect(() => {
+    if (focusSignIn === signInSeen.current) return;
+    signInSeen.current = focusSignIn;
+    (method === 'password' ? passwordRef.current : signInButton.current)?.focus();
+  }, [focusSignIn, method]);
+  const locked = c.sending || c.stepUp !== null || c.renewing || c.confirming;
+  const why = c.sending ? WITHDRAW_TEXT.sending : c.renewing ? WITHDRAW_TEXT.renewing : waiting ? VOID_TEXT.waiting : c.reason === null ? WITHDRAW_TEXT.chooseReason : '';
+  const invalid = c.invalid && c.reason === null;
+  const signInBlocked = c.confirming || waiting || (method === 'password' && password.length === 0);
+  return (
+    <DialogFrame
+      role="alertdialog" labelledBy="issued-cn-withdraw-title" describedBy="issued-cn-withdraw-description" testId="issued-cn-withdraw-confirm" anchor="top"
+      busy={false} onClose={onClose} initialFocus={keep} returnFocus={returnFocus}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h2 id="issued-cn-withdraw-title" data-testid="issued-cn-withdraw-title" className="text-xl font-black text-primary tracking-tight break-words min-w-0">{WITHDRAW_TEXT.title}</h2>
+        <button ref={keep} type="button" data-testid="issued-cn-withdraw-keep" onClick={onClose} className={`${quiet} ${actionFit}`}>
+          {c.sending ? WITHDRAW_TEXT.close : WITHDRAW_TEXT.keep}
+        </button>
+      </div>
+      <div id="issued-cn-withdraw-description" data-testid="issued-cn-withdraw-description" className="space-y-2 text-sm font-medium text-slate-700">
+        <p data-testid="issued-cn-withdraw-facts" className="break-words">
+          <span data-testid="issued-cn-withdraw-cn">{CREDIT_TEXT.number(c.note.number)}</span> on invoice <span data-testid="issued-cn-withdraw-number">{c.number}</span>:{' '}
+          <span data-testid="issued-cn-withdraw-amount" className="whitespace-nowrap font-black text-primary">{formatCents(c.note.grossCents)}</span>.
+        </p>
+        <p data-testid="issued-cn-withdraw-consequence">{WITHDRAW_TEXT.consequence}</p>
+      </div>
+      {c.sending && <p data-testid="issued-cn-withdraw-close-warning" className={hintClass}>{WITHDRAW_TEXT.closeWarning}</p>}
+      <fieldset
+        role="radiogroup" aria-labelledby="issued-cn-withdraw-reason-legend" aria-required="true" aria-invalid={invalid} aria-describedby={invalid ? 'issued-cn-withdraw-reason-error' : undefined}
+        disabled={locked} data-testid="issued-cn-withdraw-reasons" className="space-y-2"
+      >
+        <legend id="issued-cn-withdraw-reason-legend" className={labelClass}>{WITHDRAW_TEXT.reasonLegend}</legend>
+        {WITHDRAWAL_REASON_CODES.map((code, i) => (
+          <label key={code} className={`flex items-center gap-2 text-sm font-bold text-slate-700 ${fitsRow}`}>
+            <input
+              ref={i === 0 ? firstReason : undefined} type="radio" name="issued-cn-withdraw-reason" value={code} data-testid={`issued-cn-withdraw-reason-${code}`}
+              checked={c.reason === code} onChange={() => onReason(code)} className={focusRing}
+            />
+            {WITHDRAW_TEXT.reasons[code]}
+          </label>
+        ))}
+        {invalid && <p id="issued-cn-withdraw-reason-error" data-testid="issued-cn-withdraw-reason-error" className="text-xs font-bold text-rose-700">{WITHDRAW_TEXT.chooseReason}</p>}
+      </fieldset>
+      {c.stepUp !== null && (
+        <div role="group" aria-labelledby="issued-cn-withdraw-reauth-title" data-testid="issued-cn-withdraw-reauth-group" className="flex flex-wrap items-end gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100">
+          <p id="issued-cn-withdraw-reauth-title" className="w-full text-xs font-black text-amber-900">{WITHDRAW_TEXT.stepUp}</p>
+          <p data-testid="issued-cn-withdraw-reauth-explain" className="w-full text-[11px] font-medium text-amber-800">{method === null ? WITHDRAW_TEXT.stepUpNoMethod : VOID_TEXT.reauthExplain}</p>
+          {method === 'password' && (
+            <div className="flex flex-col gap-1 min-w-0 max-w-full">
+              <label htmlFor="issued-cn-withdraw-reauth-password" className={labelClass}>Your password</label>
+              <input
+                ref={passwordRef} id="issued-cn-withdraw-reauth-password" data-testid="issued-cn-withdraw-reauth-password" type="password" autoComplete="current-password"
+                value={password} readOnly={c.confirming} onChange={(e) => onPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (!signInBlocked) onSignIn(); } }}
+                className={`text-xs px-3 py-2 rounded-lg border border-slate-200 bg-white min-w-0 max-w-full ${focusRing}`}
+              />
+            </div>
+          )}
+          {method !== null && method !== undefined && (
+            <>
+              <button
+                ref={signInButton} type="button" data-testid="issued-cn-withdraw-reauth-confirm" aria-disabled={signInBlocked}
+                onClick={() => { if (!signInBlocked) onSignIn(); }}
+                className={`px-4 py-2 bg-amber-700 text-white text-xs font-black uppercase tracking-widest rounded-xl ${waitable} ${focusRing} ${fitsRow}`}
+              >
+                {method === 'password' ? 'Confirm sign-in' : 'Sign in with Google again'}
+              </button>
+              {c.confirming && (
+                <button type="button" data-testid="issued-cn-withdraw-reauth-stop" onClick={onStopSignIn} className={`${quiet} ${fitsRow}`}>{VOID_TEXT.stopWaiting}</button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      <p data-testid="issued-cn-withdraw-confirm-status" role="status" className="text-sm font-bold text-amber-900">{c.sending ? WITHDRAW_TEXT.sending : c.renewing ? WITHDRAW_TEXT.renewing : c.status !== null && !c.status.alert ? c.status.text : ''}</p>
+      <p data-testid="issued-cn-withdraw-confirm-alert" role="alert" className="text-sm font-bold text-rose-800">{c.status?.alert === true ? c.status.text : ''}</p>
+      {c.stepUp === null && (
+        <div className="flex flex-wrap justify-end items-center gap-3">
+          {why !== '' && <span id="issued-cn-withdraw-send-why" data-testid="issued-cn-withdraw-send-why" className={why === WITHDRAW_TEXT.chooseReason ? 'sr-only' : hintClass}>{why}</span>}
+          <button
+            type="button" data-testid="issued-cn-withdraw-send" aria-disabled={why !== ''} aria-describedby={why !== '' ? 'issued-cn-withdraw-send-why' : undefined}
+            onClick={onPress} className={`${button} ${waitable} ${actionFit}`}
+          >
+            {c.sending ? WITHDRAW_TEXT.sending : WITHDRAW_TEXT.send}
+          </button>
+        </div>
+      )}
+    </DialogFrame>
+  );
+}
+
+/** CN-P3: the user's held withdrawal for the dialog's invoice, beside its credit notes; it outlives the confirmation. Reads only. */
+function WithdrawalCard({ held, waiting, finding, checkText, headingRef, onCheck, onDismiss }: {
+  readonly held: HeldWithdrawal; readonly waiting: boolean; readonly finding: boolean; readonly checkText: string;
+  readonly headingRef: RefObject<HTMLHeadingElement | null>; readonly onCheck: () => void; readonly onDismiss: () => void;
+}) {
+  const attached = held.csrf !== null;
+  const live = isLiveWithdrawal(held);
+  const title = held.state === 'refused' ? WITHDRAW_TEXT.cardRefusedTitle : WITHDRAW_TEXT.cardTitle;
+  const state = held.state === 'refused' ? WITHDRAW_TEXT.cardRefused : !attached ? WITHDRAW_TEXT.cardDetached
+    : held.state === 'sending' ? WITHDRAW_TEXT.cardSending : WITHDRAW_TEXT.cardUnresolved(held.creditNoteNumber);
+  const seen = !live ? '' : finding ? WITHDRAW_TEXT.checking : checkText !== '' ? checkText
+    : held.seen === 'active' ? WITHDRAW_TEXT.seenActive : held.seen === 'unconfirmed' ? WITHDRAW_TEXT.seenUnconfirmed : '';
+  const out = attached && held.state === 'sending';
+  const dismissable = !live || !attached; // never while it is unresolved in this context (it holds the second withdrawal back)
+  return (
+    <div data-testid="issued-payments-cn-withdraw-card" data-state={attached ? held.state : 'detached'} data-id={held.creditNoteId} className="p-4 rounded-2xl border border-amber-200 bg-amber-50 space-y-2">
+      <h4 ref={headingRef} tabIndex={-1} data-testid="issued-payments-cn-withdraw-card-title" className="text-sm font-black text-amber-900">{title}</h4>
+      <p data-testid="issued-payments-cn-withdraw-card-status" role="status" className="text-sm font-bold text-amber-900">{state}</p>
+      <p data-testid="issued-payments-cn-withdraw-card-seen" role="status" className="text-xs font-bold text-slate-700">{seen}</p>
+      <div className="flex flex-wrap items-center gap-3">
+        {live && !out && (
+          <button
+            type="button" data-testid="issued-payments-cn-withdraw-check" aria-disabled={waiting || finding} onClick={() => { if (!waiting && !finding) onCheck(); }}
+            className={`${quiet} ${waitable} ${fitsRow}`}
+          >
+            {WITHDRAW_TEXT.check}
+          </button>
+        )}
+        {dismissable && (
+          <button type="button" data-testid="issued-payments-cn-withdraw-dismiss" aria-describedby={live ? 'issued-cn-withdraw-dismiss-warning' : undefined} onClick={onDismiss} className={`${quiet} ${fitsRow}`}>
+            {WITHDRAW_TEXT.dismiss}
+          </button>
+        )}
+      </div>
+      {live && dismissable && <p id="issued-cn-withdraw-dismiss-warning" className={hintClass}>{WITHDRAW_TEXT.dismissWarning}</p>}
     </div>
   );
 }

@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, createEvent, fireEvent, render as rtlRender, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ACTIVITY_TEXT, CREDIT_TEXT, creditNoteHoldsSignIns, ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, REVERSE_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome, type CreditReads } from './ServerIssuedInvoices';
+import { ACTIVITY_TEXT, CREDIT_TEXT, creditNoteHoldsSignIns, ISSUED_TEXT, IssuedInvoiceDialog, LIST_TEXT, PAYMENTS_TEXT, REVERSE_TEXT, SETTINGS_RULE_TEXT, SETTINGS_TEXT, ServerIssuedInvoices, WITHDRAW_TEXT, VIEW_TEXT, VOID_REFUSED_TEXT, VOID_SIGNIN_WAIT_MS, VOID_TEXT, type IssuedPaymentsCapability, type IssuedVoidCapability, type IssuedReadAnswer, type PaymentsReadAnswer, type ServerIssuedInvoicesProps, type VoidPress, type VoidSendOutcome, type CreditReads } from './ServerIssuedInvoices';
 import { creditNoteIssueBodyOf, creditNoteRegisterBodyOf, settleBodyOf, utcText, INVOICE_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, INVOICE_PAYMENT_REVERSAL_REASONS, INVOICE_VOID_REASONS, VOID_REASON_CODES, createInvoiceIssuingClient, issuingSettingsPathOf, type InvoiceVoidReasonCode, type IssuedInvoice, type IssuedSummary, type VoidResult } from './invoiceIssuingClient';
 import { STORES_PATH, createInvoiceDraftsClient, type StoreEntry } from './invoiceDraftsClient';
 import { quiet as quietClass, RECORD_ID_TEXT } from './ServerInvoiceDrafts';
@@ -25,6 +25,7 @@ import { VOID_NOTE_TEXT, createVoidHoldStore, isLiveVoid, settleVoid, voidExpire
 import type { ShopIdentity } from './ServerCustomerLevels';
 import { createPaymentHoldStore, judgePayment, type HeldPayment, type PaymentHoldStore } from './invoicePaymentHold';
 import { createReversalHoldStore, REVERSAL_NOTE_TEXT, seeReversal, type ReversalHoldStore } from './invoiceReversalHold';
+import { createWithdrawalHoldStore, type WithdrawalHoldStore } from './invoiceCreditNoteWithdrawalHold';
 import {
   CREDIT_NOTE_FIRST_SEND_MS, CREDIT_NOTE_REPLAY_MS, CREDIT_NOTE_SETTLE_REPLAY_MS, createCreditNoteHoldStore, replayWindowOpen, signInFresh,
   type CreditNoteHoldStore, type HeldCreditNote,
@@ -46,7 +47,7 @@ interface Sent { readonly method: string; readonly url: string; readonly headers
 interface User { uid: string; tenant: string; role: 'owner' | 'manager' }
 type View = { storeId: string; version: number; configured: true; legalName: string; storeName: string; postalAddress: string; taxRegistrationId: string | null; tax: { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number } };
 type Kind = 'stores' | 'settings' | 'put' | 'current' | 'list' | 'detail' | 'elig' | 'void' | 'payments' | 'payElig' | 'register' | 'proof' | 'record' | 'settle' | 'attempts'
-  | 'cnRegister' | 'cnProof' | 'cnIssue' | 'cnList' | 'cnSettle' | 'cnLookup' | 'activity';
+  | 'cnRegister' | 'cnProof' | 'cnIssue' | 'cnList' | 'cnSettle' | 'cnLookup' | 'activity' | 'cnWithdraw';
 type TaxWire = { mode: 'none' } | { mode: 'exclusive_rate'; rateMilliPercent: number };
 type LineWire = { position: number; description: string; quantity: number; unitPriceCents: number; lineTotalCents: number };
 /** One issued invoice as the fake stores it (commit B): what the list summarizes and the detail answers. */
@@ -115,7 +116,7 @@ function fakeServer() {
     retryAfter: null as string | null,
     staleLogins: false, // a plain login's sign-in is older than the recent-auth window (a reauthentication's never is)
     hold: { stores: 0, settings: 0, put: 0, current: 0, list: 0, detail: 0, elig: 0, void: 0, payments: 0, payElig: 0, register: 0, proof: 0, record: 0, settle: 0, attempts: 0,
-      cnRegister: 0, cnProof: 0, cnIssue: 0, cnList: 0, cnSettle: 0, cnLookup: 0, activity: 0 } as Record<Kind, number>,
+      cnRegister: 0, cnProof: 0, cnIssue: 0, cnList: 0, cnSettle: 0, cnLookup: 0, activity: 0, cnWithdraw: 0 } as Record<Kind, number>,
     // M7B-PAYMENTS-P2A: the payments read as server/runtime/invoicePayments.ts answers it — the amounts and word over the
     // whole history (due the Total while issued, 0 once voided), pages of 50 oldest first, the cursor the last id of a full page.
     payments: new Map<string, PaymentWire[]>(), // invoice -> its payments, oldest first
@@ -172,6 +173,9 @@ function fakeServer() {
     cnNames: { 'uid-a': 'Ada Owner', 'uid-m': 'Max Manager' } as Record<string, string | null>,
     /** What the next requests of each route do: a status in the chain's envelope after the session (and, for commands, the chain), a whole answer, 'lose' (decide, then lose the answer), 'lose-before', 'commit-404'. */
     cnScripts: { register: [], proof: [], issue: [], list: [], settle: [], lookup: [] } as Record<CnRoute, PayScript[]>,
+    /** CN-P3: what the next withdrawal POSTs do (as cnScripts); the withdrawals that reached the fake, as sent. */
+    wdScripts: [] as PayScript[],
+    withdrawals(): Sent[] { return server.sent.filter((r) => /\/credit-notes\/[^/]+\/withdrawal$/.test(r.url)); },
     cnPage: 50,
     cnAttemptsPage: 50,
     cnBodyViolations: [] as string[],
@@ -530,6 +534,49 @@ function fakeServer() {
           });
         });
       }
+      // M7B-CREDITNOTES-CN-P3: the withdrawal as server/runtime/invoiceCreditNotes.ts and 038 answer it: the store owner's
+      // keys, the recent sign-in before any key, a ledger WITHOUT the session (as the settlement), exactly three body keys,
+      // an unsealed 409 tenant mismatch, 404, the sealed 409 invalid_state once withdrawn; a 200 sets the note's withdrawal
+      // and lowers the invoice's credited sum.
+      const wdRoute = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices\/([0-9a-f-]{36})\/credit-notes\/([0-9a-f-]{36})\/withdrawal$/.exec(url);
+      if (wdRoute !== null) {
+        if (method !== 'POST') return refuse(404);
+        const [, storeId, invoiceId, noteId] = wdRoute;
+        const script = server.wdScripts.shift();
+        if (script === 'lose-before') throw new TypeError('network');
+        const chain = (): Response | null => {
+          const refused = gate();
+          if (refused !== null) return refused;
+          if (headers.get('x-tmpos-csrf') !== '1' || !server.mayCredit(session!.user, storeId)) return refuse(403, 'forbidden');
+          return session!.fresh ? null : refuse(403, 'step_up_required');
+        };
+        if (typeof script === 'number') return server.maybeHold('cnWithdraw', url, () => chain() ?? refuse(script));
+        if (script instanceof Response) return server.maybeHold('cnWithdraw', url, () => chain() ?? script);
+        const decide = (): Response => {
+          const refused = chain();
+          if (refused !== null) return refused;
+          const uid = session!.user.uid;
+          const key = headers.get('idempotency-key') ?? '';
+          const fingerprint = `${uid}\ncn-withdraw\n${storeId}\n${invoiceId}\n${noteId}\n${body}`;
+          const known = server.keys.get(key);
+          if (known !== undefined && known.fingerprint !== fingerprint) return refuse(422, 'idempotency_key_reused');
+          if (known !== undefined) return reply(known.status, known.body, { 'idempotent-replayed': 'true' });
+          const parsed = JSON.parse(body ?? '{}') as Record<string, unknown>;
+          if (Object.keys(parsed).join(',') !== 'expectedTenant,expectedVersion,reason') server.cnBodyViolations.push('withdraw');
+          if (parsed.expectedVersion !== 1 || !Object.keys(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS).includes(parsed.reason as string)) return refuse(400, 'invalid_request');
+          const entry = server.stores[uid]?.find((s) => s.id === storeId);
+          if (entry === undefined || parsed.expectedTenant !== entry.tenantId) return refuse(409, 'write_conflict'); // unsealed
+          const note = server.issued.get(storeId)?.some((i) => i.id === invoiceId) === true ? server.creditNotes.get(invoiceId)?.find((c) => c.id === noteId) : undefined;
+          if (note === undefined) return refuse(404, 'not_found');
+          const seal = (status: number, sealed: unknown): Response => { server.keys.set(key, { fingerprint, status, body: sealed }); return reply(status, sealed); };
+          if (note.withdrawal !== null) return seal(409, { error: 'invalid_state' });
+          note.withdrawal = { withdrawnAt: server.cnTick(), reason: parsed.reason as string, withdrawnByName: server.cnNames[uid] ?? null };
+          server.credits.set(invoiceId, (server.credits.get(invoiceId) ?? 0) - note.grossCents);
+          return seal(200, { creditNote: { id: noteId, invoiceId, status: 'withdrawn' } });
+        };
+        if (script === 'lose') { decide(); throw new TypeError('network'); }
+        return server.maybeHold('cnWithdraw', url, decide);
+      }
       // M7B-CREDITNOTES-CN-P2: the credit-note routes (support F above).
       const cnLookup =/^\/api\/v1\/stores\/([0-9a-f-]{36})\/credit-note-attempts(?:\?(.*))?$/.exec(url);
       const cnRoute = /^\/api\/v1\/stores\/([0-9a-f-]{36})\/invoices\/([0-9a-f-]{36})\/(credit-note-registrations|credit-note-registration-proof|credit-notes|credit-note-settlement)(?:\?(.*))?$/.exec(url);
@@ -710,11 +757,16 @@ function fakeServer() {
 type Server = ReturnType<typeof fakeServer>;
 
 /** The server's continuation for a page ending at `id` (invoiceIssuing.ts encodeIssuedInvoiceCursor). */
-/** DIS-16 (doc 17 D-P2-4, Appendix A): the ONLY button names inside Payments that may say "credit"; none may say "withdraw" (CN-P3). */
+/** DIS-16 (doc 17 D-P2-4, Appendix A): the ONLY button names inside Payments that may say "credit" (CN-P2). */
 const CREDIT_BUTTON_NAMES: readonly string[] = ['Issue credit note', 'Issue another credit note', 'Confirm credit note'];
-/** Every button in `section` named /credit|withdraw/i that is not one of those three exact names. */
+/**
+ * Every button in `section` named /credit|withdraw/i that is not one of those three exact names. CN-P3 narrows it by one
+ * control only: the owner's "Withdraw credit note…" row action on an ACTIVE listed note (its eligibility is pinned by WD-01/02).
+ */
+const isWithdrawRowAction = (b: HTMLElement): boolean => b.getAttribute('data-testid') === 'issued-payments-cn-withdraw' && b.textContent === 'Withdraw credit note…'
+  && b.closest('[data-testid="issued-payments-credit-item"]')?.querySelector('[data-testid="issued-payments-credit-status"]')?.textContent === 'Active';
 const creditNamedOutside = (section: HTMLElement): string[] =>
-  within(section).queryAllByRole('button', { name: /credit|withdraw/i }).map((b) => b.textContent ?? '').filter((name) => !CREDIT_BUTTON_NAMES.includes(name));
+  within(section).queryAllByRole('button', { name: /credit|withdraw/i }).filter((b) => !isWithdrawRowAction(b)).map((b) => b.textContent ?? '').filter((name) => !CREDIT_BUTTON_NAMES.includes(name));
 const cursorOf = (id: string): string => Buffer.concat([Buffer.from([0x04]), Buffer.from(id.replace(/-/g, ''), 'hex')]).toString('base64url');
 /** The amounts a subtotal derives under a tax setting (doc 12 §10.8, BigInt), as the wire shows them. */
 function amountsFor(subtotal: number, tax: TaxWire) {
@@ -781,7 +833,7 @@ function seeded() {
   return server;
 }
 
-interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; revHolds: ReversalHoldStore; cnHolds: CreditNoteHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
+interface Rig { keys: string[]; clock: { mono: number; wall: number }; reauth: Array<string | null>; holds: VoidHoldStore; payHolds: PaymentHoldStore; revHolds: ReversalHoldStore; cnHolds: CreditNoteHoldStore; wdHolds: WithdrawalHoldStore; props: (over?: Partial<ServerIssuedInvoicesProps>) => ServerIssuedInvoicesProps }
 function rig(server: Server): Rig {
   const keys: string[] = [];
   const reauth: Array<string | null> = [];
@@ -795,15 +847,16 @@ function rig(server: Server): Rig {
   const payHolds = createPaymentHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const revHolds = createReversalHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
   const cnHolds = createCreditNoteHoldStore({ now: () => clock.mono, wallNow: () => clock.wall });
+  const wdHolds = createWithdrawalHoldStore();
   const identity: ShopIdentity = {
     idToken: async (uid) => tokens[uid] ?? null,
     reauthMethod: () => 'password',
     reauthenticate: async (uid, password) => { reauth.push(password); return password === 'correct horse' ? tokens[uid] ?? null : null; },
   };
   return {
-    keys, clock, reauth, holds, payHolds, revHolds, cnHolds,
+    keys, clock, reauth, holds, payHolds, revHolds, cnHolds, wdHolds,
     props: (over = {}) => ({
-      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds, reversalHolds: revHolds, creditNoteHolds: cnHolds,
+      uid: 'uid-a', session, issuing, drafts, identity, now: () => clock.mono, wallNow: () => clock.wall, voidHolds: holds, paymentHolds: payHolds, reversalHolds: revHolds, creditNoteHolds: cnHolds, withdrawalHolds: wdHolds,
       // Doc 18's activity read is opt-in here: the older describes' request logs and scripted session answers stay as written.
       creditActivity: false,
       newKey: () => { const k = ['5e1f0000', '1d2f', '4a6b', '9c8d', String(keys.length + 1).padStart(12, '0')].join('-'); keys.push(k); return k; },
@@ -10148,7 +10201,9 @@ describe('Issued invoices — credit notes: the list and the owner\'s attempts l
     expect(within(list).getAllByRole('listitem')).toHaveLength(5);
     expect(numbers()).toEqual(['CN-2', 'CN-3', 'CN-4', 'CN-5', 'CN-1']);
     expect(items()[0].textContent).toBe('CN-2 · Withdrawn · $10.00 · Pricing errorIssued 2026-11-01 00:00:00 UTCWithdrawn 2026-11-01 00:10:00 UTC · Entered by mistakeIssued by Ada OwnerWithdrawn by Ada Owner');
-    expect(items()[3].textContent).toBe('CN-5 · Active · $10.03 · Billing errorIssued 2026-11-01 00:00:03 UTCIssued by Ada Owner');
+    // CN-P3: the owner's active row also carries "Withdraw credit note…" (described by its number and amount); a withdrawn one never.
+    expect(items()[3].textContent).toBe('CN-5 · Active · $10.03 · Billing errorIssued 2026-11-01 00:00:03 UTCIssued by Ada OwnerWithdraw credit note…CN-5, $10.03');
+    expect(items().map((x) => within(x).queryAllByRole('button').map((b) => b.textContent))).toEqual([[], [], [], ['Withdraw credit note…'], ['Withdraw credit note…']]);
     expect(screen.getAllByTestId('issued-payments-credit-reason').map((x) => x.textContent)).toEqual(['Pricing error', 'Service issue', 'Goodwill', 'Billing error', 'Goodwill']);
     expect(screen.getAllByTestId('issued-payments-credit-withdrawal-reason').map((x) => x.textContent)).toEqual(['Entered by mistake', 'Wrong amount', 'Wrong invoice']);
     expect(screen.getAllByTestId('issued-payments-credit-status').map((x) => x.textContent)).toEqual(['Withdrawn', 'Withdrawn', 'Withdrawn', 'Active', 'Active']);
@@ -11125,6 +11180,8 @@ describe('Issued invoices — credit notes: issuing one (M7B-CREDITNOTES-CN-P2, 
     expect(server.paymentReads().length).toBeGreaterThan(payReads);
     expect(cardButtons()).toEqual([CREDIT_TEXT.confirm]);
     expect(describedBy('issued-payments-credit-issue')).toBe(CREDIT_TEXT.blockedOwn);
+    // CN-P3: no Withdraw while this invoice's credit-note attempt is nonterminal; offered on both active notes once confirmed (below).
+    expect(screen.queryAllByTestId('issued-payments-cn-withdraw')).toEqual([]);
     const lookups = server.cnRequests('lookup').length;
     const lists = server.cnRequests('list').length;
     await click('issued-payments-credit-card-confirm');
@@ -11140,6 +11197,7 @@ describe('Issued invoices — credit notes: issuing one (M7B-CREDITNOTES-CN-P2, 
     expect(cardButtons()).toEqual([]);
     await waitFor(() => expect(action()).toHaveAttribute('aria-disabled', 'false'));
     expect(creditNamedOutside(tid('issued-payments'))).toEqual([]);
+    await waitFor(() => expect(screen.queryAllByTestId('issued-payments-cn-withdraw')).toHaveLength(2));
     void made;
   });
 
@@ -14943,5 +15001,385 @@ describe('Issued invoices — the store-wide credit activity (doc 18 §4, §8.4;
     expect(server.writes()).toEqual([]);
     expect(server.activityReads().every((x) => x.method === 'GET' && x.body === undefined)).toBe(true);
     expect(server.activityReads()).toHaveLength(6);
+  });
+});
+
+describe('Issued invoices — withdrawing a credit note (M7B-CREDITNOTES-CN-P3)', { timeout: 30_000 }, () => {
+  beforeEach(() => { madeServers.length = 0; });
+  afterEach(afterEachP289);
+  const VOID = { voidedAt: '2026-10-17T08:30:05.000001Z', reasonCode: 'issued_in_error' };
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const cnPhase = () => screen.queryByTestId('issued-payments-credit-state')?.getAttribute('data-phase') ?? 'none';
+  const wdButtons = () => screen.queryAllByTestId('issued-payments-cn-withdraw');
+  const rowButton = (id: string) => document.querySelector<HTMLElement>(`[data-testid="issued-payments-cn-withdraw"][data-id="${id}"]`);
+  const statusOf = (id: string) => document.querySelector(`[data-testid="issued-payments-credit-item"][data-id="${id}"] [data-testid="issued-payments-credit-status"]`)?.textContent;
+  const cardState = () => screen.queryByTestId('issued-payments-cn-withdraw-card')?.getAttribute('data-state') ?? 'none';
+  const wdStatus = () => tid('issued-payments-cn-withdraw-status').textContent;
+  const wdAlert = () => tid('issued-payments-cn-withdraw-alert').textContent;
+  const BODY = (reason: string) => `{"expectedTenant":"${TENANT_A}","expectedVersion":1,"reason":"${reason}"}`;
+  /** Invoice 1 holds an active note (A, $2.00, credited) and a withdrawn one (B); invoice 2 an active one (C). */
+  async function setup(o: { uid?: string; owner?: boolean; activity?: boolean; over?: (n: number) => Partial<Issued>; prepare?: (server: Server, made: Issued[]) => void } = {}) {
+    const server = seeded();
+    const made = issueAt(server, STORE_1, 2, o.over);
+    if (o.owner !== false) server.cnOwners.add('uid-a');
+    const [a] = server.addCreditNotes(made[0].id, 1, () => ({ grossCents: 200, taxCents: 16, netCents: 184 }));
+    const [b] = server.addCreditNotes(made[0].id, 1, () => ({ withdrawal: { withdrawnAt: cnTime(900), reason: 'wrong_amount', withdrawnByName: 'Ada Owner' } }), 10);
+    const [c] = server.addCreditNotes(made[1].id, 1);
+    server.credits.set(made[0].id, 200);
+    server.credits.set(made[1].id, 100);
+    o.prepare?.(server, made);
+    const r = rig(server);
+    const page = render(<ServerIssuedInvoices {...r.props({ uid: o.uid ?? 'uid-a', creditActivity: o.activity === true })} />);
+    await showAndChoose(STORE_1);
+    await listReady();
+    return { server, made, r, page, a, b, c };
+  }
+  /** Open invoice `n` and wait for its credit-note list (and, for the owner, the action on its active note). */
+  async function open(n: number, owner = true) {
+    await user().click(openButton(n));
+    await viewReady(n);
+    await waitFor(() => expect(cnPhase()).toBe('ready'));
+    if (owner) await waitFor(() => expect(wdButtons().length).toBeGreaterThan(0));
+    else await waitFor(() => expect(screen.queryByTestId('issued-payments-credit-lookup')?.getAttribute('data-phase') ?? 'none').not.toBe('loading'));
+  }
+  async function review(id: string) {
+    await user().click(rowButton(id)!);
+    await waitFor(() => expect(screen.queryByTestId('issued-cn-withdraw-confirm')).not.toBeNull());
+  }
+  async function closeView() {
+    await click('issued-view-close');
+    await waitFor(() => expect(screen.queryByTestId('issued-view')).toBeNull());
+  }
+  const held = (r: Rig) => r.wdHolds.get('uid-a');
+
+  it('WD-01. only the store owner sees "Withdraw credit note…", only on ACTIVE notes of the invoice\'s list; a manager, an owner without the credit-note keys and a failed lookup hide it; showing it sends nothing', async () => {
+    const s = await setup();
+    await open(1);
+    expect(wdButtons().map((b) => [b.textContent, b.getAttribute('data-id'), b.getAttribute('aria-haspopup')])).toEqual([['Withdraw credit note…', s.a.id, 'dialog']]);
+    expect(rowButton(s.b.id), 'never on a withdrawn note').toBeNull();
+    expect(document.getElementById(rowButton(s.a.id)!.getAttribute('aria-describedby')!)?.textContent).toBe(WITHDRAW_TEXT.forNote(s.a.number, '$2.00'));
+    expect(s.server.withdrawals()).toEqual([]);
+    cleanup();
+    for (const who of [{ uid: 'uid-m' }, { owner: false }, { prepare: (server: Server) => { server.cnScripts.lookup.push(503); } }] as const) {
+      const t = await setup(who);
+      await open(1, false);
+      await settle();
+      expect(statusOf(t.a.id)).toBe(CREDIT_TEXT.active);
+      expect(wdButtons(), JSON.stringify(Object.keys(who))).toEqual([]);
+      expect(t.server.withdrawals()).toEqual([]);
+      cleanup();
+    }
+  });
+
+  it('WD-02. no action on a voided invoice (even beside an active note) nor anywhere in the store-wide activity, which stays read-only', async () => {
+    const s = await setup({ activity: true, over: (n) => (n === 1 ? { void: VOID } : {}) });
+    await waitFor(() => expect(screen.queryAllByTestId('issued-credit-activity-number').length).toBe(3));
+    expect(within(tid('issued-credit-activity')).queryAllByRole('button').map((b) => b.textContent)).not.toContain('Withdraw credit note…');
+    expect(within(tid('issued-credit-activity')).queryAllByRole('button', { name: /withdraw/i })).toEqual([]);
+    await user().click(openButton(1));
+    await viewReady(1);
+    await waitFor(() => expect(cnPhase()).toBe('ready'));
+    await waitFor(() => expect(tid('issued-payments-credit-lookup')).toHaveAttribute('data-phase', 'exhausted'));
+    await settle();
+    expect(statusOf(s.a.id)).toBe(CREDIT_TEXT.active);
+    expect(wdButtons(), 'a voided invoice: none').toEqual([]);
+    await closeView();
+    await open(2);
+    expect(wdButtons().map((b) => b.getAttribute('data-id'))).toEqual([s.c.id]);
+    expect(s.server.withdrawals()).toEqual([]);
+  });
+
+  it('WD-03. the confirmation: an alertdialog with the note\'s number, the invoice number and the amount, the consequence, exactly three reasons with none chosen, Withdraw held back until one is; Keep and Escape send nothing and give focus back to the row\'s action', async () => {
+    const s = await setup();
+    await open(1);
+    await review(s.a.id);
+    const dialog = tid('issued-cn-withdraw-confirm');
+    expect(dialog).toHaveAttribute('role', 'alertdialog');
+    expect(tid('issued-cn-withdraw-title')).toHaveTextContent(WITHDRAW_TEXT.title);
+    expect(tid('issued-cn-withdraw-cn')).toHaveTextContent(`CN-${s.a.number}`);
+    expect(tid('issued-cn-withdraw-number')).toHaveTextContent('1');
+    expect(tid('issued-cn-withdraw-amount')).toHaveTextContent('$2.00');
+    expect(tid('issued-cn-withdraw-consequence')).toHaveTextContent('The whole credit note will be withdrawn. No money will be returned.');
+    const radios = within(tid('issued-cn-withdraw-reasons')).getAllByRole('radio') as HTMLInputElement[];
+    expect(radios.map((x) => [x.value, x.closest('label')?.textContent])).toEqual([['entered_in_error', 'Entered in error'], ['wrong_amount', 'Wrong amount'], ['wrong_invoice', 'Wrong invoice']]);
+    expect(radios.some((x) => x.checked)).toBe(false);
+    expect(tid('issued-cn-withdraw-send')).toHaveAttribute('aria-disabled', 'true');
+    expect(document.activeElement).toBe(tid('issued-cn-withdraw-keep'));
+    await click('issued-cn-withdraw-send');
+    expect(tid('issued-cn-withdraw-reason-error')).toHaveTextContent(WITHDRAW_TEXT.chooseReason);
+    await settle();
+    expect(s.server.withdrawals()).toHaveLength(0);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    expect(tid('issued-cn-withdraw-send')).toHaveAttribute('aria-disabled', 'false');
+    await user().keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByTestId('issued-cn-withdraw-confirm')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(rowButton(s.a.id)));
+    await review(s.a.id);
+    expect((within(tid('issued-cn-withdraw-reasons')).getAllByRole('radio') as HTMLInputElement[]).some((x) => x.checked), 'a new review: none chosen').toBe(false);
+    await click('issued-cn-withdraw-keep');
+    await waitFor(() => expect(screen.queryByTestId('issued-cn-withdraw-confirm')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(rowButton(s.a.id)));
+    await settle();
+    expect(s.server.withdrawals(), 'Keep and Escape send nothing').toHaveLength(0);
+    expect(s.r.keys).toEqual([]);
+  });
+
+  it('WD-04. a double press is ONE POST under ONE key with the exact path, headers and bytes; its 200 reads the list, the invoice and its amounts again and shows the server\'s values', async () => {
+    const s = await setup();
+    await open(1);
+    expect(tid('issued-payments-credited')).toHaveTextContent('$2.00');
+    const due = tid('issued-payments-due').textContent;
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-entered_in_error'));
+    s.server.hold.cnWithdraw = 1;
+    const lists = s.server.cnRequests('list').length;
+    const details = s.server.details().length;
+    const pays = s.server.paymentReads().length;
+    act(() => { fireEvent.click(tid('issued-cn-withdraw-send')); fireEvent.click(tid('issued-cn-withdraw-send')); });
+    await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['cnWithdraw']));
+    fireEvent.click(tid('issued-cn-withdraw-send'));
+    await settle();
+    const posts = s.server.withdrawals();
+    expect(posts).toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+    const [post] = posts;
+    expect(`${post.method} ${post.url}`).toBe(`POST ${STORES_PATH}/${STORE_1}/invoices/${s.made[0].id}/credit-notes/${s.a.id}/withdrawal`);
+    expect(post.headers.get('idempotency-key')).toBe(s.r.keys[0]);
+    expect(post.headers.get('x-tmpos-csrf')).toBe('1');
+    expect(post.headers.get('content-type')).toBe('application/json');
+    expect(post.headers.get('x-tmpos-session-csrf')).toBe(s.server.cnRequests('list')[0].headers.get('x-tmpos-session-csrf'));
+    expect(post.body).toBe(BODY('entered_in_error'));
+    expect(held(s.r)).toMatchObject({ key: s.r.keys[0], state: 'sending', creditNoteId: s.a.id, invoiceId: s.made[0].id, storeId: STORE_1, reason: 'entered_in_error' });
+    await act(async () => { s.server.held.shift()!.release(); });
+    await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.withdrawn));
+    await waitFor(() => expect(statusOf(s.a.id)).toBe(CREDIT_TEXT.withdrawn));
+    await waitFor(() => expect(tid('issued-payments-credited')).toHaveTextContent('$0.00'));
+    expect(tid('issued-payments-remaining').textContent).toBe(due);
+    expect(s.server.cnRequests('list').length).toBeGreaterThan(lists);
+    expect(s.server.details().length).toBeGreaterThan(details);
+    expect(s.server.paymentReads().length).toBeGreaterThan(pays);
+    expect(wdButtons(), 'no action on the now withdrawn note').toEqual([]);
+    expect(cardState()).toBe('none');
+    expect(s.server.cnBodyViolations).toEqual([]);
+    await settle();
+    expect(s.server.withdrawals()).toHaveLength(1);
+  });
+
+  it('WD-05. a stale sign-in: the 403 step_up_required opens the sign-in and holds nothing; finishing it sends NOTHING and clears the reason; only a deliberate new press sends exactly one more request under a new key', async () => {
+    const s = await setup();
+    await open(1);
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_invoice'));
+    s.server.wdScripts.push(json(403, { error: 'step_up_required', requestId: 'req-synthetic' }));
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(tid('issued-cn-withdraw-reauth-group')).toBeInTheDocument());
+    expect(tid('issued-cn-withdraw-confirm-alert')).toHaveTextContent(WITHDRAW_TEXT.stepUp);
+    expect(s.server.withdrawals()).toHaveLength(1);
+    expect(held(s.r), 'nothing ran: the key is dropped').toBeUndefined();
+    const logins = s.server.logins().length;
+    type('issued-cn-withdraw-reauth-password', 'correct horse');
+    await user().click(tid('issued-cn-withdraw-reauth-confirm'));
+    await waitFor(() => expect(tid('issued-cn-withdraw-confirm-status')).toHaveTextContent(WITHDRAW_TEXT.renewed));
+    expect(s.server.logins().length).toBe(logins + 1);
+    expect((within(tid('issued-cn-withdraw-reasons')).getAllByRole('radio') as HTMLInputElement[]).every((x) => !x.checked), 'the reason is cleared').toBe(true);
+    await settle();
+    expect(s.server.withdrawals(), 'the sign-in never sends').toHaveLength(1);
+    await click('issued-cn-withdraw-send');
+    expect(s.server.withdrawals()).toHaveLength(1);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_invoice'));
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.withdrawn));
+    const posts = s.server.withdrawals();
+    expect(posts).toHaveLength(2);
+    expect(s.r.keys).toHaveLength(2);
+    expect(posts[1].headers.get('idempotency-key')).toBe(s.r.keys[1]);
+    expect(posts[1].body).toBe(BODY('wrong_invoice'));
+  });
+
+  for (const arm of ['the invoice', 'the store', 'the session'] as const) {
+    it(`WD-06. a change of ${arm} before a late 200 discards it: the attempt is detached (never shown as this attempt's withdrawal), nothing else is sent, and only a status read recovers it`, async () => {
+      vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+      const s = await setup();
+      await open(1);
+      await review(s.a.id);
+      await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+      s.server.hold.cnWithdraw = 1;
+      await click('issued-cn-withdraw-send');
+      await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['cnWithdraw']));
+      if (arm === 'the invoice') {
+        await click('issued-cn-withdraw-keep');
+        await closeView();
+        await open(2, false);
+        expect(wdButtons(), 'one live attempt: held back on every invoice').toEqual([]);
+      } else if (arm === 'the store') {
+        fireEvent.change(tid('issued-store') as HTMLSelectElement, { target: { value: STORE_2 } });
+        await listReady();
+      } else {
+        s.server.otherTab('uid-a');
+        await focusEvents();
+        await waitFor(() => expect(held(s.r)?.csrf).toBeNull());
+      }
+      await act(async () => { s.server.held.shift()!.release(); });
+      await settle();
+      expect(held(s.r)).toMatchObject({ key: s.r.keys[0], csrf: null, state: 'unresolved', attributed: false });
+      expect(screen.queryByText(WITHDRAW_TEXT.withdrawn)).toBeNull();
+      expect(s.server.withdrawals()).toHaveLength(1);
+      // Back on the attempt's own invoice: its card says it could not be used; a second withdrawal is held back.
+      if (screen.queryByTestId('issued-view') !== null) await closeView();
+      if (screen.queryByTestId('issued-retry') !== null) await click('issued-retry');
+      if ((screen.queryByTestId('issued-store') as HTMLSelectElement | null)?.value !== STORE_1 || screen.queryByTestId('issued-show') !== null) await showAndChoose(STORE_1);
+      await listReady();
+      await open(1, false);
+      await waitFor(() => expect(cardState()).toBe('detached'));
+      expect(tid('issued-payments-cn-withdraw-card-status')).toHaveTextContent(WITHDRAW_TEXT.cardDetached);
+      expect(within(tid('issued-payments-cn-withdraw-card')).getAllByRole('button').map((b) => b.textContent), 'detached: Dismiss may stop tracking it').toEqual([WITHDRAW_TEXT.check, WITHDRAW_TEXT.dismiss]);
+      expect(wdButtons()).toEqual([]);
+      const mark = s.server.sent.length;
+      await click('issued-payments-cn-withdraw-check');
+      await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.seenWithdrawn));
+      expect(sentFrom(s.server, mark).every((l) => l.startsWith('GET ')), 'recovery sends only reads').toBe(true);
+      expect(s.server.withdrawals()).toHaveLength(1);
+    });
+  }
+
+  it('WD-07. a sealed invalid_state (withdrawn meanwhile) re-reads the list and says so; a 503 (the write pause included) is never "not withdrawn": the attempt stays unresolved', async () => {
+    const s = await setup();
+    await open(1);
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    s.a.withdrawal = { withdrawnAt: s.server.cnTick(), reason: 'entered_in_error', withdrawnByName: 'Ada Owner' }; // another tab withdrew it
+    const lists = s.server.cnRequests('list').length;
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.alreadyWithdrawn));
+    await waitFor(() => expect(statusOf(s.a.id)).toBe(CREDIT_TEXT.withdrawn));
+    expect(s.server.cnRequests('list').length).toBeGreaterThan(lists);
+    expect(screen.queryByTestId('issued-cn-withdraw-confirm')).toBeNull();
+    expect(s.server.withdrawals()).toHaveLength(1);
+    expect(held(s.r)).toMatchObject({ state: 'refused', refusal: 'invalid-state' });
+    await closeView();
+    await open(2);
+    await review(s.c.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    s.server.wdScripts.push(503);
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    expect(tid('issued-payments-cn-withdraw-card-status')).toHaveTextContent(WITHDRAW_TEXT.cardUnresolved(s.c.number));
+    expect(wdAlert()).toBe('');
+    expect(statusOf(s.c.id)).toBe(CREDIT_TEXT.active);
+    expect(s.server.withdrawals()).toHaveLength(2);
+  });
+
+  it('WD-08. a lost answer is unresolved with "Check credit note status": still active, a failed read, a partial read without the note and a missing row all leave it unresolved and a second withdrawal held back; a read showing it withdrawn settles it neutrally; recovery only reads', async () => {
+    const s = await setup({ prepare: (server) => { server.wdScripts.push('lose'); } });
+    await open(1);
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    expect(s.server.withdrawals()).toHaveLength(1);
+    expect(wdButtons(), 'a second withdrawal is held back').toEqual([]);
+    const mark = s.server.sent.length;
+    const check = async (seen: string) => {
+      await click('issued-payments-cn-withdraw-check');
+      await waitFor(() => expect(tid('issued-payments-cn-withdraw-card-seen')).toHaveTextContent(seen));
+      expect(cardState()).toBe('unresolved');
+      expect(within(tid('issued-payments-cn-withdraw-card')).getAllByRole('button').map((b) => b.textContent), 'no Dismiss while unresolved here').toEqual([WITHDRAW_TEXT.check]);
+      expect(wdButtons()).toEqual([]);
+    };
+    const note = s.a.withdrawal;
+    s.a.withdrawal = null; // read as still active
+    await check(WITHDRAW_TEXT.seenActive);
+    s.server.cnScripts.list.push(503); // a failed read
+    await check(WITHDRAW_TEXT.seenUnconfirmed);
+    s.server.cnScripts.list.push(json(200, { invoice: { id: s.made[0].id }, creditNotes: [], nextCursor: s.b.id }), 503); // a partial read without the note
+    await check(WITHDRAW_TEXT.seenUnconfirmed);
+    const all = s.server.creditNotes.get(s.made[0].id)!;
+    s.server.creditNotes.set(s.made[0].id, all.filter((x) => x.id !== s.a.id)); // missing
+    await check(WITHDRAW_TEXT.seenUnconfirmed);
+    s.server.creditNotes.set(s.made[0].id, all);
+    s.a.withdrawal = note; // the server holds it withdrawn
+    await click('issued-payments-cn-withdraw-check');
+    await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.seenWithdrawn));
+    expect(cardState()).toBe('none');
+    expect(held(s.r)).toMatchObject({ state: 'withdrawn', attributed: false });
+    await waitFor(() => expect(statusOf(s.a.id)).toBe(CREDIT_TEXT.withdrawn));
+    expect(sentFrom(s.server, mark).every((l) => l.startsWith('GET ')), 'recovery sends only reads').toBe(true);
+    expect(s.server.withdrawals()).toHaveLength(1);
+  });
+
+  it('WD-10. with the dialog closed, an unresolved withdrawal stays reachable in its store with "Check credit note status" only — never Dismiss while it is live in this context; a read showing the note still active keeps it unresolved and Withdraw held back; no second POST', async () => {
+    const s = await setup({ prepare: (server) => { server.wdScripts.push('lose-before'); } });
+    await open(1);
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    expect(within(tid('issued-payments-cn-withdraw-card')).getAllByRole('button').map((b) => b.textContent), 'in the dialog: no Dismiss').toEqual([WITHDRAW_TEXT.check]);
+    await closeView();
+    expect(cardState(), 'the section\'s card').toBe('unresolved');
+    expect(within(tid('issued-payments-cn-withdraw-card')).getAllByRole('button').map((b) => b.textContent), 'in the section: no Dismiss').toEqual([WITHDRAW_TEXT.check]);
+    expect(screen.queryByTestId('issued-payments-cn-withdraw-dismiss')).toBeNull();
+    const mark = s.server.sent.length;
+    await click('issued-payments-cn-withdraw-check');
+    await waitFor(() => expect(tid('issued-payments-cn-withdraw-card-seen')).toHaveTextContent(WITHDRAW_TEXT.seenActive));
+    expect(held(s.r)).toMatchObject({ state: 'unresolved', seen: 'active', key: s.r.keys[0] });
+    expect(screen.queryByTestId('issued-payments-cn-withdraw-dismiss')).toBeNull();
+    expect(sentFrom(s.server, mark).every((l) => l.startsWith('GET '))).toBe(true);
+    await open(1, false);
+    await waitFor(() => expect(cardState()).toBe('unresolved'));
+    await settle();
+    expect(statusOf(s.a.id)).toBe(CREDIT_TEXT.active);
+    expect(rowButton(s.a.id), 'the same note: Withdraw stays held back').toBeNull();
+    expect(wdButtons()).toEqual([]);
+    expect(s.server.withdrawals(), 'no second withdrawal POST').toHaveLength(1);
+    expect(s.r.keys).toHaveLength(1);
+  });
+
+  for (const late of ['429', '401'] as const) {
+    it(`WD-11. a late ${late} for an attempt whose invoice view was left (another invoice of the same store open) only detaches it: no rate-limit wait, the session not ended, nothing else sent`, async () => {
+      const s = await setup();
+      await open(1);
+      await review(s.a.id);
+      await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+      s.server.hold.cnWithdraw = 1;
+      await click('issued-cn-withdraw-send');
+      await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['cnWithdraw']));
+      await click('issued-cn-withdraw-keep');
+      await closeView();
+      await open(2, false);
+      const reply = late === '429'
+        ? new Response(JSON.stringify({ error: 'rate_limited', requestId: 'req-synthetic' }), { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '30' } })
+        : json(401, { error: 'unauthenticated', requestId: 'req-synthetic' });
+      await act(async () => { s.server.held.shift()!.release(reply); });
+      await settle();
+      expect(held(s.r)).toMatchObject({ key: s.r.keys[0], csrf: null, state: 'unresolved' });
+      expect(document.getElementById('issued-payments-wait'), 'no rate-limit wait').toBeNull();
+      expect(screen.queryByText(ISSUED_TEXT.ended), 'the session not ended').toBeNull();
+      expect(screen.queryByTestId('issued-view'), 'invoice 2 stays open').not.toBeNull();
+      expect(tid('issued-view-title')).toHaveTextContent('Invoice 2');
+      expect(s.server.withdrawals()).toHaveLength(1);
+    });
+  }
+
+  it('WD-09. CA-44: a withdrawal 200 re-reads page one of a loaded activity view once; a failed list re-read shows the list\'s unavailable state while the withdrawal still stands', async () => {
+    const s = await setup({ activity: true });
+    await waitFor(() => expect(screen.queryAllByTestId('issued-credit-activity-number').length).toBe(3));
+    await open(1);
+    await review(s.a.id);
+    await user().click(tid('issued-cn-withdraw-reason-wrong_amount'));
+    const acts = s.server.activityReads().length;
+    s.server.hold.cnWithdraw = 1;
+    await click('issued-cn-withdraw-send');
+    await waitFor(() => expect(s.server.held.map((h) => h.kind)).toEqual(['cnWithdraw']));
+    s.server.cnScripts.list.push(503);
+    await act(async () => { s.server.held.shift()!.release(); });
+    await waitFor(() => expect(wdStatus()).toBe(WITHDRAW_TEXT.withdrawn));
+    await waitFor(() => expect(tid('issued-payments-credit-state')).toHaveTextContent(CREDIT_TEXT.listFailed));
+    await waitFor(() => expect(s.server.activityReads().length).toBe(acts + 1));
+    expect(s.server.activityReads()[acts].url).toBe(`${STORES_PATH}/${STORE_1}/credit-notes`);
+    expect(held(s.r)).toMatchObject({ state: 'withdrawn', attributed: true });
+    await settle();
+    expect(s.server.activityReads().length).toBe(acts + 1);
+    expect(s.server.withdrawals()).toHaveLength(1);
   });
 });

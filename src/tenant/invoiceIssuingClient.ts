@@ -90,6 +90,9 @@ export const creditNoteRegistrationsPathOf = (storeId: string, invoiceId: string
 export const creditNoteProofPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-note-registration-proof`;
 export const creditNotesPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-notes`;
 export const creditNoteSettlementPathOf = (storeId: string, invoiceId: string): string => `${issuedInvoicePathOf(storeId, invoiceId)}/credit-note-settlement`;
+/** One credit note's withdrawal (M7B-CREDITNOTES-CN-P3; server/runtime/invoiceCreditNotes.ts): a POST under the note. */
+export const creditNoteWithdrawalPathOf = (storeId: string, invoiceId: string, creditNoteId: string): string =>
+  `${creditNotesPathOf(storeId, invoiceId)}/${creditNoteId}/withdrawal`;
 /** The caller's own credit-note attempts at one store (every invoice), oldest registration first. */
 export const creditNoteAttemptsPathOf = (storeId: string): string => `${STORES_PATH}/${storeId}/credit-note-attempts`;
 /** The store-wide credit activity (docs/phase-4/18 §5.1; server STORE_CREDIT_ACTIVITY_PATH): no invoice segment. Read-only. */
@@ -351,6 +354,16 @@ export type ReverseResult =
   | { readonly kind: 'reversed'; readonly replayed: boolean }
   | { readonly kind: 'invalid-state' | 'write-conflict' | 'step-up' | PaymentChainKind }
   | RateLimited | Unknown;
+/**
+ * A credit-note withdrawal answer (M7B-CREDITNOTES-CN-P3), the reversal's shape: `withdrawn` only for the exact 200 naming
+ * the credit note AND the invoice asked. Sealed `invalid-state` (already withdrawn) and `write-conflict` (unreachable: the
+ * planner pins version 1). `step-up`: 403 step_up_required, before any key. A 503 (the write pause included), an unnamed
+ * word or shape, a mismatched 200 or no answer is `unknown`.
+ */
+export type WithdrawCreditNoteResult =
+  | { readonly kind: 'withdrawn'; readonly replayed: boolean }
+  | { readonly kind: 'invalid-state' | 'write-conflict' | 'step-up' | PaymentChainKind }
+  | RateLimited | Unknown;
 /** One of the caller's own payment attempts as the attempts read answers it (never a registration id). */
 export interface PaymentAttempt {
   readonly invoiceId: string; readonly invoiceNumber: number; readonly attemptId: string; readonly state: PaymentAttemptState; readonly version: 1 | 2 | 3;
@@ -583,6 +596,13 @@ const registerSentOf = (body: string) => sentOf(body, (p) => registerBodyOf(p.ex
 const recordSentOf = (body: string) => sentOf(body, (p) => recordBodyOf(p as unknown as RecordFields));
 const settleSentOf = (body: string) => sentOf(body, (p) => settleBodyOf(p.expectedTenant as string, p.attemptId as string, p.expectedVersion as 1 | 2));
 const reverseSentOf = (body: string) => sentOf(body, (p) => reverseBodyOf(p.expectedTenant as string, p.reasonCode as string));
+/** The withdrawal body, built ONCE: exactly `{"expectedTenant":…,"expectedVersion":1,"reason":…}` (an active note is version 1) — or null. */
+export function creditNoteWithdrawBodyOf(expectedTenant: string, reason: string): string | null {
+  return isCustomerId(expectedTenant) && isKeyOf(INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS, reason)
+    ? JSON.stringify({ expectedTenant, expectedVersion: 1, reason }) : null;
+}
+// A parsed body naming another version rebuilds differently (the builder pins 1), so it is refused here.
+const creditWithdrawSentOf = (body: string) => sentOf(body, (p) => creditNoteWithdrawBodyOf(p.expectedTenant as string, p.reason as string));
 
 /**
  * The credit-note register body, built ONCE: exactly `{"expectedTenant","attemptId","grossCents","reason"}` in that order —
@@ -1259,6 +1279,12 @@ export interface InvoiceIssuingClient {
    */
   reversePayment(storeId: string, invoiceId: string, paymentId: string, idempotencyKey: string, body: string, csrf: string): Promise<ReverseResult>;
   /**
+   * One withdrawal of `creditNoteId` on `invoiceId` (M7B-CREDITNOTES-CN-P3), as `reversePayment`: `body` exactly as
+   * creditNoteWithdrawBodyOf built it, under `idempotencyKey`; no signal (the module's timeout ends only the wait). Anything
+   * outside its grammar is `not-sent`, nothing sent. One fetch, never a retry. Never rejects.
+   */
+  withdrawCreditNote(storeId: string, invoiceId: string, creditNoteId: string, idempotencyKey: string, body: string, csrf: string): Promise<WithdrawCreditNoteResult>;
+  /**
    * The credit-note commands (M7B-CREDITNOTES-CN-P2): `body` exactly as its builder made it (settlement: `settleBodyOf`),
    * under `idempotencyKey` (a canonical lowercase UUID v4); never aborted — no signal and no timeout of their own (the
    * proof neither). A body not byte for byte its builder's, a bad key or an id outside its grammar is `not-sent`. One fetch,
@@ -1703,6 +1729,22 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
     return paymentRefusal(answer, { invalid_state: 'invalid-state', write_conflict: 'write-conflict' } as const);
   }
 
+  async function withdrawCreditNote(storeId: string, invoiceId: string, creditNoteId: string, idempotencyKey: string, body: string, csrf: string): Promise<WithdrawCreditNoteResult> {
+    if (!isCustomerId(storeId) || !isVoidTarget(invoiceId) || !isVoidTarget(creditNoteId) || creditWithdrawSentOf(body) === null || !KEY_V4_RE.test(idempotencyKey)) return NOT_SENT;
+    const answer = await command('POST', creditNoteWithdrawalPathOf(storeId, invoiceId, creditNoteId), body, idempotencyKey, csrf);
+    if (answer === null) return NO_ANSWER;
+    if (answer.status === 200) {
+      const replayed = replayOf(answer);
+      const n = memberOf(answer.body, 'creditNote', ['id', 'invoiceId', 'status']);
+      if (n !== undefined && n.id === creditNoteId && n.invoiceId === invoiceId && n.status === 'withdrawn' && replayed !== null) {
+        return Object.freeze({ kind: 'withdrawn', replayed });
+      }
+      return ANSWERED;
+    }
+    if (answer.status === 403 && shapes(answer).chain('step_up_required')) return Object.freeze({ kind: 'step-up' });
+    return paymentRefusal(answer, { invalid_state: 'invalid-state', write_conflict: 'write-conflict' } as const);
+  }
+
   async function paymentAttempts(storeId: string, after: string | null, csrf: string, signal?: AbortSignal): Promise<AttemptsResult> {
     if (!isCustomerId(storeId) || (after !== null && !isAttemptsCursor(after))) return UNAVAILABLE; // nothing is sent
     const answer = await read(`${paymentAttemptsPathOf(storeId)}${after === null ? '' : `?after=${after}`}`, csrf, signal);
@@ -1834,7 +1876,7 @@ export function createInvoiceIssuingClient(options: { fetch?: typeof fetch; time
   return Object.freeze({
     getSettings, saveSettings, issueEligibility, issuePreview, issue, listIssued, findIssued, getIssued, getPayments, voidEligibility, voidInvoice,
     paymentEligibility, registerPayment, paymentProof, recordPayment, settlePayment, paymentAttempts, reversalEligibility, reversePayment,
-    registerCreditNote, creditNoteProof, issueCreditNote, settleCreditNote, creditNoteAttempts, listCreditNotes, storeCreditActivity,
+    withdrawCreditNote, registerCreditNote, creditNoteProof, issueCreditNote, settleCreditNote, creditNoteAttempts, listCreditNotes, storeCreditActivity,
   });
 }
 

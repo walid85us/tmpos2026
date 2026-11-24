@@ -40,7 +40,9 @@ import {
   INVOICE_CREDIT_NOTES_PAGE_SIZE, INVOICE_CREDIT_NOTES_PATH, INVOICE_CREDIT_NOTE_ATTEMPTS_PAGE_SIZE, INVOICE_CREDIT_NOTE_ATTEMPTS_PATH, INVOICE_CREDIT_NOTE_ATTEMPT_STATES,
   INVOICE_CREDIT_NOTE_NAME_MAX_LENGTH, INVOICE_CREDIT_NOTE_PROOF_PATH, INVOICE_CREDIT_NOTE_REASONS as SERVER_CREDIT_NOTE_REASONS, INVOICE_CREDIT_NOTE_REGISTER_PATH,
   INVOICE_CREDIT_NOTE_SETTLE_PATH, INVOICE_CREDIT_NOTE_WITHDRAWAL_REASONS as SERVER_WITHDRAWAL_REASONS, STORE_CREDIT_ACTIVITY_PATH,
+  INVOICE_CREDIT_NOTE_WITHDRAW_PATH,
 } from '../../server/runtime/invoiceCreditNotes';
+import { creditNoteWithdrawBodyOf, creditNoteWithdrawalPathOf } from './invoiceIssuingClient';
 
 const cp = (code: number): string => String.fromCodePoint(code);
 const unit = (code: number): string => String.fromCharCode(code);
@@ -2197,4 +2199,96 @@ test('IIC-CA-07. doc 18 §4.4 across pages: a page joins the loaded traversal on
   assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(8)])), false, 'a loaded number: not strictly descending');
   assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(10)])), false, 'a higher number: re-sorted chains never join');
   assert.equal(storeCreditActivityFollows(first.creditNotes, await pageOf([activityNote(7, { id: uuid(0xe009) })])), false, 'a loaded id again');
+});
+
+// ---- M7B-CREDITNOTES-CN-P3: the credit-note withdrawal (the reversal's shape) ----
+
+const WD_NOTE = uuid(0xd0a);
+const WD_BODY = creditNoteWithdrawBodyOf(TENANT, 'wrong_amount') as string;
+const WITHDRAWN = (over: Record<string, unknown> = {}) => ({ creditNote: { id: WD_NOTE, invoiceId: INVOICE, status: 'withdrawn', ...over } });
+
+test('IIC-60. CN-P3: the withdrawal path is the server\'s template filled in, under the credit note', () => {
+  const fill = (template: string): string => template.replace(/\{(\w+)\}/g, (_m, name: string) => ({ storeId: STORE, id: INVOICE, creditNoteId: WD_NOTE } as Record<string, string>)[name]);
+  assert.equal(creditNoteWithdrawalPathOf(STORE, INVOICE, WD_NOTE), `${BASE}/credit-notes/${WD_NOTE}/withdrawal`);
+  assert.equal(creditNoteWithdrawalPathOf(STORE, INVOICE, WD_NOTE), fill(INVOICE_CREDIT_NOTE_WITHDRAW_PATH));
+});
+
+test('IIC-61. CN-P3: the withdrawal body is built ONCE: exactly {"expectedTenant","expectedVersion":1,"reason"} for each of the three reasons; anything else is null; a body not byte for byte the builder\'s (another version included), a bad id or key sends NOTHING (not-sent)', async () => {
+  for (const reason of SERVER_WITHDRAWAL_REASONS) {
+    assert.equal(creditNoteWithdrawBodyOf(TENANT, reason), `{"expectedTenant":"${TENANT}","expectedVersion":1,"reason":"${reason}"}`, reason);
+  }
+  for (const reason of ['', 'other', 'goodwill', 'wrong_method', 'toString', '__proto__', ' wrong_amount']) assert.equal(creditNoteWithdrawBodyOf(TENANT, reason), null, `reason ${JSON.stringify(reason)}`);
+  for (const tenant of ['', TENANT.toUpperCase(), `${TENANT} `, 'tenant']) assert.equal(creditNoteWithdrawBodyOf(tenant, 'wrong_amount'), null, `tenant ${JSON.stringify(tenant)}`);
+  const BAD_KEY_V1 = KEY.replace(/-4/, '-1');
+  const rows: Array<[string, string, string, string, string]> = [
+    ['not-a-store', INVOICE, WD_NOTE, KEY, WD_BODY], [STORE, 'x', WD_NOTE, KEY, WD_BODY], [STORE, INVOICE, 'x', KEY, WD_BODY],
+    [STORE, INVOICE, WD_NOTE.toUpperCase(), KEY, WD_BODY], [STORE, INVOICE, WD_NOTE, KEY.toUpperCase(), WD_BODY], [STORE, INVOICE, WD_NOTE, BAD_KEY_V1, WD_BODY],
+    [STORE, INVOICE, WD_NOTE, KEY, WD_BODY.replace(':', ': ')],
+    [STORE, INVOICE, WD_NOTE, KEY, JSON.stringify({ expectedTenant: TENANT, expectedVersion: 2, reason: 'wrong_amount' })],
+    [STORE, INVOICE, WD_NOTE, KEY, JSON.stringify({ reason: 'wrong_amount', expectedVersion: 1, expectedTenant: TENANT })],
+    [STORE, INVOICE, WD_NOTE, KEY, JSON.stringify({ expectedTenant: TENANT, expectedVersion: 1, reason: 'wrong_amount', x: 1 })],
+    [STORE, INVOICE, WD_NOTE, KEY, reverseBodyOf(TENANT, 'wrong_amount') as string], [STORE, INVOICE, WD_NOTE, KEY, ''],
+  ];
+  for (const [i, [store, invoice, note, key, body]] of rows.entries()) {
+    const { calls, client } = scripted();
+    assert.deepEqual(await client.withdrawCreditNote(store, invoice, note, key, body, CSRF), { kind: 'not-sent' }, `row ${i}`);
+    assert.equal(calls.length, 0, `row ${i} sent nothing`);
+  }
+});
+
+test('IIC-62. CN-P3: a withdrawal is ONE fetch: POST to the note\'s withdrawal path with exactly the five command headers (one Idempotency-Key, the session CSRF token) and the caller\'s exact bytes; same-origin, credentialed, uncached, never redirected; no caller\'s AbortSignal', async () => {
+  const { calls, client } = scripted(refused(503, 'service_unavailable'));
+  await client.withdrawCreditNote(STORE, INVOICE, WD_NOTE, KEY, WD_BODY, CSRF);
+  assert.equal(calls.length, 1);
+  const [call] = calls;
+  assert.equal(`${call.init.method} ${call.url}`, `POST ${BASE}/credit-notes/${WD_NOTE}/withdrawal`);
+  const COMMAND = [['accept', 'application/json'], ['content-type', 'application/json'], ['idempotency-key', KEY], ['x-tmpos-csrf', '1'], ['x-tmpos-session-csrf', CSRF]];
+  assert.ok(JSON.stringify([...headersOf(call).entries()]) === JSON.stringify(COMMAND), 'exactly the five command headers');
+  assert.ok(call.init.body === WD_BODY && WD_BODY === `{"expectedTenant":"${TENANT}","expectedVersion":1,"reason":"wrong_amount"}`, 'the caller\'s exact bytes');
+  assert.equal(call.init.credentials, 'include');
+  assert.equal(call.init.mode, 'same-origin');
+  assert.equal(call.init.cache, 'no-store');
+  assert.equal(call.init.redirect, 'error');
+  assert.equal(call.init.referrerPolicy, 'no-referrer');
+  assert.ok(call.init.signal instanceof AbortSignal); // the module's own (its timeout), never a caller's
+  assert.equal(client.withdrawCreditNote.length, 6);
+});
+
+test('IIC-63. CN-P3: every withdrawal answer is ONE outcome by status AND word AND envelope: withdrawn ONLY for the exact 200 naming the note and invoice asked; sealed invalid_state/write_conflict; step_up_required step-up; the chain\'s own; a 503 (the write pause), a timeout, no answer or any other 200 unknown; never a retry', async () => {
+  const table: Array<[Response | Error, unknown]> = [
+    [json(200, WITHDRAWN()), { kind: 'withdrawn', replayed: false }],
+    [json(200, WITHDRAWN(), { 'idempotent-replayed': 'true' }), { kind: 'withdrawn', replayed: true }],
+    [json(200, WITHDRAWN(), { 'idempotent-replayed': 'yes' }), { kind: 'unknown', responded: true }],
+    [json(200, WITHDRAWN({ id: uuid(0xd0b) })), { kind: 'unknown', responded: true }],
+    [json(200, WITHDRAWN({ invoiceId: uuid(0x1a2) })), { kind: 'unknown', responded: true }],
+    [json(200, WITHDRAWN({ status: 'active' })), { kind: 'unknown', responded: true }],
+    [json(200, WITHDRAWN({ grossCents: 100 })), { kind: 'unknown', responded: true }],
+    [json(200, { ...WITHDRAWN(), requestId: 'r' }), { kind: 'unknown', responded: true }],
+    [json(200, { payment: { id: WD_NOTE, invoiceId: INVOICE, status: 'withdrawn' } }), { kind: 'unknown', responded: true }],
+    [new Response('ok', { status: 200 }), { kind: 'unknown', responded: true }],
+    [json(201, WITHDRAWN()), { kind: 'unknown', responded: true }],
+    [sealed(409, 'invalid_state'), { kind: 'invalid-state' }], [sealed(409, 'write_conflict'), { kind: 'write-conflict' }],
+    [refused(409, 'invalid_state'), { kind: 'unknown', responded: true }], [refused(409, 'write_conflict'), { kind: 'tenant-conflict' }],
+    [refused(409, 'request_in_progress'), { kind: 'in-progress' }], [sealed(409, 'already_recorded'), { kind: 'unknown', responded: true }],
+    [refused(404, 'not_found'), { kind: 'not-found' }], [sealed(404, 'not_found'), { kind: 'unknown', responded: true }],
+    [refused(403, 'step_up_required'), { kind: 'step-up' }], [refused(403, 'forbidden'), { kind: 'denied' }], [sealed(403, 'step_up_required'), { kind: 'unknown', responded: true }],
+    [refused(401, 'unauthenticated'), { kind: 'signed-out' }], [refused(429, 'rate_limited', { 'retry-after': '7' }), { kind: 'rate-limited', retryAfterSeconds: 7 }],
+    [refused(422, 'idempotency_key_reused'), { kind: 'key-reused' }],
+    [refused(400, 'invalid_request'), { kind: 'invalid' }], [refused(413, 'content_too_large'), { kind: 'invalid' }],
+    [refused(503, 'service_unavailable'), { kind: 'unknown', responded: true }], [refused(500, 'internal_error'), { kind: 'unknown', responded: true }],
+    [network(), { kind: 'unknown', responded: false }],
+  ];
+  for (const [reply, outcome] of table) {
+    const name = await rowName(reply);
+    const { calls, client } = scripted(reply);
+    assert.deepEqual(await client.withdrawCreditNote(STORE, INVOICE, WD_NOTE, KEY, WD_BODY, CSRF), outcome, name);
+    assert.equal(calls.length, 1, `${name}: one fetch`);
+  }
+  let hung = 0;
+  const hanging = createInvoiceIssuingClient({ timeoutMs: 5, fetch: (async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    hung += 1;
+    return new Promise<Response>((_resolve, reject) => { init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))); });
+  }) as typeof globalThis.fetch });
+  assert.deepEqual(await hanging.withdrawCreditNote(STORE, INVOICE, WD_NOTE, KEY, WD_BODY, CSRF), { kind: 'unknown', responded: false });
+  assert.equal(hung, 1);
 });
