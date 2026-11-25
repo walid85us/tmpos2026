@@ -1873,7 +1873,7 @@ const REQUIRED_SCENARIOS = Object.freeze([
   'SLH-01', 'SLH-02',
   'SCN-01', 'SCN-02', 'SCN-03', 'SCN-04', 'SCN-05', 'SCN-06', 'SCN-07',
   'SCN-08', 'SCN-09', 'SCN-10', 'SCN-11', 'SCN-12', 'SCN-13', 'SCN-14',
-  'SCN-15', 'SCN-16', 'SCN-17', 'SCN-18', 'SCN-19', 'SCN-20', 'SCN-21', 'SCN-22', 'SCN-23',
+  'SCN-15', 'SCN-16', 'SCN-17', 'SCN-18', 'SCN-19', 'SCN-20', 'SCN-21', 'SCN-22', 'SCN-23', 'SCN-24',
   'SCA-01', 'SCA-02', 'SCA-03', 'SCA-04', 'SCA-05',
 ]);
 const registered = new Set();
@@ -12485,7 +12485,7 @@ const CN_SAID = Object.freeze({
   errReason: 'Choose a reason.', errSummary: 'Fix the marked fields to continue.',
   reviewVoided: "This invoice was voided, so a credit note can't be issued.",
   title: 'Issue a credit note?',
-  consequence: (a) => `This creates a separate credit note and lowers what the customer owes on this invoice by ${a}. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer. You can't undo it here.`,
+  consequence: (a) => `This creates a separate credit note and reduces the amount remaining on this invoice by ${a}. The issued invoice and its total stay the same. It moves no money and returns nothing to the customer.`,
   keep: "Don't issue", close: 'Close', closeWarning: "Closing this window doesn't cancel the credit note. It may still be issued.",
   closedInFlight: 'Closed. The credit note is still being sent.',
   signInNeeded: 'Issuing a credit note needs a recent sign-in. Sign in again to continue. No credit note has been issued yet.',
@@ -14286,4 +14286,102 @@ scenario('SCA-04', 'M7B CREDIT ACTIVITY (doc 18 §8.2; shop slice AUTHORED, NOT 
   record('SCA-04', ended);
   assert.deepEqual(ended, { sent: ['GET /api/v1/session -> 401 unauthenticated'], view: null, stores: 'Your server session ended. Reconnect to see issued invoices.', reconnect: 'Reconnect' },
     'CA-15a: the role change ended the session at the next read; every activity row dropped; nothing more sent');
+}, 240_000);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// M7B-CREDITNOTES CN-P3 — the store owner withdraws an active credit note from the invoice's list (route POST
+// …/credit-notes/{id}/withdrawal). BF: the note is seeded by owner SQL as creditShop seeds every CN-P2 scenario's.
+// The literals are the shop's own (ServerIssuedInvoices.tsx WITHDRAW_TEXT; the list's reason label is CREDIT_SAID's).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const WD_SAID = Object.freeze({ open: 'Withdraw credit note…', withdrawn: 'Credit note withdrawn.' });
+const isCreditWithdrawalOf = (store, id, note) => (r) => r.method === 'POST' && r.path === `${issuedPath(store)}/${id}/credit-notes/${note}/withdrawal`;
+/** The confirmation's reason chosen as a user does (unless it already is), and its Withdraw credit note offered. */
+async function chooseWithdrawReason(page, code) {
+  const radio = by(`issued-cn-withdraw-reason-${code}`);
+  if (!(await page.evaluate(`${q(`issued-cn-withdraw-reason-${code}`)}?.checked === true`))) await page.click(radio);
+  await page.waitFor(`${q(`issued-cn-withdraw-reason-${code}`)}?.checked === true`, 5_000, `the reason ${code} chosen`);
+  await page.waitFor(`${q('issued-cn-withdraw-send')}?.getAttribute('aria-disabled') === 'false'`, 10_000, 'Withdraw credit note offered');
+}
+
+scenario('SCN-24', 'M7B-CREDITNOTES CN-P3 (B) THE OWNER WITHDRAWS AN ACTIVE CREDIT NOTE — an issued $42.00 invoice holding ONE active $12.50 credit note (CN-1, Goodwill) seeded by owner SQL; the owner opens it (Credited $12.50, Remaining $29.50, "Withdraw credit note…" on CN-1), presses it, chooses entered_in_error and confirms (signing in again first only when the server asks for it): exactly ONE POST …/credit-notes/{id}/withdrawal answered 200 with the exact body, a v4 key and the session token; "Credit note withdrawn."; the row then says Withdrawn with the reason "Entered by mistake" and no withdraw action is left; Credited and Remaining are the server\'s re-read ($0.00 / $42.00: remaining up by the credit); the database holds ONE withdrawal row (entered_in_error) and ONE withdraw audit; nothing else written', async () => {
+  const { tenant, main, boss, id, notes: [cn] } = await creditShop('p3w', ({ clerk }) => [{ gross: 1250, reason: 'goodwill', by: clerk, withdrawal: null }]);
+  const isWithdrawal = isCreditWithdrawalOf(main.id, id, cn.id);
+  const trigger = `[data-testid="issued-payments-cn-withdraw"][data-id="${cn.id}"]`;
+  const page = await voidPage(boss, main.id, 1);
+  const opened = await openVoidable(page, main.id, id, 1);
+  await creditSettled(page, main.id, opened, 1);
+  await page.waitFor(async () => (await textOf(page, 'issued-payments-remaining')) !== null, 30_000, 'the payment summary shown');
+  const before = lastPaymentAmounts(page, main.id, id);
+  const shownBefore = { credited: await textOf(page, 'issued-payments-credited'), remaining: await textOf(page, 'issued-payments-remaining') };
+  const offered = await page.evaluate(`[...document.querySelectorAll('[data-testid="issued-payments-cn-withdraw"]')].map((b) => ({ id: b.dataset.id, text: b.textContent.trim() }))`);
+  record('SCN-24', { phase: 'open', shownBefore, server: { credited: before.creditedCents, remaining: before.remainingCents }, offered: offered.length });
+  assert.deepEqual(shownBefore, { credited: usd(before.creditedCents), remaining: usd(before.remainingCents) }, 'before: Credited and Remaining are the server\'s read');
+  assert.deepEqual(shownBefore, { credited: '$12.50', remaining: '$29.50' }, 'before: the active $12.50 note is credited');
+  assert.deepEqual(offered, [{ id: cn.id, text: WD_SAID.open }], 'the owner is offered "Withdraw credit note…" on the one active note');
+
+  // The row's action: the review reads, then the confirmation opens; nothing is written before the confirm.
+  const reviewFrom = st.api.length;
+  await page.click(trigger);
+  await page.waitFor(`!!${q('issued-cn-withdraw-confirm')}`, 30_000, 'the withdrawal confirmation');
+  await page.waitFor(async () => (await focusOf(page)) === 'issued-cn-withdraw-keep', 10_000, 'Keep credit note focused first');
+  await quiet(page, reviewFrom);
+  await page.settle();
+  assert.deepEqual(sentBy(page, isWrite, reviewFrom).map(apiLine), [], 'the review sends no write');
+  const targets = await targetsOf(page, 'issued-cn-withdraw-confirm');
+  assert.ok(targets !== null && targets.count >= 3 && targets.small.length === 0 && targets.overlaps.length === 0, `the reasons are targets of 24 x 24 px at least, none overlapping ${JSON.stringify(targets)}`);
+
+  // entered_in_error, confirmed. The page signed in moments ago, so no step-up is expected; if the server asks anyway,
+  // the owner signs in again in the confirmation (as SIS-19's void) and confirms again — completing the sign-in sends nothing.
+  await chooseWithdrawReason(page, 'entered_in_error');
+  const sendFrom = st.api.length;
+  await page.click(by('issued-cn-withdraw-send'));
+  await page.waitFor(() => sentBy(page, isWithdrawal, sendFrom).some((r) => r.status !== null), 30_000, 'the withdrawal POST answered');
+  const stepUp = sentBy(page, isWithdrawal, sendFrom)[0].status === 403;
+  if (stepUp) {
+    await page.waitFor(`document.activeElement === ${q('issued-cn-withdraw-reauth-password')}`, 15_000, 'the password field focused');
+    const signAt = st.api.length;
+    await page.fill(by('issued-cn-withdraw-reauth-password'), boss.password);
+    await page.click(by('issued-cn-withdraw-reauth-confirm'));
+    await page.waitFor(`${q('issued-cn-withdraw-reauth-group')} === null && !!${q('issued-cn-withdraw-send')}`, 30_000, 'signed in again, the confirmation offered again');
+    await quiet(page, signAt);
+    await page.settle();
+    assert.equal(sentBy(page, isWithdrawal, signAt).length, 0, 'completing the sign-in sends no withdrawal');
+    await chooseWithdrawReason(page, 'entered_in_error');
+    const again = st.api.length;
+    await page.click(by('issued-cn-withdraw-send'));
+    await page.waitFor(() => sentBy(page, isWithdrawal, again).some((r) => r.status !== null), 30_000, 'the second withdrawal POST answered');
+  }
+  await page.waitFor(`!${q('issued-cn-withdraw-confirm')}`, 30_000, 'the confirmation closed');
+  await page.waitFor(async () => (await textOf(page, 'issued-payments-cn-withdraw-status')) === WD_SAID.withdrawn, 30_000, '"Credit note withdrawn." said');
+  await page.waitFor(async () => (await creditListOf(page))?.items[0]?.status === CREDIT_SAID.withdrawn, 30_000, 'the row says Withdrawn');
+  await quiet(page, sendFrom);
+  await page.settle();
+
+  const posts = sentBy(page, isWithdrawal, sendFrom);
+  record('SCN-24', { phase: 'withdrawn', stepUp, sent: sentBy(page, () => true, sendFrom).map((r) => `${r.method} ${r.path.replace(cn.id, '{note}')}${r.query} ${answered(r)}`) });
+  assert.deepEqual(posts.map(answered), stepUp ? ['403 step_up_required', '200'] : ['200'], 'exactly ONE withdrawal POST answered 200 (after the refused one only when a step-up was asked)');
+  assert.deepEqual(sentBy(page, isWrite, sendFrom).map(apiLine), posts.map(apiLine), 'no write but the withdrawal');
+  const done = posts.at(-1);
+  assert.ok(done.body === JSON.stringify({ expectedTenant: tenant, expectedVersion: 1, reason: 'entered_in_error' }), 'the withdrawal body, exactly (compared, never printed)');
+  st.secrets.add(done.headers['idempotency-key']);
+  assert.ok(V4.test(done.headers['idempotency-key']) && typeof done.headers[SESSION_CSRF] === 'string', 'a v4 idempotency key, under a session token (compared, never printed)');
+  assert.ok([isCreditListOf(main.id, id), isPaymentsOf(main.id, id)].every((m) => sentBy(page, m, sendFrom).some((r) => r.status === 200)), 'the credit notes and the payments are read again from the server after the withdrawal');
+
+  const [row] = (await creditListOf(page)).items;
+  assert.deepEqual({ id: row.id, status: row.status, reason: row.withdrawalReason, withdrawn: row.withdrawnAt !== null },
+    { id: cn.id, status: CREDIT_SAID.withdrawn, reason: CREDIT_SAID.withdrawals.entered_in_error, withdrawn: true }, 'the row: Withdrawn, "Entered by mistake", its withdrawal time');
+  assert.equal(await page.evaluate(`document.querySelectorAll('[data-testid="issued-payments-cn-withdraw"]').length`), 0, 'no withdraw action is left');
+  const after = lastPaymentAmounts(page, main.id, id);
+  const shownAfter = { credited: await textOf(page, 'issued-payments-credited'), remaining: await textOf(page, 'issued-payments-remaining') };
+  record('SCN-24', { phase: 'amounts', shownAfter, server: { credited: after.creditedCents, remaining: after.remainingCents } });
+  assert.deepEqual(shownAfter, { credited: usd(after.creditedCents), remaining: usd(after.remainingCents) }, 'after: Credited and Remaining are the server\'s re-read');
+  assert.deepEqual({ credited: after.creditedCents, remaining: after.remainingCents }, { credited: before.creditedCents - cn.gross, remaining: before.remainingCents + cn.gross }, 'the server: remaining up by the credit, credited down by it');
+  assert.deepEqual(shownAfter, { credited: '$0.00', remaining: '$42.00' }, 'after: nothing credited, the whole $42.00 remaining');
+
+  const stored = await owner`select reason_code from tmpos_invoice_credit_note.invoice_credit_note_withdrawal where credit_note_id = ${cn.id}`;
+  assert.deepEqual(Array.from(stored, (r) => r.reason_code), ['entered_in_error'], 'exactly ONE withdrawal row, entered_in_error');
+  assert.deepEqual(await creditAuditsOf(tenant), ['withdraw'], 'ONE withdraw audit (the note itself was seeded)');
+  assert.deepEqual(await creditNamedOutside(page), [], 'no button names credit or withdraw beyond the allowed ones');
+  await assertNoLeak(page);
 }, 240_000);
