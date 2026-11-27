@@ -12900,7 +12900,7 @@ scenario('SCN-08', 'M7B-CREDITNOTES CN-P2 P2-01 P2-08 P2-10 P2-11 P2-12 P2-15 P2
   assert.deepEqual(await creditAuditsOf(tenant), ['register', 'issue', 'settle'], 'the register, issue and settle audits, once each');
 
   // P2-60 CN-27b: the wording scans.
-  const words = (await creditWordsOf(page)).replaceAll('Withdraw credit note…', ''); // CN-P3: the owner's row action on the active CN-1
+  const words = (await creditWordsOf(page)).replace(/Withdraw credit note…/gi, ''); // CN-P3: the owner's row action on the active CN-1 (innerText renders it uppercase)
   assert.ok(!/\b(paid|unpaid|refunded|refund)\b/i.test(words) && !/withdraw/i.test(words), `CN-27b P2-60: no credit-note text says paid, unpaid, refunded, refund or withdraw (${words.match(/\b(paid|unpaid|refunded|refund)\b|withdraw/i)?.[0]})`);
   assert.deepEqual(await creditNamedOutside(page), [], 'P2-60: no button names credit or withdraw beyond the three allowed');
   await assertNoLeak(page);
